@@ -11,7 +11,9 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     Args:
         biotsavart (BiotSavart): BiotSavart magnetic field.
         r0 (array): (n, 3) array guessing the major radius coordinate, R, of the X-point.
+            n should exceed 2 * (2 * order + 1).
         z0 (array): (n, 3) array guessing the vertical position, Z, of the X-point.
+            n should exceed 2 * (2 * order + 1).
         nfp (int): number of field periods.
         order (int): order of the Fourier expansion.
 
@@ -23,6 +25,8 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     n = r0.size
     if n % 2 == 0:
         n+=1
+
+    assert n > 2 * (2 * order + 1), "len(r0) must be larger than 2 * (2 * order + 1)"
 
     length = 2*np.pi/nfp
     points = np.linspace(0, length, n, endpoint=False).reshape((n, 1))
@@ -118,12 +122,11 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     return ma_fp, ma_ft, ma_success
 
 if __name__ == "__main__":
-    from simsopt._core import load
-    # from star_lite_design.utils.rotate_nfp import rotate_nfp
-    design = "A"
-    iota_group_idx = 0 # 3 current groups
 
-    # load the boozer surfaces (1 per Current configuration, so 3 total.)
+    # load a design
+    from simsopt._core import load
+    design = "A"
+    iota_group_idx = 0 
     data = load(f"../designs/design{design}_after_scaled.json")
     bsurfs = data[0] # BoozerSurfaces
     x_point_curves = data[3] # X-point CurveRZFouriers
@@ -134,11 +137,11 @@ if __name__ == "__main__":
     nfp = bsurf.surface.nfp
     x_point_curve = x_point_curves[iota_group_idx] # X-point CurveRZFourier
 
-    # compute the magnetic axis
+    # compute the x point
     xyz = x_point_curve.gamma()
     r0 = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
     z0 = xyz[:, 2]
-    _, ma, succes = find_x_point(biotsavart, r0, z0, nfp, 16)
+    _, ma, succes = find_x_point(biotsavart, r0, z0, nfp, 10)
 
     # plot it
     import matplotlib.pyplot as plt
