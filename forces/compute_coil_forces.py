@@ -17,6 +17,7 @@ design = "A"
 # load the boozer surfaces (1 per Current configuration, so 3 total.)
 data = load(f"../designs/design{design}_after_scaled.json")
 bsurfs = data[0] # BoozerSurfaces
+magnetic_axis_curves = data[2] # magnetic axis CurveRZFouriers
 
 print("Design", design)
 # 3 different iota optimizations
@@ -24,6 +25,13 @@ for iota_group_idx in range(3):
     print("")
     print("iota group:", iota_group_idx)
     biotsavart = bsurfs[iota_group_idx].biotsavart
+
+    # check mean |B| on axis
+    axis_curve = magnetic_axis_curves[iota_group_idx]
+    xyz = axis_curve.gamma()
+    biotsavart.set_points(xyz)
+    modB = biotsavart.AbsB()
+    print("mean |B| on axis: %.4f"%(np.mean(modB)))
 
     coils = biotsavart.coils
     curves = [coil.curve for coil in coils]
