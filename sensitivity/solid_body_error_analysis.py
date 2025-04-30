@@ -30,8 +30,8 @@ x_point_curves = data[3] # X-point CurveRZFouriers
 
 # get the boozer surface
 bsurf = bsurfs[iota_group_idx]
-mpol = bsurf.surface.mpol
-ntor = bsurf.surface.ntor
+# mpol = bsurf.surface.mpol
+# ntor = bsurf.surface.ntor
 nfp = bsurf.surface.nfp
 iota0 = iota_Gs[iota_group_idx][0] # iota
 G0 = iota_Gs[iota_group_idx][1] # G
@@ -67,7 +67,7 @@ ntheta = len(bsurf.surface.quadpoints_theta)
 phis = np.linspace(0, 1, nphi, endpoint=False)
 thetas = np.linspace(0, 1, ntheta, endpoint=False)
 
-mpol = ntor = 10
+mpol = ntor = 8
 temp_surf = SurfaceXYZTensorFourier(
     mpol=mpol, ntor=ntor, stellsym=False, nfp=1,
     quadpoints_phi=phis, quadpoints_theta=thetas)
@@ -181,6 +181,7 @@ for i_curve in distinct_curves_idx:
         data['dof_value'] = dof_values
 
         for i_val, dof_val in enumerate(dof_values):
+            print("")
             print(f"curve {i_curve}, dof {dof}, value {dof_val}")
             # perturb curve
             c_curve.set(dof, dof_val)
@@ -194,6 +195,9 @@ for i_curve in distinct_curves_idx:
                 data['solver'].append('newton')
             else:
                 # newton failed, try LBFGS
+                print("newton failed, trying LBFGS")
+                corrected_surf.x = x0
+                corrected_bsurf.need_to_run_code = True
                 data['solver'].append('bfgs')
                 res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=1e-11, maxiter=1500, iota=iota0, G=G0, verbose=True)
 
