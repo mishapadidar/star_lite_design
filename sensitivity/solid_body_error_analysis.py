@@ -1,6 +1,6 @@
 import numpy as np
 from simsopt._core import load
-from simsopt.geo import plot, BoozerSurface, SurfaceXYZTensorFourier, Volume, boozer_surface_residual
+from simsopt.geo import plot, BoozerSurface, SurfaceXYZTensorFourier, Volume, boozer_surface_residual, curves_to_vtk
 from simsopt.field import BiotSavart, Coil, Current
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -14,10 +14,13 @@ import os
 
 
 """
-Sensitivity analysis to translation and solid body rotations of the coils.
+This script performs a sensitivity analysis of the boozer surface to the solid body
+translations and rotations of the coils. It perturbs the curves along the 5 free directions
+and computes the boozer surface for each perturbation. It then computes the metrics
+and saves the data.
 """
 
-design = "A"
+design = "B"
 iota_group_idx = 0 # 3 current groups
 
 
@@ -92,9 +95,9 @@ corrected_surf.x = temp_surf.x
 # create a boozer surface with the corrected curves
 targetlabel = bsurf.surface.volume()
 label = Volume(corrected_surf)
+options = {'verbose':True, 'newton_maxiter': 20, 'bfgs_maxiter': 1000, 'newton_tol': 1e-11, 'bfgs_tol': 1e-8}
 corrected_bsurf = BoozerSurface(corrected_biotsavart, corrected_surf, label=label, targetlabel=targetlabel, constraint_weight=1,
-                                options={'verbose':True, 'newton_maxiter': 20, 'bfgs_maxiter': 1000,
-                                         'newton_tol': 1e-11, 'bfgs_tol': 1e-8})
+                                options=options)
 
 # # sanity plot
 # ax = plt.figure().add_subplot(projection='3d')
@@ -199,7 +202,7 @@ for i_curve in distinct_curves_idx:
                 corrected_surf.x = x0
                 corrected_bsurf.need_to_run_code = True
                 data['solver'].append('bfgs')
-                res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=1e-11, maxiter=1500, iota=iota0, G=G0, verbose=True)
+                res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=options['newton_tol'], maxiter=1500, iota=iota0, G=G0, verbose=True)
 
             # boozer surface data
             data['solve_status'].append(res['success'])
@@ -222,6 +225,14 @@ for i_curve in distinct_curves_idx:
 
             is_self_intersecting = np.any([corrected_surf.is_self_intersecting(angle) for angle in np.linspace(0, 2*np.pi, 10)])
             data['is_self_intersecting'].append(is_self_intersecting)
+
+            # visualize
+            vizdir = f"./viz/design_{design}/group_{iota_group_idx}"
+            os.makedirs(vizdir, exist_ok=True)
+            corrected_surf.to_vtk(vizdir + f"/surf_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
+            curves_to_vtk(corrected_curves,vizdir + f"/curves_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
+            curves_to_vtk([ma], vizdir + f"/X_point_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
+
 
         df1 = pd.DataFrame(data)
         df = pd.concat([df, df1], ignore_index=True)
