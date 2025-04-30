@@ -18,6 +18,7 @@ for des in designs:
     # load the boozer surfaces (1 per Current configuration, so 3 total.)
     data = load(f"../designs/design{des}_after_scaled.json")
     bsurfs = data[0] # BoozerSurfaces
+    iota_Gs = data[1] # (iota, G) pairs
     magnetic_axis_curves = data[2] # magnetic axis CurveRZFouriers
 
     print("")
@@ -27,6 +28,7 @@ for des in designs:
     for iota_group_idx in range(3):
         print("")
         print("iota group:", iota_group_idx)
+        print('iota = %.4f, G = %.4f'%(iota_Gs[iota_group_idx][0], iota_Gs[iota_group_idx][1]))
         biotsavart = bsurfs[iota_group_idx].biotsavart
 
         # check mean |B| on axis
