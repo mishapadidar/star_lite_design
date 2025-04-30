@@ -138,13 +138,14 @@ free_dofs = ['translation(x)', 'translation(y)','alpha', 'beta', 'gamma']
 max_perturbation = 0.01 # [meters]
 
 # number of perturbations
-n_alphas = 10
+n_perturbations = 11 # use odd number to sample at 0.0
 
 # storage
 columns = ['curve_idx', 'dof_name', 'dof_value', 'iota', 'G',
            'x_point', 'x_point_deviation',
            'solve_status', 'qs_err',
-           'residual_mse', 'residual_max']
+           'residual_mse', 'residual_max',
+           'is_self_intersecting']
 df = pd.DataFrame(columns = columns)
 
 for i_curve, c_curve in enumerate(corrected_curves):
@@ -160,21 +161,22 @@ for i_curve, c_curve in enumerate(corrected_curves):
             dof_ub = max_perturbation / curve_radii[i_curve]
 
         # values of the dof to perturb
-        alphas = np.linspace(dof_lb, dof_ub, n_alphas) # [meters]
+        dof_values = np.linspace(dof_lb, dof_ub, n_perturbations) # [meters]
 
         data = {key: [] for key in columns}
-        data['curve_idx'] = [i_curve] * n_alphas
-        data['dof_name'] = [dof] * n_alphas
-        data['dof_value'] = alphas
+        data['curve_idx'] = [i_curve] * n_perturbations
+        data['dof_name'] = [dof] * n_perturbations
+        data['dof_value'] = dof_values
 
-        for i_alpha, alpha in enumerate(alphas):
-            print(f"curve {i_curve}, dof {dof}, alpha {alpha}")
+        for i_val, dof_val in enumerate(dof_values):
+            print(f"curve {i_curve}, dof {dof}, value {dof_val}")
+            print('dofs', c_curve.x)
             # perturb curve
-            c_curve.set(dof, alpha)
+            c_curve.set(dof, dof_val)
             
             # comute boozer surface
             # res = corrected_bsurf.run_code(iota=iota0, G=G0)
-            res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=1e-16, maxiter=1000, iota=iota0, G=G0, verbose=True)
+            res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=1e-16, maxiter=1500, iota=iota0, G=G0, verbose=True)
 
             # boozer surface data
             data['solve_status'].append(res['success'])
@@ -195,12 +197,14 @@ for i_curve, c_curve in enumerate(corrected_curves):
             data['x_point'].append(x_point_new)
             data['x_point_deviation'].append(np.linalg.norm(x_point_new - x_point_xyz[0]))
 
+            is_self_intersecting = np.any([corrected_surf.is_self_intersecting(angle) for angle in np.linspace(0, 2*np.pi, 10)])
+            data['is_self_intersecting'].append(is_self_intersecting)
+
         df1 = pd.DataFrame(data)
         df = pd.concat([df, df1], ignore_index=True)
 
         # reset dofs
         c_curve.set(dof, 0.0)
-
 
     df = df.reset_index(drop=True)
 
