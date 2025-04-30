@@ -9,7 +9,7 @@ from simsopt.geo.jit import jit
 @jit
 def apply_curve_correction_jax(shiftangles, g):
     """Apply a translation and solid body rotation to a curve,
-        g --> rotation(g - origin) + shift.
+        g --> rotation(g - origin) + shift + origin.
 
     Args:
         shiftangles (array): (9,) array. The first 3 components are the translation components,
@@ -38,7 +38,7 @@ def apply_curve_correction_jax(shiftangles, g):
         [0, +cos(gamma), -sin(gamma)],
         [0, +sin(gamma), +cos(gamma)]])
 
-    res = (g - origin[None, :]) @ (yaw @ pitch @ roll) + shift[None, :]
+    res = (g - origin[None, :]) @ (yaw @ pitch @ roll) + shift[None, :] + origin[None, :]
     return res
 
 
@@ -71,11 +71,19 @@ correction_noshift_vjp0 = jit(lambda shiftangles, gamma, v: vjp(lambda x: apply_
 correction_noshift_vjp1 = jit(lambda shiftangles, gamma, v: vjp(lambda y: apply_curve_correction_noshift_jax(shiftangles, y), gamma)[1](v)[0])
 
 class CurveCorrected(sopp.Curve, Curve):
-    """This class applies translation and solid body rotation to a curve.
-    The degrees of freedom are the 3 translation components and the 3 angles of rotation,
-        dofs = [tx, ty, tz, alpha, beta, gamma, ox,oy, oz],
-    where tx, ty, tz are the translation components and alpha, beta, gamma are the angles of rotation defining
-    the yaw, pitch and roll of the curve. ox, oy, oz are the coordinates of the origin of the rotation.
+    """This class applies translation and solid body rotation to a curve. The class rotates the curve about some origin 
+    of rotation and then translates it by the shift vector. Given a curve g(t), the transformation is
+            g(t) --> rotation(g(t) - origin) + shift + origin.
+    origin is the center about which the curve is rotated and shift is a translation vector.
+
+    The 9-degrees of freedom are,
+        ['translation(x)', 'translation(y)', 'translation(z)',
+         'alpha', 'beta', 'gamma',
+         'origin(x)', 'origin(y)', 'origin(z)'
+         ].
+    translation(x), translation(y) and translation(z) are the components of the shift vector. 
+    alpha, beta and gamma are the angles of rotation defining the yaw, pitch and roll of the curve, respectively.
+    origin(x), origin(y) and origin(z) are the coordinates of the origin of the rotation.
     """
 
     def __init__(self, curve):
@@ -85,7 +93,10 @@ class CurveCorrected(sopp.Curve, Curve):
         Curve.__init__(self, x0=np.zeros((9, )), depends_on=[curve], names=self.names)
     
     def _set_names(self):
-        self.names = ['tx', 'ty', 'tz', 'alpha', 'beta', 'gamma', 'ox', 'oy', 'oz']
+        self.names = ['translation(x)', 'translation(y)', 'translation(z)',
+                      'alpha', 'beta', 'gamma',
+                      'origin(x)', 'origin(y)', 'origin(z)'
+                      ]
 
     def recompute_bell(self, parent=None):
         self.invalidate_cache()
