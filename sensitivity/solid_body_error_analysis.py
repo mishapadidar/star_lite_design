@@ -93,7 +93,8 @@ corrected_surf.x = temp_surf.x
 targetlabel = bsurf.surface.volume()
 label = Volume(corrected_surf)
 corrected_bsurf = BoozerSurface(corrected_biotsavart, corrected_surf, label=label, targetlabel=targetlabel, constraint_weight=1,
-                                options={'verbose':True, 'newton_maxiter': 10, 'bfgs_maxiter': 1000})
+                                options={'verbose':True, 'newton_maxiter': 20, 'bfgs_maxiter': 1000,
+                                         'newton_tol': 1e-11, 'bfgs_tol': 1e-8})
 
 # # sanity plot
 # ax = plt.figure().add_subplot(projection='3d')
@@ -145,10 +146,21 @@ columns = ['curve_idx', 'dof_name', 'dof_value', 'iota', 'G',
            'x_point', 'x_point_deviation',
            'solve_status', 'qs_err',
            'residual_mse', 'residual_max',
-           'is_self_intersecting']
+           'is_self_intersecting', 'solver']
 df = pd.DataFrame(columns = columns)
 
-for i_curve, c_curve in enumerate(corrected_curves):
+# original dofs
+x0 = corrected_surf.x
+
+# indexes of distinct curves (others are symmetric to these)
+if design == "A":
+    distinct_curves_idx = [0, 1, 4]
+elif design == "B":
+    distinct_curves_idx = [0, 2]
+
+for i_curve in distinct_curves_idx:
+    c_curve = corrected_curves[i_curve]
+
     for i_dof, dof in enumerate(free_dofs):
         
         # dof bounds
@@ -170,13 +182,20 @@ for i_curve, c_curve in enumerate(corrected_curves):
 
         for i_val, dof_val in enumerate(dof_values):
             print(f"curve {i_curve}, dof {dof}, value {dof_val}")
-            print('dofs', c_curve.x)
             # perturb curve
             c_curve.set(dof, dof_val)
+
+            # reset surface dofs before solve
+            corrected_surf.x = x0
             
             # comute boozer surface
-            # res = corrected_bsurf.run_code(iota=iota0, G=G0)
-            res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=1e-16, maxiter=1500, iota=iota0, G=G0, verbose=True)
+            res = corrected_bsurf.run_code(iota=iota0, G=G0)
+            if res['success']:
+                data['solver'].append('newton')
+            else:
+                # newton failed, try LBFGS
+                data['solver'].append('bfgs')
+                res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=1e-11, maxiter=1500, iota=iota0, G=G0, verbose=True)
 
             # boozer surface data
             data['solve_status'].append(res['success'])
