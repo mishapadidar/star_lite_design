@@ -57,3 +57,11 @@ for des in designs:
         os.makedirs(outdir, exist_ok=True)
         curves_to_vtk(curves, outdir + f"/design_{des}_group_{iota_group_idx}_curves_with_forces", close=True, extra_data=pointData_forces(coils))
 
+        # write a text file with the coil positions and forces
+        with open(outdir + f"/design_{des}_group_{iota_group_idx}_coil_forces.txt", "w") as f:
+            f.write("Coil Index, Position (x, y, z), Force Vector (Fx, Fy, Fz)\n")
+            for ii, c in enumerate(coils):
+                positions = c.curve.gamma() # (n, 3)
+                forces = coil_force(c, coils, regularization_circ(minor_radius)) # (n, 3)
+                for pos, force in zip(positions, forces):
+                    f.write(f"{ii}, {pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f}, {force[0]:.6f}, {force[1]:.6f}, {force[2]:.6f}\n")
