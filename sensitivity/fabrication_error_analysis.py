@@ -22,7 +22,7 @@ It perturbs the coils by a gaussian process, computes the boozer surface, perfor
 and then save the results.
 """
 
-design = "B"
+design = "A"
 iota_group_idx = 0 # 3 current groups
 
 
@@ -62,10 +62,9 @@ elif design == "B":
     base_currents = [currents[0], currents[2]]
 
 
-# fix all current
+# fix the coil dofs.
 bsurf.unfix_all()
-for c in currents:
-    c.fix_all()
+biotsavart.fix_all()
 
 """ 
 Build a non stellsym boozer surface with one field period.
@@ -130,7 +129,7 @@ Sensitivity analysis of the boozer surface to fabrication errors.
 """
 
 # sampler parameters
-n_samples = 16
+n_samples = 128
 sigmas = [0.001, 0.005, 0.01] # amplitude [meters]
 lengthscale = 0.03 # [0.03,0.1] is reasonable
 
@@ -164,12 +163,14 @@ for sigma in sigmas:
         # reset coil and surface dofs
         surf_ft.x = x0_surf_ft
 
+        # TODO: evaluate the effect on each current group (just loop over them!)
+
         # TODO: do systematic perturbations
         # # first add the 'systematic' error
         # base_curves_perturbed = [CurvePerturbed(c, PerturbationSample(sampler, randomgen=rg)) for c in base_curves]
         # coils = coils_via_symmetries(base_curves_perturbed, base_currents, surf_ft.nfp, True)
 
-        # now add the 'statistical' error.
+        # now add the 'statistical' error to the original coils
         coils_pert = [Coil(CurvePerturbed(c.curve, PerturbationSample(sampler, randomgen=rg)), c.current) for c in coils]
         curves_pert = [c.curve for c in coils_pert]
         biotsavart_pert = BiotSavart(coils_pert)
