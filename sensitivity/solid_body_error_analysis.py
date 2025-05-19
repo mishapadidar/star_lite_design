@@ -11,7 +11,6 @@ from star_lite_design.utils.rotate_nfp import rotate_nfp
 from star_lite_design.utils.find_x_point import find_x_point
 from star_lite_design.utils.nonQS import nonQS
 from star_lite_design.utils.stage_2 import stage_2_normal_field_only, stage_2_with_distance_penalties
-# from star_lite_design.utils.create_equally_spaced_circular_coils import create_equally_spaced_circular_coils
 import pandas as pd
 import os
 
