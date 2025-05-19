@@ -1,6 +1,7 @@
 import numpy as np
 from simsopt._core import load
-from simsopt.geo import plot, BoozerSurface, SurfaceXYZTensorFourier, Volume, boozer_surface_residual, curves_to_vtk
+from simsopt.geo import (plot, BoozerSurface, SurfaceXYZTensorFourier, Volume, 
+                         boozer_surface_residual, curves_to_vtk, create_equally_spaced_planar_curves)
 from simsopt.objectives import SquaredFlux
 from simsopt.field import BiotSavart, Coil, Current
 import matplotlib.pyplot as plt
@@ -9,7 +10,8 @@ from star_lite_design.utils.curvecorrected import CurveCorrected
 from star_lite_design.utils.rotate_nfp import rotate_nfp
 from star_lite_design.utils.find_x_point import find_x_point
 from star_lite_design.utils.nonQS import nonQS
-from star_lite_design.utils.stage_2 import stage_2_currents_only
+from star_lite_design.utils.stage_2 import stage_2_normal_field_only, stage_2_with_distance_penalties
+# from star_lite_design.utils.create_equally_spaced_circular_coils import create_equally_spaced_circular_coils
 import pandas as pd
 import os
 
@@ -101,12 +103,6 @@ options = {'verbose':True, 'newton_maxiter': 20, 'bfgs_maxiter': 1000, 'newton_t
 corrected_bsurf = BoozerSurface(corrected_biotsavart, corrected_surf, label=label, targetlabel=targetlabel, constraint_weight=1,
                                 options=options)
 
-# # sanity plot
-# ax = plt.figure().add_subplot(projection='3d')
-# plot([bsurf.surface], alpha=0.3, show=False, ax=ax)
-# plot([corrected_surf], alpha=0.3, show=False, ax=ax)
-# plt.show()
-
 # set the origins to be the curve centroids
 curve_radii = np.zeros(len(corrected_curves))
 for ii, c_curve in enumerate(corrected_curves):
@@ -129,11 +125,50 @@ for ii, c_curve in enumerate(corrected_curves):
     dist = np.linalg.norm(g - centroid[None, :], axis=-1)
     curve_radii[ii] = np.sum(dist * dl) / np.sum(dl)
 
+""" Build the circular coils for correction """
+
+# initialize the circular curves
+planar_curves = create_equally_spaced_planar_curves(ncurves=len(coils), nfp=1, stellsym=False,
+                                    R0=corrected_surf.major_radius(), 
+                                    R1=5 * corrected_surf.minor_radius(), order=1, numquadpoints=31)
+for curve in planar_curves:
+    # fix the first order modes to get a circle
+    curve.set('x1', 0.0)
+    curve.fix('x1')
+    curve.set('x2', 0.0)
+    curve.fix('x2')
+
+    # TODO: set bounds so they dont intersect
+    # curve.set_lower_bound('x7',value)
+    # curve.set_lower_bound('x8',value)
+    # curve.set_lower_bound('x9',value)
+
+planar_currents = [1e5 * Current(0.0) for ii in range(len(planar_curves))]
+planar_coils = [Coil(c, i) for c, i in zip(planar_curves, planar_currents)]
+planar_biotsavart = BiotSavart(planar_coils)
+
+
+total_biotsavart = BiotSavart(corrected_coils + planar_coils)
+total_bsurf = BoozerSurface(total_biotsavart, corrected_surf, label=label, targetlabel=targetlabel, constraint_weight=1,
+                                options=options)
+
+
+# sanity plot
+ax = plt.figure().add_subplot(projection='3d')
+plot([bsurf.surface], alpha=0.3, show=False, ax=ax)
+plot([corrected_surf], alpha=0.3, show=False, ax=ax)
+plot(corrected_curves, alpha=1, show=False, ax=ax)
+plot(planar_curves, alpha=1, show=False, ax=ax)
+ax.set_xlim(-0.8, 0.8)
+ax.set_ylim(-0.8, 0.8)
+ax.set_zlim(-0.8, 0.8)
+plt.show()
+
 
 """ Compute the original (unperturbed) surface """
 
 
-# comute boozer surface
+# compute boozer surface
 res = corrected_bsurf.run_code(iota=iota0, G=G0)
 
 # keep surface dofs;
@@ -144,13 +179,15 @@ corrected_biotsavart.unfix_all()
 x0_bs = corrected_biotsavart.x
 corrected_biotsavart.fix_all()
 
+# initial planar curve dofs
+x0_pbs = planar_biotsavart.x
+
 """ 
 For each corrected curve. Perturb the curve along the 5 free directions.
 Compute the boozer surface. 
 Compute metrics.
 save data.
 """
-
 
 # admissible directions
 free_dofs = ['translation(x)', 'translation(y)','alpha', 'beta', 'gamma']
@@ -160,7 +197,8 @@ free_dofs = ['translation(x)', 'translation(y)','alpha', 'beta', 'gamma']
 max_perturbation = 0.01 # [meters]
 
 # number of perturbations
-n_perturbations = 3 # use odd number to sample at 0.0
+n_perturbations = 7 # use odd number to sample at 0.0
+
 
 # storage
 suffix = "_stage2"
@@ -175,7 +213,8 @@ columns = ['curve_idx', 'dof_name', 'dof_value',
            'solve_status'+suffix, 'qs_err'+suffix, 'squared_flux'+suffix,
            'residual_mse'+suffix, 'residual_max'+suffix,
            'is_self_intersecting'+suffix, 'solver'+suffix,
-           'squared_flux_with_original_surf'+suffix]
+           'squared_flux_with_original_surf'+suffix,
+           'stage_2_solve_status']
 df = pd.DataFrame(columns = columns)
 
 
@@ -217,6 +256,9 @@ for i_curve in distinct_curves_idx:
             corrected_biotsavart.unfix_all()
             corrected_biotsavart.x = x0_bs
             corrected_biotsavart.fix_all()
+
+            # reset planar curve dofs
+            planar_biotsavart.x = x0_pbs
 
             # perturb curve
             c_curve.set(dof, dof_val)
@@ -265,17 +307,11 @@ for i_curve in distinct_curves_idx:
             data['squared_flux'].append(Jf.J())
             print("squared_flux", data['squared_flux'][-1])
 
-            # visualize
-            vizdir = f"./viz/solid_body_analysis/design_{design}/group_{iota_group_idx}"
-            os.makedirs(vizdir, exist_ok=True)
-            corrected_surf.to_vtk(vizdir + f"/surf_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
-            curves_to_vtk(corrected_curves,vizdir + f"/curves_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
-            curves_to_vtk([ma], vizdir + f"/X_point_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
 
             """ Run a stage-2 optimization to correct errorsby varying the coil currents """
             print('stage-2 optimization')
 
-            # fix dofs besides the some currents
+            # fix dofs besides some currents
             corrected_biotsavart.fix_all()
             for ii in distinct_curves_idx[1:]:
                 corrected_currents[ii].unfix_all()
@@ -284,25 +320,26 @@ for i_curve in distinct_curves_idx:
             corrected_surf.x = x0_surf
 
             # run stage-2
-            corrected_biotsavart, _ = stage_2_currents_only(corrected_surf, corrected_biotsavart)
+            total_biotsavart, ress = stage_2_with_distance_penalties(corrected_surf, total_biotsavart, cc_dist = 0.15, cs_dist = 0.15)
             corrected_biotsavart.fix_all()
+            data['stage_2_solve_status'].append(ress['success'])
 
             # squared flux with original surface
-            Jf = SquaredFlux(corrected_surf, corrected_biotsavart)
+            Jf = SquaredFlux(corrected_surf, total_biotsavart)
             data['squared_flux_with_original_surf' + suffix].append(Jf.J())
             print("squared_flux_with_original_surf", data['squared_flux_with_original_surf' + suffix][-1])
             
             # comute boozer surface
-            res = corrected_bsurf.run_code(iota=iota0, G=G0)
+            res = total_bsurf.run_code(iota=iota0, G=G0)
             if res['success']:
                 data['solver' + suffix].append('newton')
             else:
                 # newton failed, try LBFGS
                 print("newton failed, trying LBFGS")
                 corrected_surf.x = x0_surf
-                corrected_bsurf.need_to_run_code = True
+                total_bsurf.need_to_run_code = True
                 data['solver' + suffix].append('bfgs')
-                res = corrected_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=options['newton_tol'], maxiter=1500, iota=iota0, G=G0, verbose=True)
+                res = total_bsurf.minimize_boozer_penalty_constraints_LBFGS(tol=options['newton_tol'], maxiter=1500, iota=iota0, G=G0, verbose=True)
 
             # boozer surface data
             data['solve_status' + suffix].append(res['success'])
@@ -310,16 +347,16 @@ for i_curve in distinct_curves_idx:
             data['G' + suffix].append(res['G'])
 
             # get boozer residual
-            residuals = boozer_surface_residual(corrected_bsurf.surface, res['iota'], res['G'], corrected_biotsavart)[0]
+            residuals = boozer_surface_residual(total_bsurf.surface, res['iota'], res['G'], total_biotsavart)[0]
             data['residual_mse' + suffix] = np.mean(residuals**2)
             data['residual_max' + suffix] = np.max(np.abs(residuals))
 
             # compute QS metric
-            data['qs_err' + suffix].append(np.sqrt(nonQS(corrected_surf, corrected_biotsavart)))
+            data['qs_err' + suffix].append(np.sqrt(nonQS(corrected_surf, total_biotsavart)))
             print("qs_err", data['qs_err' + suffix][-1])
 
             # get x-point position
-            _, ma, ma_success = find_x_point(corrected_biotsavart, x_point_r0, x_point_z0, nfp, 10)
+            _, ma, ma_success = find_x_point(total_biotsavart, x_point_r0, x_point_z0, nfp, 10)
             x_point_new = ma.gamma()[0] # phi = 0 X-point
             data['x_point' + suffix].append(x_point_new)
             data['x_point_deviation' + suffix].append(np.linalg.norm(x_point_new - x_point_xyz[0]))
@@ -329,8 +366,27 @@ for i_curve in distinct_curves_idx:
             data['is_self_intersecting' + suffix].append(is_self_intersecting)
             
             # squared flux
-            Jf = SquaredFlux(corrected_surf, corrected_biotsavart)
+            Jf = SquaredFlux(corrected_surf, total_biotsavart)
             data['squared_flux' + suffix].append(Jf.J())
+
+            # visualize
+            vizdir = f"./viz/solid_body_analysis/design_{design}/group_{iota_group_idx}"
+            os.makedirs(vizdir, exist_ok=True)
+            corrected_surf.to_vtk(vizdir + f"/surf_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
+            curves_to_vtk(corrected_curves,vizdir + f"/curves_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
+            curves_to_vtk([ma], vizdir + f"/X_point_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
+
+
+            # # TODO: remove
+            # # sanity plot
+            # ax = plt.figure().add_subplot(projection='3d')
+            # plot([corrected_surf], alpha=0.3, show=False, ax=ax)
+            # plot(corrected_curves, alpha=1, show=False, ax=ax)
+            # plot(planar_curves, alpha=1, show=False, ax=ax)
+            # ax.set_xlim(-0.8, 0.8)
+            # ax.set_ylim(-0.8, 0.8)
+            # ax.set_zlim(-0.8, 0.8)
+            # plt.show()
 
 
         df1 = pd.DataFrame(data)
