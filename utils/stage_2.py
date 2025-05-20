@@ -47,7 +47,8 @@ def stage_2_normal_field_only(surf, biotsavart):
 def stage_2_with_distance_penalties(surf, biotsavart, cc_dist = 0.15, cs_dist = 0.15):
     """
     Stage-II optimization of the normal field error and distance penalties, 
-        min quadratic_flux + coil_coil_distance + coil_surface_distance + linking_number
+        min quadratic_flux + coil_coil_distance + coil_surface_distance 
+        s.t lb < x < ub
 
     Parameters
     ----------
@@ -72,19 +73,24 @@ def stage_2_with_distance_penalties(surf, biotsavart, cc_dist = 0.15, cs_dist = 
 
     # objective
     # Jtotal = Jf + 10*(Jccdist + Jcsdist + Jlink)
-    Jtotal = Jf + 10*(Jccdist + Jcsdist)
+    Jtotal = Jf + (Jccdist + Jcsdist)
+
     def fun(dofs):
         # use only biotsavart dofs
         biotsavart.x = dofs
-        J = Jtotal.J()
-        grad = Jtotal.dJ()
         return Jtotal.J(), Jtotal.dJ()
     
     dofs = biotsavart.x
+    lb = biotsavart.lower_bounds
+    ub = biotsavart.upper_bounds
+    from scipy.optimize import Bounds
+    bounds = Bounds(lb,ub)
 
     # solve
-    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': 2000, 'maxcor': 300, 'gtol':1e-16, 'ftol':1e-16}, tol=1e-15)
+    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, 
+                   options={'maxiter': 2000, 'maxcor': 300, 'gtol':1e-16, 'ftol':1e-16}, tol=1e-15)
 
     biotsavart.x = res.x
+
 
     return biotsavart, res

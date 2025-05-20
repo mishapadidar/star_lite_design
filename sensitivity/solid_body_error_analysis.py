@@ -127,20 +127,56 @@ for ii, c_curve in enumerate(corrected_curves):
 """ Build the circular coils for correction """
 
 # initialize the circular curves
+R0 = corrected_surf.major_radius()
+R1 = corrected_surf.minor_radius()
 planar_curves = create_equally_spaced_planar_curves(ncurves=len(coils), nfp=1, stellsym=False,
-                                    R0=corrected_surf.major_radius(), 
-                                    R1=5 * corrected_surf.minor_radius(), order=1, numquadpoints=31)
-for curve in planar_curves:
-    # fix the first order modes to get a circle
-    curve.set('x1', 0.0)
-    curve.fix('x1')
-    curve.set('x2', 0.0)
-    curve.fix('x2')
+                                    R0=R0, 
+                                    R1=6 * R1, order=0, numquadpoints=31)
 
-    # TODO: set bounds so they dont intersect
-    # curve.set_lower_bound('x7',value)
-    # curve.set_lower_bound('x8',value)
-    # curve.set_lower_bound('x9',value)
+# move the planar curves in design A
+if design == "A":
+    R0 = corrected_surf.major_radius()
+    for kk, curve in enumerate(planar_curves):
+        angle = (kk + 0.5)*(2*np.pi) / (len(planar_curves)) + np.pi / len(planar_curves)
+        curve.set('x2', -np.cos(angle))
+        curve.set('x3', -np.sin(angle))
+        curve.set('x5', R0 * np.cos(angle))
+        curve.set('x6', R0 * np.sin(angle))
+
+
+for curve in planar_curves:
+
+    # # fix center and tilt of circular coils, i.e. only vary radius and current
+    # curve.fix('x1')
+    # curve.fix('x2')
+    # curve.fix('x3')
+    # curve.fix('x4')
+    # curve.fix('x5')
+    # curve.fix('x6')
+    # curve.fix('x7')
+    
+    # bounds on coil radius
+    curve.set_lower_bound('x0', 2.0 * R1)
+    curve.set_upper_bound('x0', R0)
+    # bounds on tilt
+    curve.set_lower_bound('x1', curve.get('x1') - 0.2)
+    curve.set_upper_bound('x1', curve.get('x1') + 0.2)
+    curve.set_lower_bound('x2', curve.get('x2') - 0.2)
+    curve.set_upper_bound('x2', curve.get('x2') + 0.2)
+    curve.set_lower_bound('x3', curve.get('x3') - 0.2)
+    curve.set_upper_bound('x3', curve.get('x3') + 0.2)
+    curve.set_lower_bound('x4', curve.get('x4') - 0.2)
+    curve.set_upper_bound('x4', curve.get('x4') + 0.2)
+    # bounds on center
+    curve.set_lower_bound('x5', curve.get('x5') - 0.2 * R1)
+    curve.set_upper_bound('x5', curve.get('x5') + 0.2 * R1)
+    curve.set_lower_bound('x6', curve.get('x6') - 0.2 * R1)
+    curve.set_upper_bound('x6', curve.get('x6') + 0.2 * R1)
+    curve.set_lower_bound('x7', curve.get('x7') - 0.2 * R1)
+    curve.set_upper_bound('x7', curve.get('x7') + 0.2 * R1)
+
+
+
 
 planar_currents = [1e5 * Current(0.0) for ii in range(len(planar_curves))]
 planar_coils = [Coil(c, i) for c, i in zip(planar_curves, planar_currents)]
@@ -152,16 +188,16 @@ total_bsurf = BoozerSurface(total_biotsavart, corrected_surf, label=label, targe
                                 options=options)
 
 
-# sanity plot
-ax = plt.figure().add_subplot(projection='3d')
-plot([bsurf.surface], alpha=0.3, show=False, ax=ax)
-plot([corrected_surf], alpha=0.3, show=False, ax=ax)
-plot(corrected_curves, alpha=1, show=False, ax=ax)
-plot(planar_curves, alpha=1, show=False, ax=ax)
-ax.set_xlim(-0.8, 0.8)
-ax.set_ylim(-0.8, 0.8)
-ax.set_zlim(-0.8, 0.8)
-plt.show()
+# # sanity plot
+# ax = plt.figure().add_subplot(projection='3d')
+# plot([bsurf.surface], alpha=0.3, show=False, ax=ax)
+# plot([corrected_surf], alpha=0.3, show=False, ax=ax)
+# plot(corrected_curves, alpha=1, show=False, ax=ax)
+# plot(planar_curves, alpha=1, show=False, ax=ax)
+# ax.set_xlim(-0.8, 0.8)
+# ax.set_ylim(-0.8, 0.8)
+# ax.set_zlim(-0.8, 0.8)
+# plt.show()
 
 
 """ Compute the original (unperturbed) surface """
@@ -190,6 +226,7 @@ save data.
 
 # admissible directions
 free_dofs = ['translation(x)', 'translation(y)','alpha', 'beta', 'gamma']
+
 
 
 # bounds on the perturbations
@@ -284,8 +321,8 @@ for i_curve in distinct_curves_idx:
 
             # get boozer residual
             residuals = boozer_surface_residual(corrected_bsurf.surface, res['iota'], res['G'], corrected_biotsavart)[0]
-            data['residual_mse'] = np.mean(residuals**2)
-            data['residual_max'] = np.max(np.abs(residuals))
+            data['residual_mse'].append(np.mean(residuals**2))
+            data['residual_max'].append(np.max(np.abs(residuals)))
 
             # compute QS metric
             data['qs_err'].append(np.sqrt(nonQS(corrected_surf, corrected_biotsavart)))
@@ -322,12 +359,26 @@ for i_curve in distinct_curves_idx:
             total_biotsavart, ress = stage_2_with_distance_penalties(corrected_surf, total_biotsavart, cc_dist = 0.15, cs_dist = 0.15)
             corrected_biotsavart.fix_all()
             data['stage_2_solve_status'].append(ress['success'])
+            
+            # # TODO: remove
+            # print(ress)
+
+            # # TODO: remove
+            # # sanity plot
+            # ax = plt.figure().add_subplot(projection='3d')
+            # plot([corrected_surf], alpha=0.3, show=False, ax=ax)
+            # plot(corrected_curves, alpha=1, show=False, ax=ax)
+            # plot(planar_curves, alpha=1, show=False, ax=ax)
+            # ax.set_xlim(-0.8, 0.8)
+            # ax.set_ylim(-0.8, 0.8)
+            # ax.set_zlim(-0.8, 0.8)
+            # plt.show()
 
             # squared flux with original surface
             Jf = SquaredFlux(corrected_surf, total_biotsavart)
             data['squared_flux_with_original_surf' + suffix].append(Jf.J())
             print("squared_flux_with_original_surf", data['squared_flux_with_original_surf' + suffix][-1])
-            
+
             # comute boozer surface
             res = total_bsurf.run_code(iota=iota0, G=G0)
             if res['success']:
@@ -347,8 +398,9 @@ for i_curve in distinct_curves_idx:
 
             # get boozer residual
             residuals = boozer_surface_residual(total_bsurf.surface, res['iota'], res['G'], total_biotsavart)[0]
-            data['residual_mse' + suffix] = np.mean(residuals**2)
-            data['residual_max' + suffix] = np.max(np.abs(residuals))
+            data['residual_mse' + suffix].append(np.mean(residuals**2))
+            data['residual_max' + suffix].append(np.max(np.abs(residuals)))
+            print("residual_mse", data['residual_mse' + suffix][-1])
 
             # compute QS metric
             data['qs_err' + suffix].append(np.sqrt(nonQS(corrected_surf, total_biotsavart)))
@@ -376,7 +428,6 @@ for i_curve in distinct_curves_idx:
             curves_to_vtk([ma], vizdir + f"/X_point_design_{design}_group_{iota_group_idx}_curve_{i_curve}_dof_{dof}_val_{dof_val}")
 
 
-            # # TODO: remove
             # # sanity plot
             # ax = plt.figure().add_subplot(projection='3d')
             # plot([corrected_surf], alpha=0.3, show=False, ax=ax)
@@ -386,6 +437,9 @@ for i_curve in distinct_curves_idx:
             # ax.set_ylim(-0.8, 0.8)
             # ax.set_zlim(-0.8, 0.8)
             # plt.show()
+
+            # # TODO: remove
+            # quit()
 
 
         df1 = pd.DataFrame(data)
