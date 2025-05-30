@@ -141,7 +141,7 @@ design = 'B' # A or B
 data = load(f"../designs/design{design}_after_scaled.json")
 boozer_surfaces = data[0] # BoozerSurfaces
 iota_Gs = data[1] # (iota, G) pairs
-# axis_curves = data[2] # magnetic axis CurveRZFouriers
+axis_curves = data[2] # magnetic axis CurveRZFouriers
 # x_point_curves = data[3] # X-point CurveRZFouriers
 
 for ii, bsurf in enumerate(boozer_surfaces):
@@ -177,7 +177,8 @@ elif design == "B":
     base_curve_idx = [0, 2]
     base_curves = [curves[i] for i in base_curve_idx]
 
-
+# target value of axis field for rescaling
+B_axis_target = 0.0875
 
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
 mr = MajorRadius(boozer_surfaces[0])
@@ -253,6 +254,17 @@ JF = (J_nonQSRatio + IOTAS_WEIGHT * J_iotas + MR_WEIGHT * J_major_radius
     + BR_WEIGHT * Jbrs
     + FORCE_WEIGHT * Jforce
     )
+
+
+# fix some currents
+for bbsurf in boozer_surfaces:
+    bbsurf.biotsavart.coils[base_curve_idx[0]].current.fix_all()
+    dn = bbsurf.biotsavart.dof_names
+    print('free currents:', [c for c in dn if 'current' in c.lower() ])
+
+print("n_dofs", len(bbsurf.x))
+
+
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
 for idx, boozer_surface in enumerate(boozer_surfaces):
@@ -361,7 +373,7 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER = 500
+MAXITER = 1000
 n_restarts = 1
 
 for restart in range(n_restarts):
@@ -371,11 +383,44 @@ for restart in range(n_restarts):
     #res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
     print(res.message)
 
+    # rescale currents to achieve target axis field
+    print("")
+    print('Rescaling currents to achieve target axis field:', B_axis_target)
+    for ii, bbsurf in enumerate(boozer_surfaces):
+        # compute axis
+        N_axis=121
+        curve_stellsym=False
+        nfp=2
+        order=16
+        r0 = 0.55967771 * np.ones(N_axis)
+        z0 = 0.15932784 * np.ones(N_axis)
+        xp0_fp, xp0_ft, x_success, rx0, zx0= find_magnetic_axis(boozer_surfaces[ii].biotsavart, r0, z0, nfp, order, curve_stellsym)
+        xyz = xp0_fp.gamma()
+        # compute B on axis
+        bbsurf.biotsavart.set_points(xyz)
+        B_axis = boozer_surfaces[ii].biotsavart.B()
+        B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
+        # rescale currents
+        scale = B_axis_target / B_mean
+        # change current
+        for jj in base_curve_idx:
+            bbsurf.biotsavart.coils[jj].current.unfix_all()
+            bbsurf.biotsavart.coils[jj].current.x = scale * bbsurf.biotsavart.coils[jj].current.x
+
+        B_axis = boozer_surfaces[ii].biotsavart.B()
+        B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
+        print('Axis field after scaling', B_mean)
+
     curves_to_vtk(curves, OUT_DIR + "curves_opt")
     for idx, boozer_surface in enumerate(boozer_surfaces):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}")
     save([boozer_surfaces, coils_list], OUT_DIR + 'opt.json')
 
+
+
+
+
+print("")
 print("End of optimization")
 print("================================")
 
