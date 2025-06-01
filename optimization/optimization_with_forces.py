@@ -211,7 +211,7 @@ BR_WEIGHT=1e7
 
 coil_minor_radius = 0.054 # 54mm
 force_order = 2 
-FORCE_WEIGHT = 1e-12
+FORCE_WEIGHT = 1e-10
 
 LENGTH_THRESHOLD = 4.0
 J_major_radius = QuadraticPenalty(mr, 0.5, 'identity')  # target major radius is that computed on the initial surface
@@ -360,13 +360,16 @@ print("""
 """)
 print("Initial objective function value: %.2e"%(JF.J()))
 print('J_nonQSRatio = %.2e'%(J_nonQSRatio.J()))
+print("Jforce value: %.2e"%(Jforce.J()))
 # print out coil forces
 for iota_group, bbsurf in enumerate(boozer_surfaces):
+    total = 0
     for ii in base_curve_idx:
         force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
         # print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
-        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}")
-
+        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}; mean_squared force on coil {np.mean((force**2)):.2f}")
+        total += np.mean((force**2))
+    print(f"group {iota_group}; total mean squared force on coils {total:.2f}")
 
 
 print("""
@@ -375,7 +378,7 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER = 2000
+MAXITER = 100
 n_restarts = 1
 
 for restart in range(n_restarts):
@@ -434,12 +437,16 @@ print("""
 """)
 print("Final objective function value: %.2e"%(JF.J()))
 print('J_nonQSRatio = %.2e'%(J_nonQSRatio.J()))
+print("Jforce value: %.2e"%(Jforce.J()))
 # print out coil forces
 for iota_group, bbsurf in enumerate(boozer_surfaces):
+    total = 0
     for ii in base_curve_idx:
         force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
         # print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
-        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}")
+        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}; mean_squared force on coil {np.mean((force**2)):.2f}")
+        total += np.mean((force**2))
+    print(f"group {iota_group}; total mean squared force on coils {total:.2f}")
 
 
 # print("""
