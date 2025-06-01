@@ -364,7 +364,8 @@ print('J_nonQSRatio = %.2e'%(J_nonQSRatio.J()))
 for iota_group, bbsurf in enumerate(boozer_surfaces):
     for ii in base_curve_idx:
         force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
-        print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
+        # print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
+        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}")
 
 
 
@@ -437,7 +438,8 @@ print('J_nonQSRatio = %.2e'%(J_nonQSRatio.J()))
 for iota_group, bbsurf in enumerate(boozer_surfaces):
     for ii in base_curve_idx:
         force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
-        print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
+        # print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
+        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}")
 
 
 # print("""
