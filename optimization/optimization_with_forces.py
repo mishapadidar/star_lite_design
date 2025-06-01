@@ -209,8 +209,9 @@ MR_WEIGHT=1e3
 
 BR_WEIGHT=1e7
 
-FORCE_WEIGHT = 5e-12
 coil_minor_radius = 0.054 # 54mm
+force_order = 2 
+FORCE_WEIGHT = 1e-12
 
 LENGTH_THRESHOLD = 4.0
 J_major_radius = QuadraticPenalty(mr, 0.5, 'identity')  # target major radius is that computed on the initial surface
@@ -231,7 +232,7 @@ Jal = sum(ArclengthVariation(curve) for curve in base_curves)
 coil_force_list = []
 for bbsurf in boozer_surfaces:
     # only compute force on base coils
-    coil_force_list += [LpCurveForce(bbsurf.biotsavart.coils[i], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius), p=2) for i in base_curve_idx]
+    coil_force_list += [LpCurveForce(bbsurf.biotsavart.coils[i], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius), p=force_order) for i in base_curve_idx]
 Jforce = sum(coil_force_list)
 
 length_penalty = LENGTH_WEIGHT * sum([QuadraticPenalty(Jl, LENGTH_THRESHOLD, "max") for Jl in Jls])
@@ -373,7 +374,7 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER = 1000
+MAXITER = 2000
 n_restarts = 1
 
 for restart in range(n_restarts):
