@@ -22,6 +22,7 @@ from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoozerSurfaceDistance
 from simsopt.field.selffield import regularization_circ
 from simsopt.field.force import coil_force, LpCurveForce
+from axis_field_strength_penalty import AxisFieldStrengthPenalty
 
 def find_magnetic_axis(biotsavart, r0, z0, nfp, order, stellsym):
     from scipy.spatial.distance import cdist
@@ -166,6 +167,7 @@ for bs in bs_list:
     xp0_fp, xp0_ft, x_success, rx0, zx0= find_magnetic_axis(bs, r0, z0, nfp, order, curve_stellsym)
     xpoints.append([rx0, zx0])
 
+
 # get the base curves
 biotsavart = boozer_surfaces[0].biotsavart
 coils = biotsavart.coils
@@ -211,7 +213,7 @@ BR_WEIGHT=1e7
 
 coil_minor_radius = 0.054 # 54mm
 force_order = 2 
-FORCE_WEIGHT = 1e-10
+FORCE_WEIGHT = 1e-11
 
 LENGTH_THRESHOLD = 4.0
 J_major_radius = QuadraticPenalty(mr, 0.5, 'identity')  # target major radius is that computed on the initial surface
@@ -242,6 +244,10 @@ curvature_penalty = CURVATURE_WEIGHT * sum(Jcs)
 msc_penalty = MSC_WEIGHT * sum(QuadraticPenalty(J, MSC_THRESHOLD, "max") for J in Jmscs)
 Jbrs = sum(brs)
 
+# penalty on deviation from target mean field strength
+AFS_WEIGHT = 1000.0
+Jafs = sum([AxisFieldStrengthPenalty(boozer_surfaces[ii].biotsavart, axis_curves[ii].gamma(), B_target=B_axis_target) for ii in range(len(boozer_surfaces))])
+
 
 
 # sum the objectives together
@@ -254,8 +260,31 @@ JF = (J_nonQSRatio + IOTAS_WEIGHT * J_iotas + MR_WEIGHT * J_major_radius
     + AL_WEIGHT * Jal
     + BR_WEIGHT * Jbrs
     + FORCE_WEIGHT * Jforce
+    + AFS_WEIGHT * Jafs
     )
 
+
+# rescale currents to achieve target axis field
+print("")
+print('Rescaling currents to achieve target axis field:', B_axis_target)
+for ii, bbsurf in enumerate(boozer_surfaces):
+    xyz = axis_curves[ii].gamma()
+
+    # compute B on axis
+    bbsurf.biotsavart.set_points(xyz)
+    B_axis = boozer_surfaces[ii].biotsavart.B()
+    B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
+    print('Axis field before scaling', B_mean)
+    # rescale currents
+    scale = B_axis_target / B_mean
+    # change current
+    for jj in base_curve_idx:
+        bbsurf.biotsavart.coils[jj].current.unfix_all()
+        bbsurf.biotsavart.coils[jj].current.x = scale * bbsurf.biotsavart.coils[jj].current.x
+
+    B_axis = boozer_surfaces[ii].biotsavart.B()
+    B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
+    print('Axis field after scaling', B_mean)
 
 # fix some currents
 for bbsurf in boozer_surfaces:
@@ -288,6 +317,7 @@ def callback(dofs):
 
     outstr = f"J={dat_dict['J']:.1e}, J_nonQSRatio={J_nonQSRatio.J():.2e}, mr={mr.J():.2e} ({J_major_radius.J()*MR_WEIGHT:.1e})"
     outstr += f", Jforce={Jforce.J():.2e}"
+    outstr += f", Jafs={Jafs.J():.2e} ({AFS_WEIGHT*Jafs.J():.1e})"
     iota_string = ", ".join([f"{res['iota']:.3f}" for res in res_list])
     cl_string = ", ".join([f"{J.J():.1f}" for J in Jls])
     kap_string = ", ".join(f"{np.max(c.kappa()):.1f}" for c in base_curves)
@@ -333,24 +363,25 @@ def fun(dofs):
     return J, grad
 
 
-#print("""
-#################################################################################
-#### Perform a Taylor test ######################################################
-#################################################################################
-#""")
-#f = fun
-#dofs = JF.x.copy()
-#np.random.seed(1)
-#h = np.loadtxt(OUT_DIR+'h.txt')
-#J0, dJ0 = f(dofs)
-#dJh = sum(dJ0 * h)
-#for eps in [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9]:
+# print("""
+# ################################################################################
+# ### Perform a Taylor test ######################################################
+# ################################################################################
+# """)
+# f = fun
+# dofs = JF.x.copy()
+# np.random.seed(1)
+# # h = np.loadtxt(OUT_DIR+'h.txt')
+# h = 1.0
+# J0, dJ0 = f(dofs)
+# dJh = sum(dJ0 * h)
+# for eps in [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9]:
 #    J1, _ = f(dofs + 2*eps*h)
 #    J2, _ = f(dofs + eps*h)
 #    J3, _ = f(dofs - eps*h)
 #    J4, _ = f(dofs - 2*eps*h)
 #    print("err", ((J1*(-1/12) + J2*(8/12) + J3*(-8/12) + J4*(1/12))/eps - dJh)/np.linalg.norm(dJh))
-#quit()
+# quit()
 
 
 print("""
@@ -361,6 +392,8 @@ print("""
 print("Initial objective function value: %.2e"%(JF.J()))
 print('J_nonQSRatio = %.2e'%(J_nonQSRatio.J()))
 print("Jforce value: %.2e"%(Jforce.J()))
+print("Jafs value: %.2e"%(Jafs.J()))
+
 # print out coil forces
 for iota_group, bbsurf in enumerate(boozer_surfaces):
     total = 0
@@ -371,6 +404,15 @@ for iota_group, bbsurf in enumerate(boozer_surfaces):
         total += np.mean((force**2))
     print(f"group {iota_group}; total mean squared force on coils {total:.2f}")
 
+J0, dJ0 = fun(JF.x.copy())
+print("Norm gradient", np.linalg.norm(dJ0))
+print("Norm QS gradient", np.linalg.norm(J_nonQSRatio.dJ()))
+
+# print the currents
+for bbsurf in boozer_surfaces:
+    for ii in base_curve_idx:
+        print(f"Coil {ii} current: {bbsurf.biotsavart.coils[ii].current.full_x} A")
+
 
 print("""
 ################################################################################
@@ -378,52 +420,81 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER = 100
-n_restarts = 1
+MAXITER=500
 
-for restart in range(n_restarts):
-    dofs = JF.x
-    callback(dofs)
-    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor':20}, tol=1e-15, callback=callback)
-    #res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
-    print(res.message)
+dofs = JF.x
+callback(dofs)
+res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor':20}, tol=1e-15, callback=callback)
+print(res.message)
 
-    # rescale currents to achieve target axis field
-    print("")
-    print('Rescaling currents to achieve target axis field:', B_axis_target)
-    for ii, bbsurf in enumerate(boozer_surfaces):
-        # compute axis
-        N_axis=121
-        curve_stellsym=False
-        nfp=2
-        order=16
-        r0 = 0.55967771 * np.ones(N_axis)
-        z0 = 0.15932784 * np.ones(N_axis)
-        xp0_fp, xp0_ft, x_success, rx0, zx0= find_magnetic_axis(boozer_surfaces[ii].biotsavart, r0, z0, nfp, order, curve_stellsym)
-        xyz = xp0_fp.gamma()
-        # compute B on axis
-        bbsurf.biotsavart.set_points(xyz)
-        B_axis = boozer_surfaces[ii].biotsavart.B()
-        B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
-        # rescale currents
-        scale = B_axis_target / B_mean
-        # change current
-        for jj in base_curve_idx:
-            bbsurf.biotsavart.coils[jj].current.unfix_all()
-            bbsurf.biotsavart.coils[jj].current.x = scale * bbsurf.biotsavart.coils[jj].current.x
+# recompute the axis
+for ii, bbsurf in enumerate(boozer_surfaces):
+    # axis
+    xyz = axis_curves[ii].gamma()
 
-        B_axis = boozer_surfaces[ii].biotsavart.B()
-        B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
-        print('Axis field after scaling', B_mean)
+    # recompute axis
+    N_axis=121
+    curve_stellsym=False
+    nfp=2
+    order=16
+    r0 = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
+    z0 = xyz[:, 2]
+    xp0_fp, xp0_ft, x_success, rx0, zx0= find_magnetic_axis(bs, r0, z0, nfp, order, curve_stellsym)
+    axis_curves[ii] = xp0_fp
 
-    curves_to_vtk(curves, OUT_DIR + "curves_opt")
-    for idx, boozer_surface in enumerate(boozer_surfaces):
-        boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}")
-    save([boozer_surfaces, coils_list], OUT_DIR + 'opt.json')
+# rescale currents to achieve target axis field
+print("")
+print('Rescaling currents to achieve target axis field:', B_axis_target)
+for ii, bbsurf in enumerate(boozer_surfaces):
+
+    # axis
+    xyz = axis_curves[ii].gamma()
+
+    # compute B on axis
+    bbsurf.biotsavart.set_points(xyz)
+    B_axis = boozer_surfaces[ii].biotsavart.B()
+    B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
+    print('Axis field before scaling', B_mean)
+    # rescale currents
+    scale = B_axis_target / B_mean
+    # change current
+    for jj in base_curve_idx:
+        bbsurf.biotsavart.coils[jj].current.unfix_all()
+        bbsurf.biotsavart.coils[jj].current.x = scale * bbsurf.biotsavart.coils[jj].current.x
+
+    B_axis = boozer_surfaces[ii].biotsavart.B()
+    B_mean = np.mean(np.linalg.norm(B_axis, axis=1))
+    print('Axis field after scaling', B_mean)
+
+# recompute the x-points curves
+bs_list = [bsurf.biotsavart for bsurf in boozer_surfaces]
+coils_list = [bs.coils for bs in bs_list]
+xpoint_curves = []
+for bs in bs_list:
+    N_axis=121
+    curve_stellsym=False
+    nfp=2
+    order=16
+    r0 = 0.55967771 * np.ones(N_axis)
+    z0 = 0.15932784 * np.ones(N_axis)
+    xp0_fp, xp0_ft, x_success, rx0, zx0= find_magnetic_axis(bs, r0, z0, nfp, order, curve_stellsym)
+    xpoint_curves.append(xp0_fp)
+
+# get the iotas and Gs
+iota_Gs = []
+for ii, bbsurf in enumerate(boozer_surfaces):
+    iota_Gs.append((bbsurf.res['iota'], bbsurf.res['G']))
+
+curves_to_vtk(curves, OUT_DIR + "curves_opt")
+for idx, boozer_surface in enumerate(boozer_surfaces):
+    boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}")
+save([boozer_surfaces, iota_Gs, axis_curves, xpoint_curves], OUT_DIR + 'opt.json')
 
 
-
-
+# print the currents
+for bbsurf in boozer_surfaces:
+    for ii in base_curve_idx:
+        print(f"Coil {ii} current: {bbsurf.biotsavart.coils[ii].current.full_x} A")
 
 print("")
 print("End of optimization")
@@ -454,17 +525,16 @@ for iota_group, bbsurf in enumerate(boozer_surfaces):
 # ### Perform a Taylor test ######################################################
 # ################################################################################
 # """)
-# f = fun
 # dofs = res.x.copy()
 # np.random.seed(1)
 # h = np.random.uniform(size=dofs.shape)
-# J0, dJ0 = f(dofs)
+# J0, dJ0 = fun(dofs)
 # dJh = sum(dJ0 * h)
 # for eps in [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9]:
-#     J1, _ = f(dofs + 2*eps*h)
-#     J2, _ = f(dofs + eps*h)
-#     J3, _ = f(dofs - eps*h)
-#     J4, _ = f(dofs - 2*eps*h)
+#     J1, _ = fun(dofs + 2*eps*h)
+#     J2, _ = fun(dofs + eps*h)
+#     J3, _ = fun(dofs - eps*h)
+#     J4, _ = fun(dofs - 2*eps*h)
 #     print("err", ((J1*(-1/12) + J2*(8/12) + J3*(-8/12) + J4*(1/12))/eps - dJh)/np.linalg.norm(dJh))
 # np.savetxt(OUT_DIR+'h.txt', h)
 
