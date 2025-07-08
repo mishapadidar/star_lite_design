@@ -488,7 +488,7 @@ for ii, bbsurf in enumerate(boozer_surfaces):
 curves_to_vtk(curves, OUT_DIR + "curves_opt")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}")
-save([boozer_surfaces, iota_Gs, axis_curves, xpoint_curves], OUT_DIR + 'opt.json')
+save([boozer_surfaces, iota_Gs, axis_curves, xpoint_curves], OUT_DIR + f'design{design}_after_forces.json')
 
 
 # print the currents
