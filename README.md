@@ -7,11 +7,12 @@ Star_Lite has the following design criteria,
 
 - Device should be roughly quasiaxisymmetric.
 - Magnetic field should have X-point divertor structure.
-- Coils and X-point must fit inside vacuum vessel.
 - `0.0875 T` mean field strength on axis.
 - `0.15 m` minimum coil-to-coil distance.
 - `0.5 m` major radius
-- Coil curvature and length should not be exceedingly high
+- `0.054 m` coil-to-vessel distance (larger than minor radius of coil).
+- Surface and X-point must fit inside vacuum vessel.
+- Coil curvature and length should be roughly that of the original QUASR design (scaled).
 - Magnetic forces on coils should be low `< 4000 N/m`
 - Coils should be robust to manufacturing errors (`> 1mm` tolerances)
 
