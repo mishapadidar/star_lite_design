@@ -1,5 +1,23 @@
 # star_lite_design
 
+This repository holds the code used to design the Star_Lite class of configurations at Hampton University.
+
+## Design Criteria
+Star_Lite has the following design criteria,
+
+- Device should be roughly quasiaxisymmetric.
+- Magnetic field should have X-point divertor structure.
+- Coils and X-point must fit inside vacuum vessel.
+- `0.0875 T` mean field strength on axis.
+- `0.15 m` minimum coil-to-coil distance.
+- `0.5 m` major radius
+- Coil curvature and length should not be exceedingly high
+- Magnetic forces on coils should be low `< 4000 N/m`
+- Coils should be robust to manufacturing errors (`> 1mm` tolerances)
+
+## Useful notes
+- We assume a `0.054 m` coil minor radius
+
 
 ## Installation instructions on Mac M3
 1. Install pyenv with brew
