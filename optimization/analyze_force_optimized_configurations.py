@@ -53,9 +53,9 @@ for ii, bsurf in enumerate(boozer_surfaces):
 
     # check forces
     print("coil forces:")
-    for ii, c in enumerate(coils):
+    for jj, c in enumerate(coils):
         force = np.linalg.norm(coil_force(c, coils, regularization_circ(coil_minor_radius)), axis=1)
-        print(f"  {ii}) max force: %.2f, mean force: %.2f"%(np.max(np.abs(force)), np.mean(np.abs(force))))
+        print(f"  {jj}) max force: %.2f, mean force: %.2f"%(np.max(np.abs(force)), np.mean(np.abs(force))))
 
     # check QS
     Jqs = NonQuasiSymmetricRatio(bsurf, BiotSavart(bsurf.biotsavart.coils))
