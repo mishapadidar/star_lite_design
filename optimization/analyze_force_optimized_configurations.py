@@ -5,6 +5,8 @@ from simsopt.geo import (SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, 
 from simsopt.field.selffield import regularization_circ
 from simsopt.field.force import coil_force, LpCurveForce
 from simsopt.field import BiotSavart
+import pandas as pd
+from curve_vessel_distance import CurveVesselDistance
 
 
 """
@@ -19,7 +21,13 @@ major_radius = 0.5 # [m]
 coil_minor_radius = 0.054 # 54mm
 
 # load the NEW optimized design
-[boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load("./output/designB_after_force_opt.json")
+force_weight=1e-11
+indir = f"./output/designB/force_weight_{force_weight}/"
+[boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load(indir + "designB_after_forces_opt.json")
+
+# vacuum vessel points
+df = pd.read_csv("../designs/sheetmetal_chamber.csv")
+X_vessel = df.values
 
 for ii, bsurf in enumerate(boozer_surfaces):
     print("")
@@ -67,9 +75,19 @@ for ii, bsurf in enumerate(boozer_surfaces):
     # check coil-curvature
     msc_max = np.max([np.mean(c.kappa()**2) for c in curves])
     kappa_max = max([np.max(c.kappa()) for c in curves])
-    print("largest mean-square curvature", msc_max)
-    print("max coil curvature", kappa_max)
+    print("largest mean-square curvature", msc_max) # threshold 20.
+    print("max coil curvature", kappa_max) # threshold 4.3352595043*2
 
     # check coil-length
     length_max = np.max([np.mean(np.linalg.norm(c.gammadash(),axis=-1)) for c in curves])
-    print("max coil length", length_max)
+    print("max coil length", length_max) # threshold 1e-1
+
+    # coil-vessel distance
+    Jcv = CurveVesselDistance(curves, X_vessel, coil_minor_radius)
+    print("min coil-vessel distance:", Jcv.shortest_distance())
+
+    # X-point to vessel distance
+    x_curve = xpoint_curves[ii]
+    Jcv = CurveVesselDistance([x_curve], X_vessel, 0.0)
+    print("min Xpoint-to-vessel distance:", Jcv.shortest_distance())
+    # curves_to_vtk([x_curve], indir + f"xpoint_{ii}")

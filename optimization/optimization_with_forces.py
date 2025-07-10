@@ -23,6 +23,9 @@ from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoo
 from simsopt.field.selffield import regularization_circ
 from simsopt.field.force import coil_force, LpCurveForce
 from axis_field_strength_penalty import AxisFieldStrengthPenalty
+from curve_vessel_distance import CurveVesselDistance
+import pandas as pd
+
 
 def find_magnetic_axis(biotsavart, r0, z0, nfp, order, stellsym):
     from scipy.spatial.distance import cdist
@@ -130,9 +133,6 @@ The script optimizes the Star_lite device to have 3 configurations with differen
 This script was run as a second stage of optimization, after star_lite was optimized for quasi-symmetry etc.
 """
 
-# Directory for output
-OUT_DIR = "./output/"
-os.makedirs(OUT_DIR, exist_ok=True)
 
 print("Running Optimization with coil forces")
 print("================================")
@@ -230,6 +230,14 @@ Jcs = [LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves]
 Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
 Jal = sum(ArclengthVariation(curve) for curve in base_curves)
 
+# coil-to-vessel distance
+df = pd.read_csv("../designs/sheetmetal_chamber.csv")
+X_vessel = df.values
+CV_WEIGHT = 1e9
+CV_THRESHOLD = 0.06 # 0.054 minimum
+Jcvd = CurveVesselDistance(base_curves, X_vessel, CV_THRESHOLD)
+
+
 # coil forces on all current groups
 coil_force_list = []
 for bbsurf in boozer_surfaces:
@@ -261,6 +269,7 @@ JF = (J_nonQSRatio + IOTAS_WEIGHT * J_iotas + MR_WEIGHT * J_major_radius
     + BR_WEIGHT * Jbrs
     + FORCE_WEIGHT * Jforce
     + AFS_WEIGHT * Jafs
+    + CV_WEIGHT * Jcvd
     )
 
 
@@ -294,7 +303,9 @@ for bbsurf in boozer_surfaces:
 
 print("n_dofs", len(bbsurf.x))
 
-
+# Directory for output
+OUT_DIR = f"./output/design{design}/force_weight_{FORCE_WEIGHT}/"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
 for idx, boozer_surface in enumerate(boozer_surfaces):
@@ -318,6 +329,7 @@ def callback(dofs):
     outstr = f"J={dat_dict['J']:.1e}, J_nonQSRatio={J_nonQSRatio.J():.2e}, mr={mr.J():.2e} ({J_major_radius.J()*MR_WEIGHT:.1e})"
     outstr += f", Jforce={Jforce.J():.2e}"
     outstr += f", Jafs={Jafs.J():.2e} ({AFS_WEIGHT*Jafs.J():.1e})"
+    outstr += f", Jcvd={Jcvd.J():.2e} ({Jcvd.shortest_distance():.4f})"
     iota_string = ", ".join([f"{res['iota']:.3f}" for res in res_list])
     cl_string = ", ".join([f"{J.J():.1f}" for J in Jls])
     kap_string = ", ".join(f"{np.max(c.kappa()):.1f}" for c in base_curves)
@@ -420,7 +432,7 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER=500
+MAXITER=3000
 
 dofs = JF.x
 callback(dofs)
@@ -486,10 +498,10 @@ for ii, bbsurf in enumerate(boozer_surfaces):
     iota_Gs.append((bbsurf.res['iota'], bbsurf.res['G']))
 
 curves_to_vtk(curves, OUT_DIR + "curves_opt")
+curves_to_vtk(xpoint_curves, OUT_DIR + f"xpoint_curves_opt")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}")
 save([boozer_surfaces, iota_Gs, axis_curves, xpoint_curves], OUT_DIR + f'design{design}_after_forces_opt.json')
-
 
 # print the currents
 for bbsurf in boozer_surfaces:

@@ -6,6 +6,7 @@ from simsopt.geo import (SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, 
 from simsopt.field.selffield import regularization_circ
 from simsopt.field.force import coil_force, LpCurveForce
 from simsopt.field import BiotSavart
+import os
 
 plt.rc('font', family='serif')
 # plt.rc('text.latex', preamble=r'\\usepackage{amsmath,bm}')
@@ -22,7 +23,8 @@ colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
 # # x_point_curves = data[3] # X-point CurveRZFouriers
 
 # load the NEW optimized design
-[boozer_surfaces_new, iota_Gs_new, axis_curves_new, xpoint_curves_new] = load("./output/designB_after_force_opt.json")
+force_weight=1e-11
+[boozer_surfaces_new, iota_Gs_new, axis_curves_new, xpoint_curves_new] = load(f"./output/designB/force_weight_{force_weight}/designB_after_forces_opt.json")
 
 coil_minor_radius = 0.054 # 54mm
 
@@ -98,5 +100,7 @@ ax2.legend(loc='upper left')
 plt.tight_layout()
 
 # save the figure as a PDF
-fig.savefig("force_optimization_plot.pdf", format="pdf", bbox_inches="tight")
+outdir='./viz/'
+os.makedirs(outdir, exist_ok=True)
+fig.savefig(outdir+"force_optimization_plot.pdf", format="pdf", bbox_inches="tight")
 plt.show()
