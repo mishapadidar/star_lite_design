@@ -100,3 +100,24 @@ for ii, bsurf in enumerate(boozer_surfaces):
     Jcv = CurveVesselDistance([x_curve], X_vessel, 0.0)
     print("min Xpoint-to-vessel distance:", Jcv.shortest_distance())
     # curves_to_vtk([x_curve], indir + f"xpoint_{ii}")
+
+     # check if perfectly nfp=2 and stellsym
+    angle = 2*np.pi/surf.nfp
+    R = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+    pt = np.array([[1.357683246, 1.4125674574, 0.213231]])
+    Rpt = pt@R
+    pts = np.concatenate((pt, Rpt), axis=0)
+    bs.set_points(pts)
+    B_cyl = bs.B_cyl()
+    print(B_cyl)
+    assert np.linalg.norm(B_cyl[0] - B_cyl[1]) <1e-16
+
+    R = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+    pt = np.array([[1.357683246, 1.4125674574, 0.213231]])
+    Rpt = pt@R
+    pts = np.concatenate((pt, Rpt), axis=0)
+    bs.set_points(pts)
+    B_cyl = bs.B_cyl()
+    print(B_cyl)
+    assert np.linalg.norm(B_cyl[0, 0] + B_cyl[1, 0]) <1e-16
+    assert np.linalg.norm(B_cyl[0, 1:] - B_cyl[1, 1:]) <1e-16

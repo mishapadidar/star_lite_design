@@ -9,7 +9,7 @@ from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.configs import get_ncsx_data
 from simsopt.field import BiotSavart, coils_via_symmetries
 from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, boozer_surface_residual, \
-    Volume, MajorRadius, CurveLength, NonQuasiSymmetricRatio, Iotas
+    Volume, MajorRadius, CurveLength, NonQuasiSymmetricRatio, Iotas, RotatedCurve
 from simsopt.objectives import QuadraticPenalty
 from simsopt.util import in_github_actions
 from simsopt._core import load, save
@@ -300,6 +300,16 @@ for bbsurf in boozer_surfaces:
     bbsurf.biotsavart.coils[base_curve_idx[0]].current.fix_all()
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
+
+# make sure coils are stellarator symmetric
+for ii in base_curve_idx:
+    c = boozer_surfaces[0].biotsavart.coils[ii].curve
+    if isinstance(c, RotatedCurve):
+        c = c.curve
+    for df in c.local_dof_names:
+        if ('xs' in df) or ('yc' in df) or ('zc' in df):
+            c.fix(df)
+
 
 print("n_dofs", len(bbsurf.x))
 
