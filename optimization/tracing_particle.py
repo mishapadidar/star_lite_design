@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 
 """
-This examples demonstrate how to use SIMSOPT to compute guiding center
-trajectories of particles in cylindrical coordinates for a vacuum field.
-
-This example takes advantage of MPI if you launch it with multiple
-processes (e.g. by mpirun -n or srun), but it also works on a single
-process.
+Run guiding center tracing
 """
 
 import time
@@ -28,14 +23,16 @@ logging.basicConfig()
 logger = logging.getLogger('simsopt.field.tracing')
 logger.setLevel(1)
 
-proc0_print("Running 1_Simple/tracing_particle.py", flush=True)
+proc0_print("Running tracing_particle.py", flush=True)
 proc0_print("====================================", flush=True)
 
-# If we're in the CI, make the run a bit cheaper:
-nparticles = 50
+tmax=0.02 # seconds
+nparticles = 10
+tol = 1e-8 # tracing tolerance
 degree = 3
+n = 64 # interpolation grid size
 
-
+# load design
 indir = f"./output/designB/force_weight_1e-11/"
 [boozer_surfaces, iota_Gs, ma_list, xpoint_curves] = load(indir + "designB_after_forces_opt.json")
 
@@ -71,7 +68,6 @@ for config, (ma, boozer_surface) in enumerate(zip(ma_list, boozer_surfaces)):
     if comm_world is None or comm_world.rank == 0:
         sc_particle.to_vtk(OUT_DIR + 'sc_particle', h=0.05)
     
-    n = 64
     rs = np.linalg.norm(s.gamma()[:, :, 0:2], axis=2)
     zs = s.gamma()[:, :, 2]
     
@@ -89,12 +85,12 @@ for config, (ma, boozer_surface) in enumerate(zip(ma_list, boozer_surfaces)):
     ma_fine.x = ma.x
     
     def trace_particles(bfield, label, mode='gc_vac'):
-        tmax=0.2 # seconds
+        
 
         t1 = time.time()
         gc_tys, gc_phi_hits = trace_particles_starting_on_curve(
             ma_fine, bfield, nparticles, tmax=tmax, seed=1, mass=ELECTRON_MASS, charge=-ELEMENTARY_CHARGE,
-            Ekin=2.86e3*ONE_EV, umin=-1, umax=+1, comm=comm_world, tol=1e-9,
+            Ekin=2.86e3*ONE_EV, umin=-1, umax=+1, comm=comm_world, tol=tol,
             stopping_criteria=[LevelsetStoppingCriterion(sc_particle.dist)], mode=mode,
             forget_exact_path=True)
         t2 = time.time()
