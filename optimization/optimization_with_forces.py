@@ -432,7 +432,7 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER=3000
+MAXITER=5000
 
 dofs = JF.x
 callback(dofs)
