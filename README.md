@@ -3,7 +3,7 @@
 This repository holds the code used to design the Star_Lite class of configurations at Hampton University.
 
 ## Design Criteria
-Star_Lite has the following design criteria,
+Star_Lite has the following design criteria. Originally, we were considering QUASR device 0104183.
 
 - Device should be roughly quasiaxisymmetric.
 - Magnetic field should have X-point divertor structure.
@@ -14,7 +14,8 @@ Star_Lite has the following design criteria,
 - `60kA` upper bound on coil currents.
 - coils should be perfectly nfp2 and stellarator symmetric.
 - Surface and X-point must fit inside vacuum vessel.
-- Coil curvature and length should be roughly that of the original QUASR design (scaled).
+- Coil curvature: Bending machine can bend `1/22mm` maximum curvature.
+- Length should be roughly that of the original QUASR design (scaled).
 - Magnetic forces on coils should be low `< 4000 N/m`
 - Coils should be robust to manufacturing errors (`> 1mm` tolerances)
 
