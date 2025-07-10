@@ -22,8 +22,8 @@ from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoozerSurfaceDistance
 from simsopt.field.selffield import regularization_circ
 from simsopt.field.force import coil_force, LpCurveForce
-from axis_field_strength_penalty import AxisFieldStrengthPenalty
-from curve_vessel_distance import CurveVesselDistance
+from star_lite_design.utils.axis_field_strength_penalty import AxisFieldStrengthPenalty
+from star_lite_design.utils.curve_vessel_distance import CurveVesselDistance
 import pandas as pd
 
 

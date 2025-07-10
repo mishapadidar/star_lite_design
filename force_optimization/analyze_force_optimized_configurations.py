@@ -6,7 +6,7 @@ from simsopt.field.selffield import regularization_circ
 from simsopt.field.force import coil_force, LpCurveForce
 from simsopt.field import BiotSavart
 import pandas as pd
-from curve_vessel_distance import CurveVesselDistance
+from star_lite_design.utils.curve_vessel_distance import CurveVesselDistance
 
 
 """
