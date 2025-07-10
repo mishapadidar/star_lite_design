@@ -25,6 +25,10 @@ force_weight=1e-11
 indir = f"./output/designB/force_weight_{force_weight}/"
 [boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load(indir + "designB_after_forces_opt.json")
 
+# or load original design
+# [boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load("../designs/designB_after_scaled.json")
+
+
 # vacuum vessel points
 df = pd.read_csv("../designs/sheetmetal_chamber.csv")
 X_vessel = df.values
@@ -33,10 +37,12 @@ for ii, bsurf in enumerate(boozer_surfaces):
     print("")
     print(f"Group {ii}")
 
+
     bs = bsurf.biotsavart
     surf = bsurf.surface
     coils = bs.coils
     curves = [c.curve for c in coils]
+    currents = [c.current for c in coils]
 
     # rebuild the boozer surface and populate the res attribute
     bsurf = BoozerSurface(bs, surf, bsurf.label, bsurf.targetlabel, options={'newton_tol':1e-13, 'newton_maxiter':20})
@@ -51,6 +57,9 @@ for ii, bsurf in enumerate(boozer_surfaces):
     mean_B_norm = np.mean(B_norm)
     err = mean_B_norm - B_target
     print(f"Axis field strength: {mean_B_norm:.6f} T")
+
+    # check coil currents
+    print("Currents:", [c.get_value() for c in currents])
     
     # check coil2coil distance, 
     Jccdist = CurveCurveDistance(curves, cc_dist)
@@ -76,7 +85,7 @@ for ii, bsurf in enumerate(boozer_surfaces):
     msc_max = np.max([np.mean(c.kappa()**2) for c in curves])
     kappa_max = max([np.max(c.kappa()) for c in curves])
     print("largest mean-square curvature", msc_max) # threshold 20.
-    print("max coil curvature", kappa_max) # threshold 4.3352595043*2
+    print("max coil curvature", kappa_max) # threshold 1/22 mm
 
     # check coil-length
     length_max = np.max([np.mean(np.linalg.norm(c.gammadash(),axis=-1)) for c in curves])
