@@ -61,7 +61,7 @@ for ii, bsurf in enumerate(boozer_surfaces):
     # check coil currents
     currents = np.array([c.get_value() for c in currents])
     print("Currents:", currents)
-    if np.any(np.abs(currents) < 60000):
+    if np.any(np.abs(currents) > 60000):
         print("currents are too large")
     
     # check coil2coil distance, 
