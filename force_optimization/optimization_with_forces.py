@@ -182,6 +182,9 @@ elif design == "B":
 # target value of axis field for rescaling
 B_axis_target = 0.0875
 
+# maximum current
+current_bound = 60000 # [Amps]
+
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
 mr = MajorRadius(boozer_surfaces[0])
 ls = [CurveLength(c) for c in base_curves]
@@ -301,6 +304,11 @@ for bbsurf in boozer_surfaces:
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
 
+    # set lower/upper bounds on the remaining currents
+    for jj in base_curve_idx[1:]:
+        bbsurf.biotsavart.coils[jj].current.upper_bounds = [current_bound]
+        bbsurf.biotsavart.coils[jj].current.lower_bounds = [-current_bound]
+
 # make sure coils are stellarator symmetric
 for ii in base_curve_idx:
     c = boozer_surfaces[0].biotsavart.coils[ii].curve
@@ -310,8 +318,8 @@ for ii in base_curve_idx:
         if ('xs' in df) or ('yc' in df) or ('zc' in df):
             c.fix(df)
 
-
 print("n_dofs", len(bbsurf.x))
+
 
 # Directory for output
 OUT_DIR = f"./output/design{design}/force_weight_{FORCE_WEIGHT}/"
@@ -444,12 +452,17 @@ print("""
 # Number of iterations to perform:
 MAXITER=5000
 
+lb = JF.lower_bounds
+ub = JF.upper_bounds
+bounds = np.vstack((lb, ub)).T
+
 dofs = JF.x
 callback(dofs)
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor':20}, tol=1e-15, callback=callback)
+res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor':100}, tol=1e-15, callback=callback)
 print(res.message)
 
 # recompute the axis
+axis_curves_opt = []
 for ii, bbsurf in enumerate(boozer_surfaces):
     # axis
     xyz = axis_curves[ii].gamma()
@@ -462,7 +475,7 @@ for ii, bbsurf in enumerate(boozer_surfaces):
     r0 = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
     z0 = xyz[:, 2]
     xp0_fp, xp0_ft, x_success, rx0, zx0= find_magnetic_axis(bs, r0, z0, nfp, order, curve_stellsym)
-    axis_curves[ii] = xp0_fp
+    axis_curves_opt.append(xp0_fp)
 
 # rescale currents to achieve target axis field
 print("")
@@ -470,7 +483,7 @@ print('Rescaling currents to achieve target axis field:', B_axis_target)
 for ii, bbsurf in enumerate(boozer_surfaces):
 
     # axis
-    xyz = axis_curves[ii].gamma()
+    xyz = axis_curves_opt[ii].gamma()
 
     # compute B on axis
     bbsurf.biotsavart.set_points(xyz)
@@ -509,9 +522,10 @@ for ii, bbsurf in enumerate(boozer_surfaces):
 
 curves_to_vtk(curves, OUT_DIR + "curves_opt")
 curves_to_vtk(xpoint_curves, OUT_DIR + f"xpoint_curves_opt")
+curves_to_vtk(axis_curves_opt, OUT_DIR + "ma_opt")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}")
-save([boozer_surfaces, iota_Gs, axis_curves, xpoint_curves], OUT_DIR + f'design{design}_after_forces_opt.json')
+save([boozer_surfaces, iota_Gs, axis_curves_opt, xpoint_curves], OUT_DIR + f'design{design}_after_forces_opt.json')
 
 # print the currents
 for bbsurf in boozer_surfaces:

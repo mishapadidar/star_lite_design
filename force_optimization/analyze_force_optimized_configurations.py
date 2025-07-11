@@ -59,7 +59,10 @@ for ii, bsurf in enumerate(boozer_surfaces):
     print(f"Axis field strength: {mean_B_norm:.6f} T")
 
     # check coil currents
-    print("Currents:", [c.get_value() for c in currents])
+    currents = np.array([c.get_value() for c in currents])
+    print("Currents:", currents)
+    if np.any(np.abs(currents) < 60000):
+        print("currents are too large")
     
     # check coil2coil distance, 
     Jccdist = CurveCurveDistance(curves, cc_dist)
@@ -94,6 +97,7 @@ for ii, bsurf in enumerate(boozer_surfaces):
     # coil-vessel distance
     Jcv = CurveVesselDistance(curves, X_vessel, coil_minor_radius)
     print("min coil-vessel distance:", Jcv.shortest_distance())
+    assert Jcv.shortest_distance() > coil_minor_radius, "coil-vessel distance is too small"
 
     # X-point to vessel distance
     x_curve = xpoint_curves[ii]
@@ -121,3 +125,12 @@ for ii, bsurf in enumerate(boozer_surfaces):
     print(B_cyl)
     assert np.linalg.norm(B_cyl[0, 0] + B_cyl[1, 0]) <1e-16
     assert np.linalg.norm(B_cyl[0, 1:] - B_cyl[1, 1:]) <1e-16
+
+    # check magnetic axis is computed correctly
+    from star_lite_design.utils.find_x_point import find_x_point
+    xyz = axis.gamma()
+    r0 = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
+    z0 = xyz[:, 2]
+    ma_fp, ma_ft, ma_success=  find_x_point(bs, r0, z0, 2, 8)
+    xyz2 = ma_fp.gamma()
+    assert np.max(np.abs(xyz - xyz2)), "axis does not match"
