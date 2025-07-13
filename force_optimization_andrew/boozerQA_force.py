@@ -131,7 +131,7 @@ BR_WEIGHT=1e7
 
 coil_minor_radius = 0.054 # 54mm
 force_order = 2
-FORCE_WEIGHT = 1e-11
+FORCE_WEIGHT = 1e-9
 FORCE_THRESHOLD = 4e3
 
 LENGTH_THRESHOLD = 4.0
@@ -156,7 +156,7 @@ CV_WEIGHT = 1e9
 CV_THRESHOLD = 0.06 # 0.054 minimum
 Jcvd = CurveVesselDistance(base_curves, X_vessel, CV_THRESHOLD)
 
-XV_WEIGHT = 1e3
+XV_WEIGHT = 1e6
 Jfvs = [FieldLineVesselDistance(xpoint, X_vessel, CV_THRESHOLD) for xpoint in xpoints]
 
 
@@ -176,7 +176,8 @@ Jbrs = sum(brs)
 
 # penalty on deviation from target mean field strength
 AFS_WEIGHT = 1e4
-Jafs = sum([QuadraticPenalty(ModB_on_FieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)), B_axis_target, 'identity') for axis, boozer_surface in zip(axes, boozer_surfaces)])
+modBs = [ModB_on_FieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
+Jafs = sum([QuadraticPenalty(modB, B_axis_target, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
 
 
 # sum the objectives together
@@ -255,22 +256,25 @@ def callback(dofs):
         for ii in base_curve_idx:
             force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
             max_force = max([max_force, np.max(np.abs(force))])
-
+    
     outstr = f"J={dat_dict['J']:.1e}, J_nonQSRatio={J_nonQSRatio.J():.2e}, mr={mr.J():.2e} ({J_major_radius.J()*MR_WEIGHT:.1e})"
     outstr += f", Jforce={FORCE_WEIGHT*Jforce.J():.2e}, Maximum Force {max_force:.2e} (N)"
-    outstr += f", Jafs={Jafs.J():.2e} ({AFS_WEIGHT*Jafs.J():.1e})"
-    outstr += f", Jcvd={Jcvd.J():.2e} ({Jcvd.shortest_distance():.4f})"
-    outstr += f", Jfvs={sum(Jfvs).J():.2e} ({min([Jfv.shortest_distance() for Jfv in Jfvs]):.4f})"
+    modB_list = [modB.J() for modB in modBs]
+    outstr += f", min(modB) = {min(modB_list):.2e}, max(modB) = {max(modB_list):.2e} ({AFS_WEIGHT*Jafs.J():.1e})"
+    outstr += f", Jcvd={CV_WEIGHT*Jcvd.J():.2e} ({Jcvd.shortest_distance():.4f})"
+    outstr += f", Jfvs={XV_WEIGHT*sum(Jfvs).J():.2e} ({min([Jfv.shortest_distance() for Jfv in Jfvs]):.4f})"
     iota_string = ", ".join([f"{res['iota']:.3f}" for res in res_list])
     cl_string = ", ".join([f"{J.J():.1f}" for J in Jls])
     kap_string = ", ".join(f"{np.max(c.kappa()):.1f}" for c in base_curves)
     msc_string = ", ".join(f"{J.J():.1f}" for J in Jmscs)
     brs_string = ", ".join(f"{J.J():.1e}" for J in brs)
+
     outstr += f", iotas=[{iota_string}] ({IOTAS_WEIGHT*J_iotas.J():.1e}), Len=sum([{cl_string}])={sum(J.J() for J in Jls):.1f} ({length_penalty.J():.1e}), ϰ=[{kap_string}] ({curvature_penalty.J():.1e}), ∫ϰ²/L=[{msc_string}] ({msc_penalty.J():.1e})"
     outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f} ({cc_penalty.J():.1e}), C-S-Sep={Jcsdist.shortest_distance():.2f} ({cs_penalty.J():.1e})"
     outstr += f", al var={Jal.J():.2e}"
     outstr += f", brs={brs_string} {BR_WEIGHT*Jbrs.J():.2e}"
     outstr += f", currents={min(currents_list):.2e} (A), {max(currents_list):.2e} (A)"
+
     outstr += f", ║∇J║={np.linalg.norm(dat_dict['dJ']):.1e}"
     print("")
 
