@@ -129,7 +129,7 @@ LENGTH_WEIGHT = Weight(1e-1)
 IOTAS_WEIGHT=Weight(1e4)
 MR_WEIGHT=Weight(1e3)
 
-BR_WEIGHT=Weight(1e7)
+BR_WEIGHT=Weight(1e6)
 
 coil_minor_radius = 0.054 # 54mm
 force_order = 2
@@ -149,7 +149,7 @@ J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
 
 Jls = [CurveLength(c) for c in base_curves]
 Jccdist = CurveCurveDistance(curves, CC_THRESHOLD)
-Jcsdist = CurveBoozerSurfaceDistance(curves, boozer_surfaces[0], CS_THRESHOLD)
+#Jcsdist = CurveBoozerSurfaceDistance(curves, boozer_surfaces[0], CS_THRESHOLD)
 Jcs = [LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves]
 Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
 Jal = sum(ArclengthVariation(curve) for curve in base_curves)
@@ -162,7 +162,7 @@ CV_THRESHOLD = 0.06 # 0.054 minimum
 Jcvd = CurveVesselDistance(base_curves, X_vessel, CV_THRESHOLD)
 
 XV_THRESHOLD = 0.06 # 0.054 minimum
-XV_WEIGHT = Weight(1e6)
+XV_WEIGHT = Weight(1e7)
 Jxvs = [FieldLineVesselDistance(xpoint, X_vessel, XV_THRESHOLD) for xpoint in xpoints]
 xv_penalty = sum(Jxvs)
 
@@ -190,7 +190,6 @@ JF = (J_nonQSRatio
     + MR_WEIGHT * J_major_radius
     + LENGTH_WEIGHT * length_penalty
     + CC_WEIGHT * Jccdist
-    + CS_WEIGHT * Jcsdist
     + CURVATURE_WEIGHT * curvature_penalty
     + MSC_WEIGHT * msc_penalty
     + AL_WEIGHT * Jal
@@ -200,21 +199,22 @@ JF = (J_nonQSRatio
     + CV_WEIGHT * Jcvd
     + XV_WEIGHT * xv_penalty
     )
+    #+ CS_WEIGHT * Jcsdist
 
 penalties = {'nonQS': J_nonQSRatio,
         'iotas':IOTAS_WEIGHT * J_iotas,
         'length':LENGTH_WEIGHT * length_penalty,
         'coil-to-coil': CC_WEIGHT * Jccdist,
-        'coil-to-surface':CS_WEIGHT * Jcsdist,
         'curvature':CURVATURE_WEIGHT * curvature_penalty,
         'mean-squared curvature': MSC_WEIGHT * msc_penalty,
         'arclength':AL_WEIGHT * Jal,
         'Boozer residual': BR_WEIGHT * Jbrs,
-        'force weight': FORCE_WEIGHT * Jforce,
+        'force': FORCE_WEIGHT * Jforce,
         'modB': MODB_WEIGHT * JmodB,
         'coil-to-vessel':CV_WEIGHT * Jcvd,
         'x-point-to-vessel':XV_WEIGHT * xv_penalty
         }
+        #'coil-to-surface':CS_WEIGHT * Jcsdist,
 
 states = {
         'iotas': IOTAS_LIST,
@@ -250,7 +250,7 @@ print("n_dofs", len(bbsurf.x))
 
 
 # Directory for output
-OUT_DIR = f"./output/design{design}/force_weight_{FORCE_WEIGHT}/"
+OUT_DIR = f"./output/design{design}/force_threshold_{FORCE_THRESHOLD}/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
@@ -432,7 +432,7 @@ for j in range(5):
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
     cc_err = max(CC_THRESHOLD-Jccdist.shortest_distance(), 0)/np.abs(CC_THRESHOLD)
-    cs_err = max(CS_THRESHOLD-Jcsdist.shortest_distance(), 0)/np.abs(CS_THRESHOLD)
+    #cs_err = max(CS_THRESHOLD-Jcsdist.shortest_distance(), 0)/np.abs(CS_THRESHOLD)
     xv_err = max([max(XV_THRESHOLD-Jxvdist.shortest_distance(), 0)/np.abs(XV_THRESHOLD) for Jxvdist in Jxvs])
 
     msc = [J.J() for J in Jmscs]
@@ -462,9 +462,9 @@ for j in range(5):
     if cc_err > 0.001:
         CC_WEIGHT*=10
         print("COIL TO COIL ERROR", cc_err)
-    if cs_err > 0.001:
-        CS_WEIGHT*=10
-        print("COIL TO SURFACE ERROR", cs_err)
+    #if cs_err > 0.001:
+    #    CS_WEIGHT*=10
+    #    print("COIL TO SURFACE ERROR", cs_err)
     if xv_err > 0.001:
         XV_WEIGHT*=10
         print("XPOINT TO VESSEL ERROR", xv_err)
