@@ -16,6 +16,7 @@ from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, b
     Volume, MajorRadius, CurveLength, NonQuasiSymmetricRatio, Iotas, RotatedCurve
 from simsopt.objectives import QuadraticPenalty
 from simsopt.util import in_github_actions
+from simsopt.objectives import Weight
 from simsopt._core import load, save
 from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves,
                          CurveLength, CurveCurveDistance, MeanSquaredCurvature,
@@ -24,7 +25,8 @@ from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_
 from simsopt.field.force import coil_force, LpCurveForce
 from simsopt.field.selffield import regularization_circ
 import pandas as pd
-
+from rich.console import Console
+from rich.table import Column, Table
 
 from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoozerSurfaceDistance
@@ -95,7 +97,7 @@ elif design == "B":
     base_curves = [curves[i] for i in base_curve_idx]
 
 # target value of axis field for rescaling
-B_axis_target = 0.0875
+MODB_TARGET = 0.0875
 
 # maximum current
 current_bound = 60000 # [Amps]
@@ -107,37 +109,40 @@ brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils
 
 # Threshold and weight for the coil-to-coil distance penalty in the objective function:
 CC_THRESHOLD = 0.15
-CC_WEIGHT = 1000
+CC_WEIGHT = Weight(1e3)
 
 # Threshold and weight for the coil-to-surface distance penalty in the objective function:
 CS_THRESHOLD = 0.15
-CS_WEIGHT = 1e2
+CS_WEIGHT = Weight(1e2)
 
 # Threshold and weight for the curvature penalty in the objective function:
 CURVATURE_THRESHOLD = 4.3352595043*2
-CURVATURE_WEIGHT = 3e-6
+CURVATURE_WEIGHT = Weight(3e-6)
 
 # Threshold and weight for the mean squared curvature penalty in the objective function:
 MSC_THRESHOLD = 20.
-MSC_WEIGHT = 4e-3
+MSC_WEIGHT = Weight(4e-3)
 
-AL_WEIGHT = 1.
-LENGTH_WEIGHT = 1e-1
+AL_WEIGHT = Weight(1.)
+LENGTH_WEIGHT = Weight(1e-1)
 
-IOTAS_WEIGHT=1e4
-MR_WEIGHT=1e3
+IOTAS_WEIGHT=Weight(1e4)
+MR_WEIGHT=Weight(1e3)
 
-BR_WEIGHT=1e7
+BR_WEIGHT=Weight(1e7)
 
 coil_minor_radius = 0.054 # 54mm
 force_order = 2
-FORCE_WEIGHT = 1e-9
+FORCE_WEIGHT = Weight(1e-9)
 FORCE_THRESHOLD = 4e3
 
 LENGTH_THRESHOLD = 4.0
-J_major_radius = QuadraticPenalty(mr, 0.5, 'identity')  # target major radius is that computed on the initial surface
-#J_iotas = sum([QuadraticPenalty(Iotas(boozer_surface), iota, 'identity') for boozer_surface, iota in zip(boozer_surfaces, [0.1882775, 0.10, 0.30])]) # target rotational transform is that computed on the initial surface
-J_iotas = sum([QuadraticPenalty(Iotas(boozer_surface), boozer_surface.res['iota'], 'identity') for boozer_surface in boozer_surfaces]) # target rotational transform is that computed on the initial surface
+MR_TARGET = 0.5
+J_major_radius = QuadraticPenalty(mr, MR_TARGET, 'identity')  # target major radius is that computed on the initial surface
+
+IOTAS_LIST = [Iotas(boozer_surface) for boozer_surface in boozer_surfaces]
+IOTAS_TARGET  = [boozer_surface.res['iota'] for boozer_surface in boozer_surfaces]
+J_iotas = sum([QuadraticPenalty(IOTAS, IOTAS_TARGET, 'identity') for IOTAS, IOTAS_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)]) # target rotational transform is that computed on the initial surface
 nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
@@ -152,13 +157,14 @@ Jal = sum(ArclengthVariation(curve) for curve in base_curves)
 # coil-to-vessel distance
 df = pd.read_csv("../designs/sheetmetal_chamber.csv")
 X_vessel = df.values
-CV_WEIGHT = 1e9
+CV_WEIGHT = Weight(1e9)
 CV_THRESHOLD = 0.06 # 0.054 minimum
 Jcvd = CurveVesselDistance(base_curves, X_vessel, CV_THRESHOLD)
 
-XV_WEIGHT = 1e6
-Jfvs = [FieldLineVesselDistance(xpoint, X_vessel, CV_THRESHOLD) for xpoint in xpoints]
-
+XV_THRESHOLD = 0.06 # 0.054 minimum
+XV_WEIGHT = Weight(1e6)
+Jxvs = [FieldLineVesselDistance(xpoint, X_vessel, XV_THRESHOLD) for xpoint in xpoints]
+xv_penalty = sum(Jxvs)
 
 # coil forces on all current groups
 coil_force_list = []
@@ -167,33 +173,57 @@ for bbsurf in boozer_surfaces:
     coil_force_list += [LpCurveForce(bbsurf.biotsavart.coils[i], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius), p=force_order, threshold=FORCE_THRESHOLD) for i in base_curve_idx]
 Jforce = sum(coil_force_list)
 
-length_penalty = LENGTH_WEIGHT * sum([QuadraticPenalty(Jl, LENGTH_THRESHOLD, "max") for Jl in Jls])
-cc_penalty = CC_WEIGHT * Jccdist
-cs_penalty =  CS_WEIGHT * Jcsdist
-curvature_penalty = CURVATURE_WEIGHT * sum(Jcs)
-msc_penalty = MSC_WEIGHT * sum(QuadraticPenalty(J, MSC_THRESHOLD, "max") for J in Jmscs)
+length_penalty = sum([QuadraticPenalty(Jl, LENGTH_THRESHOLD, "max") for Jl in Jls])
+curvature_penalty = sum(Jcs)
+msc_penalty = sum(QuadraticPenalty(J, MSC_THRESHOLD, "max") for J in Jmscs)
 Jbrs = sum(brs)
 
 # penalty on deviation from target mean field strength
-AFS_WEIGHT = 1e4
+MODB_WEIGHT = Weight(1e4)
 modBs = [ModB_on_FieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
-Jafs = sum([QuadraticPenalty(modB, B_axis_target, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
+JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
 
 
 # sum the objectives together
-JF = (J_nonQSRatio + IOTAS_WEIGHT * J_iotas + MR_WEIGHT * J_major_radius
-    + length_penalty
-    + cc_penalty
-    + cs_penalty
-    + curvature_penalty
-    + msc_penalty
+JF = (J_nonQSRatio 
+    + IOTAS_WEIGHT * J_iotas 
+    + MR_WEIGHT * J_major_radius
+    + LENGTH_WEIGHT * length_penalty
+    + CC_WEIGHT * Jccdist
+    + CS_WEIGHT * Jcsdist
+    + CURVATURE_WEIGHT * curvature_penalty
+    + MSC_WEIGHT * msc_penalty
     + AL_WEIGHT * Jal
     + BR_WEIGHT * Jbrs
     + FORCE_WEIGHT * Jforce
-    + AFS_WEIGHT * Jafs
+    + MODB_WEIGHT * JmodB
     + CV_WEIGHT * Jcvd
-    + XV_WEIGHT * sum(Jfvs)
+    + XV_WEIGHT * xv_penalty
     )
+
+penalties = {'nonQS': J_nonQSRatio,
+        'iotas':IOTAS_WEIGHT * J_iotas,
+        'length':LENGTH_WEIGHT * length_penalty,
+        'coil-to-coil': CC_WEIGHT * Jccdist,
+        'coil-to-surface':CS_WEIGHT * Jcsdist,
+        'curvature':CURVATURE_WEIGHT * curvature_penalty,
+        'mean-squared curvature': MSC_WEIGHT * msc_penalty,
+        'arclength':AL_WEIGHT * Jal,
+        'Boozer residual': BR_WEIGHT * Jbrs,
+        'force weight': FORCE_WEIGHT * Jforce,
+        'modB': MODB_WEIGHT * JmodB,
+        'coil-to-vessel':CV_WEIGHT * Jcvd,
+        'x-point-to-vessel':XV_WEIGHT * xv_penalty
+        }
+
+states = {
+        'iotas': IOTAS_LIST,
+        'modB': modBs,
+        'lengths':Jls,
+        'major radius': [MajorRadius(boozer_surface) for boozer_surface in boozer_surfaces],
+        'Boozer residuals': brs,
+        'mean-squared curvature': Jmscs
+        }
 
 # fix some currents
 for bbsurf in boozer_surfaces:
@@ -248,35 +278,36 @@ def callback(dofs):
     dat_dict['J'] = JF.J()
     dat_dict['dJ'] = JF.dJ().copy()
     
-    currents_list = [np.abs(coil.current.get_value()) for boozer_surface in boozer_surfaces for coil in boozer_surface.biotsavart.coils]
+    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     
-    max_force = -1
-    # print out coil forces
-    for iota_group, bbsurf in enumerate(boozer_surfaces):
-        for ii in base_curve_idx:
-            force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
-            max_force = max([max_force, np.max(np.abs(force))])
+    forces = []
+    for bbsurf in boozer_surfaces:
+        for idx in base_curve_idx:
+            forces += [np.linalg.norm(coil_force(bbsurf.biotsavart.coils[idx], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1).max()]
+    max_force = np.max(forces)
+    kappas = [np.max(c.kappa()) for c in base_curves]
+
+    console = Console(width=250)
+    table1 = Table(show_header=False)
+    table1.add_row(*['J', 'dJ'])
+    table1.add_row(*[f'{dat_dict["J"]:.2e}', f'{np.max(np.abs(dat_dict["dJ"])):.2e}'])
+    console.print(table1)
+
+    console = Console(width=250)
+    table1 = Table(expand=True, show_header=False)
+    table1.add_row(*[f"{v}" for v in penalties.keys()])
+    table1.add_row(*[f"{v.J():.4e}" for v in penalties.values()])
+    console.print(table1)
     
-    outstr = f"J={dat_dict['J']:.1e}, J_nonQSRatio={J_nonQSRatio.J():.2e}, mr={mr.J():.2e} ({J_major_radius.J()*MR_WEIGHT:.1e})"
-    outstr += f", Jforce={FORCE_WEIGHT*Jforce.J():.2e}, Maximum Force {max_force:.2e} (N)"
-    modB_list = [modB.J() for modB in modBs]
-    outstr += f", min(modB) = {min(modB_list):.2e}, max(modB) = {max(modB_list):.2e} ({AFS_WEIGHT*Jafs.J():.1e})"
-    outstr += f", Jcvd={CV_WEIGHT*Jcvd.J():.2e} ({Jcvd.shortest_distance():.4f})"
-    outstr += f", Jfvs={XV_WEIGHT*sum(Jfvs).J():.2e} ({min([Jfv.shortest_distance() for Jfv in Jfvs]):.4f})"
-    iota_string = ", ".join([f"{res['iota']:.3f}" for res in res_list])
-    cl_string = ", ".join([f"{J.J():.1f}" for J in Jls])
-    kap_string = ", ".join(f"{np.max(c.kappa()):.1f}" for c in base_curves)
-    msc_string = ", ".join(f"{J.J():.1f}" for J in Jmscs)
-    brs_string = ", ".join(f"{J.J():.1e}" for J in brs)
-
-    outstr += f", iotas=[{iota_string}] ({IOTAS_WEIGHT*J_iotas.J():.1e}), Len=sum([{cl_string}])={sum(J.J() for J in Jls):.1f} ({length_penalty.J():.1e}), ϰ=[{kap_string}] ({curvature_penalty.J():.1e}), ∫ϰ²/L=[{msc_string}] ({msc_penalty.J():.1e})"
-    outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f} ({cc_penalty.J():.1e}), C-S-Sep={Jcsdist.shortest_distance():.2f} ({cs_penalty.J():.1e})"
-    outstr += f", al var={Jal.J():.2e}"
-    outstr += f", brs={brs_string} {BR_WEIGHT*Jbrs.J():.2e}"
-    outstr += f", currents={min(currents_list):.2e} (A), {max(currents_list):.2e} (A)"
-
-    outstr += f", ║∇J║={np.linalg.norm(dat_dict['dJ']):.1e}"
-    print("")
+    table2 = Table(expand=True, show_header=False) 
+    for k in states.keys():
+        table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
+    table2.add_row('max force', f'{max_force:.3e}')
+    table2.add_row('forces', ' '.join([f'{f:.3e}' for f in forces]))
+    table2.add_row('currents', ' '.join([f'{curr:.3e}' for curr in currents_list]))
+    table2.add_row('curvatures', ' '.join([f'{curv:.3e}' for curv in kappas]))
+    table2.add_row('minimum X-point-to-vessel distance', ' '.join([f'{Jxv.shortest_distance():.3e}' for Jxv in Jxvs]))
+    console.print(table2)
 
     curves_to_vtk(curves, OUT_DIR + "curves_tmp")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_tmp")
@@ -284,7 +315,7 @@ def callback(dofs):
     for idx, boozer_surface in enumerate(boozer_surfaces):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_tmp_{idx}")
     save([boozer_surfaces, iota_Gs, axes, xpoints], OUT_DIR + f'design{design}_after_forces_tmp.json')
-    print(outstr)
+    #print(outstr)
 
 def fun(dofs):
     JF.x = dofs
@@ -341,20 +372,13 @@ print("""
 ### Initial performance #######################################################
 ################################################################################
 """)
-print("Initial objective function value: %.2e"%(JF.J()))
-print('J_nonQSRatio = %.2e'%(J_nonQSRatio.J()))
-print("Jforce value: %.2e"%(Jforce.J()))
-print("Jafs value: %.2e"%(Jafs.J()))
-
+force = []
 # print out coil forces
-for iota_group, bbsurf in enumerate(boozer_surfaces):
-    total = 0
-    for ii in base_curve_idx:
-        force = np.linalg.norm(coil_force(bbsurf.biotsavart.coils[ii], bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)
-        # print(f"group {iota_group}; max force on coil {ii}: %.2f"%(np.max(np.abs(force))))
-        print(f"group {iota_group}; max force on coil {np.max(np.abs(force)):.2f}; mean force on coil {np.mean((force)):.2f}; mean_squared force on coil {np.mean((force**2)):.2f}")
-        total += np.mean((force**2))
-    print(f"group {iota_group}; total mean squared force on coils {total:.2f}")
+for bbsurf in boozer_surfaces:
+    for coil in bbsurf.biotsavart.coils:
+        force += [np.linalg.norm(coil_force(coil, bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1)]
+max_force = np.max(force)
+print(f"max force on coils {max_force:.2f}")
 
 J0, dJ0 = fun(JF.x.copy())
 print("Norm gradient", np.linalg.norm(dJ0))
@@ -372,7 +396,7 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER=5000
+MAXITER=1e3
 
 lb = JF.lower_bounds
 ub = JF.upper_bounds
@@ -380,8 +404,85 @@ bounds = np.vstack((lb, ub)).T
 
 dofs = JF.x
 callback(dofs)
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor':100}, tol=1e-15, callback=callback)
-print(res.message)
+
+for j in range(5):
+    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor':100}, tol=1e-15, callback=callback)
+    dofs = res.x.copy()
+    print(res.message)
+    
+
+#JF = (J_nonQSRatio 
+#    + IOTAS_WEIGHT * J_iotas 
+#    + MR_WEIGHT * J_major_radius
+#    + LENGTH_WEIGHT * length_penalty
+#    + CC_WEIGHT * Jccdist
+#    + CS_WEIGHT * Jcsdist
+#    + CURVATURE_WEIGHT * curvature_penalty
+#    + MSC_WEIGHT * msc_penalty
+#    + AL_WEIGHT * Jal
+#    + BR_WEIGHT * Jbrs
+#    + FORCE_WEIGHT * Jforce
+#    + AFS_WEIGHT * Jafs
+#    + CV_WEIGHT * Jcvd
+#    + XV_WEIGHT * fv_penalty
+#    )
+    
+    iota_err = max([np.abs(IOTAS.J() - IOTAS_TARGET)/np.abs(IOTAS_TARGET) for IOTAS, IOTAS_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
+    mr_err = np.abs(mr.J()-MR_TARGET)/MR_TARGET
+    clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
+
+    cc_err = max(CC_THRESHOLD-Jccdist.shortest_distance(), 0)/np.abs(CC_THRESHOLD)
+    cs_err = max(CS_THRESHOLD-Jcsdist.shortest_distance(), 0)/np.abs(CS_THRESHOLD)
+    xv_err = max([max(XV_THRESHOLD-Jxvdist.shortest_distance(), 0)/np.abs(XV_THRESHOLD) for Jxvdist in Jxvs])
+
+    msc = [J.J() for J in Jmscs]
+    msc_err = max(np.max(msc) - MSC_THRESHOLD, 0)/np.abs(MSC_THRESHOLD)
+
+    curv_err = max(max([np.max(c.kappa()) for c in base_curves]) - CURVATURE_THRESHOLD, 0)/np.abs(CURVATURE_THRESHOLD)
+    alen_err = np.max([ArclengthVariation(c).J() for c in base_curves])
+
+    force = []
+    for bbsurf in boozer_surfaces:
+        for coil in bbsurf.biotsavart.coils:
+            force += [np.linalg.norm(coil_force(coil, bbsurf.biotsavart.coils, regularization_circ(coil_minor_radius)), axis=1).max()]
+    force_err = np.max([max(f-FORCE_THRESHOLD, 0)/FORCE_THRESHOLD for f in force])
+
+    modB_err = max([np.abs(modB.J()-MODB_TARGET)/MODB_TARGET for modB in modBs])
+    
+    # check which constraints are violated and increase weight if violated by more than 0.1%
+    if iota_err > 0.001:
+        IOTAS_WEIGHT*=10
+        print("IOTA ERROR", iota_err)
+    if mr_err > 0.001:
+        MR_WEIGHT*=10
+        print("MR ERROR", mr_err)
+    if clen_err > 0.001:
+        LENGTH_WEIGHT*=10
+        print("COIL LENGTH ERROR", clen_err)
+    if cc_err > 0.001:
+        CC_WEIGHT*=10
+        print("COIL TO COIL ERROR", cc_err)
+    if cs_err > 0.001:
+        CS_WEIGHT*=10
+        print("COIL TO SURFACE ERROR", cs_err)
+    if xv_err > 0.001:
+        XV_WEIGHT*=10
+        print("XPOINT TO VESSEL ERROR", xv_err)
+    if force_err > 0.001:
+        FORCE_WEIGHT*=10
+        print("FORCE ERROR", force_err)
+    if modB_err > 0.001:
+        MODB_WEIGHT*=10
+        print("MODB ERROR", modB_err)
+    if msc_err > 0.001:
+        MSC_WEIGHT*=10
+        print("MEAN SQUARED ERROR", msc_err)
+    if curv_err > 0.001:
+        CURVATURE_WEIGHT*=10
+        print("CURVATURE ERROR", curv_err)
+    if alen_err > 0.001:
+        AL_WEIGHT*=10
+        print("ARCLENGTH ERROR", alen_err)
 
 curves_to_vtk(curves, OUT_DIR + "curves_opt")
 curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt")
