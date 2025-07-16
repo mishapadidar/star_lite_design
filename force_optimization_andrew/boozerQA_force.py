@@ -33,6 +33,7 @@ from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoo
 from star_lite_design.utils.curve_vessel_distance import CurveVesselDistance
 from star_lite_design.utils.fieldline_vessel_distance import FieldLineVesselDistance
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
+import yaml
 
 """
 The script optimizes the Star_lite device to have 3 configurations with different iota values, and low coil forces.
