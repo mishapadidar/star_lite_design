@@ -1,0 +1,25 @@
+# physics design variables for designB
+MODB_TARGET : 0.0875
+MAJOR_RADIUS_TARGET : 0.5
+COIL_TO_COIL_THRESHOLD : 0.15 # more than twice the coil radius = 2*0.054
+COIL_TO_VESSEL_THRESHOLD : 0.06 # must be at a minimum the coil radius
+XPOINT_TO_VESSEL_THRESHOLD : 0.06 # this is just a logical guess as an acceptable distance
+CURVATURE_THRESHOLD : 8.6705190086 # 4.3352595043*2= original device had a major radius of 1 m, so scaling down to 0.5 m means multiplying by a factor of 2.0
+MEAN_SQUARED_CURVATURE_THRESHOLD : 20. # 5*4 = original device had a major radius of 1 m, so scaling down to 0.5 m means multiplying by a factor of 4.0
+LENGTH_THRESHOLD : 4.0
+IOTAS_TARGET: # the target iotas of the three configurations in design B
+  - 0.1909847110481275
+  - 0.0911073907066409
+  - 0.2627663962128873
+COIL_MINOR_RADIUS : 0.054 # the radius of the wound coil
+COIL_TO_COIL_WEIGHT : 1.0e5
+CURVATURE_WEIGHT : 1.0e-5
+MEAN_SQUARED_CURVATURE_WEIGHT : 1.0e-2
+LENGTH_WEIGHT : 1.0
+IOTAS_WEIGHT : 1.0e4
+MAJOR_RADIUS_WEIGHT : 1.0e3
+BOOZER_RESIDUAL_WEIGHT : 1.0e6
+COIL_TO_VESSEL_WEIGHT : 1.0e9
+XPOINT_TO_VESSEL_WEIGHT : 1.0e7
+MODB_WEIGHT : 1.0e4 
+ARCLENGTH_WEIGHT : 1.0
