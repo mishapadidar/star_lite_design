@@ -179,6 +179,7 @@ JF = (J_nonQSRatio
 
 penalties = {'nonQS': J_nonQSRatio,
         'iotas':IOTAS_WEIGHT * J_iotas,
+        'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
         'length':LENGTH_WEIGHT * length_penalty,
         'coil-to-coil': COIL_TO_COIL_WEIGHT * Jccdist,
         'curvature':CURVATURE_WEIGHT * curvature_penalty,
@@ -189,7 +190,6 @@ penalties = {'nonQS': J_nonQSRatio,
         'coil-to-vessel':COIL_TO_VESSEL_WEIGHT * Jcvd,
         'x-point-to-vessel':XPOINT_TO_VESSEL_WEIGHT * xv_penalty
         }
-        #'coil-to-surface':CS_WEIGHT * Jcsdist,
 
 states = {
         'iotas': IOTAS_LIST,
@@ -273,7 +273,7 @@ def callback(dofs):
     table1.add_row(*[f"{v}" for v in penalties.keys()])
     table1.add_row(*[f"{v.J():.4e}" for v in penalties.values()])
     console.print(table1)
-    
+
     table2 = Table(expand=True, show_header=False) 
     for k in states.keys():
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
