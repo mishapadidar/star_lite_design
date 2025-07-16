@@ -36,7 +36,8 @@ class FieldLineVesselDistance(Optimizable):
     def shortest_distance(self):
         from scipy.spatial.distance import cdist
         xyz_surf = self.vessel.reshape((-1, 3))
-        return min([self.minimum_distance] + [np.min(cdist(self.fieldline.curve.gamma(), xyz_surf))])
+        return np.min(cdist(self.fieldline.curve.gamma(), xyz_surf))
+        # why is self.min_dist included in the original penalty?
 
     def J(self):
         """
