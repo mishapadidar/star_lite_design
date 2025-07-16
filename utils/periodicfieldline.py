@@ -5,6 +5,7 @@ import simsoptpp as sopp
 
 from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt.geo import CurveLength
 from functools import partial
 
 __all__ = ['PeriodicFieldLine']
@@ -79,7 +80,7 @@ class PeriodicFieldLine(Optimizable):
 
         # set the default options now
         if 'verbose' not in options:
-            options['verbose'] = True
+            options['verbose'] = False
         # default solver options for the BoozerExact and BoozerLS solvers
         if 'newton_tol' not in options:
             options['newton_tol'] = 1e-13
@@ -87,9 +88,6 @@ class PeriodicFieldLine(Optimizable):
             options['newton_maxiter'] = 40
         self.options = options
 
-        # set the default options now
-        if 'verbose' not in options:
-            options['verbose'] = True
         
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
