@@ -26,8 +26,9 @@ class TestModBOnFieldline(unittest.TestCase):
         axis = CurveXYZFourierSymmetries(quadpoints, order, nfp, stellsym)
         axis.x = tmp.x
         axis_fl = PeriodicFieldLine(BiotSavart(coils), axis)
-        axis_fl.run_code(CurveLength(axis_fl.curve).J())
-
+        res = axis_fl.run_code(CurveLength(axis_fl.curve).J())
+        self.assertTrue(res['success']), f"curve convergence failed"
+        
         obj = ModBOnFieldLine(axis_fl, BiotSavart(coils))
 
         # determine dofs
@@ -65,7 +66,8 @@ class TestModBOnFieldline(unittest.TestCase):
         axis = CurveXYZFourierSymmetries(quadpoints, order, nfp, stellsym)
         axis.x = tmp.x
         axis_fl = PeriodicFieldLine(BiotSavart(coils), axis)
-        axis_fl.run_code(CurveLength(axis_fl.curve).J())
+        res = axis_fl.run_code(CurveLength(axis_fl.curve).J())
+        self.assertTrue(res['success']), f"curve convergence failed"
 
         obj = ModBOnFieldLine(axis_fl, BiotSavart(coils))
 
@@ -83,7 +85,7 @@ class TestModBOnFieldline(unittest.TestCase):
             return obj.J(), obj.dJ()
         
         min_rel_error = taylor_test(fun, x0, order=6)
-        assert min_rel_error < 1e-10 # 10 digits in the gradient
+        self.assertTrue(min_rel_error < 1e-10) # 10 digits in the gradient
 
 if __name__ == '__main__':
     unittest.main()
