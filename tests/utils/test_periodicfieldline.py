@@ -1,7 +1,7 @@
 import numpy as np
 import unittest
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
-from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
+from star_lite_design.utils.periodicfieldline import PeriodicFieldLine, field_line_residual
 from star_lite_design.utils.finite_difference import finite_difference, taylor_test
 from simsopt.geo import CurveXYZFourierSymmetries, CurveLength
 from simsopt._core import load
@@ -92,5 +92,39 @@ class TestPeriodicFieldline(unittest.TestCase):
         self.assertTrue(np.linalg.norm(xs) > 1e-10)
         self.assertTrue(np.linalg.norm(yc) > 1e-10)
         self.assertTrue(np.linalg.norm(zc) > 1e-10)
+
+    def test_stellsym(self):
+        """Test that in the stellarator symmetric case nfp=1
+        
+        rx(-tk) = -rx(-tk)
+        ry(-tk) = ry(tk)
+        rz(-tk) = rz(tk)
+
+        for nfp=2 you have to apply a rotation to the residual, but the
+        same result holds.
+        """
+
+        data = load(f"./designs/designB_after_scaled.json")
+        bsurf = data[0][0]
+        field = bsurf.biotsavart
+        axis_RZ = data[2][0] # magnetic axis CurveRZFouriers
+        
+        stellsym=True
+        nfp = 2
+        order=16
+        tmp = CurveXYZFourierSymmetries(axis_RZ.quadpoints, order, nfp, stellsym)
+        tmp.least_squares_fit(axis_RZ.gamma())
+        quadpoints = np.linspace(0, 1/nfp, 2*order+1, endpoint=False)
+        axis = CurveXYZFourierSymmetries(quadpoints, order, nfp, stellsym)
+        axis.x = tmp.x
+        out = field_line_residual(axis, CurveLength(axis).J(), field)
+        residual = out[0].reshape((-1, 3))
+        angle = 2*np.pi/nfp
+        R = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+        r1 = residual[1]
+        r2 = R@residual[-1]
+        self.assertTrue(np.abs(r1[0]+r2[0]) < 1e-15)
+        self.assertTrue(np.linalg.norm(r1[1:]-r2[1:]) < 1e-15)
+
 if __name__ == '__main__':
     unittest.main()
