@@ -6,8 +6,16 @@ import numpy as np
 import jax.numpy as jnp
 from jax import jit, grad
 
-class ModB_on_FieldLine(Optimizable):
+class ModBOnFieldLine(Optimizable):
     def __init__(self, fieldline, biotsavart):
+        """An optimizable class to compute the mean magnetic field strength along a field line,
+            J = \int |B| dl / L.
+        It is assumed that the periodic fieldline is unit speed.
+
+        Args:
+            fieldline (PeriodicFieldLine): instance of a periodic field line on which the magnetic field is computed.
+            biotsavart (BiotSavart): instance of a Biot-Savart object that computes the magnetic field.
+        """
         self.fieldline = fieldline
         self.biotsavart = biotsavart
         self.recompute_bell()
@@ -18,6 +26,12 @@ class ModB_on_FieldLine(Optimizable):
         self._dJ = None
 
     def J(self):
+        """
+        Compute the mean magnetic field strength along the field line.
+
+        Returns:
+            float: The mean magnetic field strength along the field line.
+        """
         if self._J is None:
             self.compute()
         return self._J
@@ -29,10 +43,13 @@ class ModB_on_FieldLine(Optimizable):
         return self._dJ
     
     def compute(self):
+
+        # make sure the fieldline reflects its dofs
         if self.fieldline.need_to_run_code:
             res = self.fieldline.res
             res = self.fieldline.run_code(res['length'])
 
+        # compute the objective
         self.biotsavart.set_points(self.fieldline.curve.gamma())
         modB = self.biotsavart.AbsB()
         self._J = np.mean(modB)
