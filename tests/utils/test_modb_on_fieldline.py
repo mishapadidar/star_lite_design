@@ -88,6 +88,10 @@ class TestModBOnFieldline(unittest.TestCase):
         self.assertTrue(min_rel_error < 1e-10) # 10 digits in the gradient
 
     def test_modB_on_axis(self):
+        """
+        Test that modB computed by ModBOnFieldLine is actually the mean modB on
+        the fieldline.
+        """
         data = load(f"./designs/designB_after_scaled.json")
         bsurf = data[0][0]
         coils = bsurf.biotsavart.coils
