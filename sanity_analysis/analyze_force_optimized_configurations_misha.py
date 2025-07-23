@@ -24,7 +24,7 @@ coil_minor_radius = 0.054 # 54mm
 # force_weight=1e-11
 # indir = f"./output/designB/force_weight_{force_weight}/"
 # [boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load(indir + "designB_after_forces_opt.json")
-[boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load('designB_after_forces_opt_9.json')
+[boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load('../designs/designB_after_forces_opt_19.json')
 
 # or load original design
 # [boozer_surfaces, iota_Gs, axis_curves, xpoint_curves] = load("../designs/designB_after_scaled.json")
