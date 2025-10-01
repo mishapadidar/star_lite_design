@@ -1,0 +1,26 @@
+#!/bin/bash
+#SBATCH -J vmec             # Job name
+#SBATCH -o ./slurm_output/job_%j.out    # Name of stdout output file(%j expands to jobId)
+#SBATCH -e ./slurm_output/job_%j.err    # Name of stderr output file(%j expands to jobId)
+#SBATCH -t 1-00:00:00                                # Time limit (dd-hh:mm:ss)
+#SBATCH -p ccm
+#SBATCH --nodes=4           # number of nodes
+#SBATCH --ntasks=128         # total number of cores
+
+# set environment
+module load vmec
+# use the right version of SIMSOPT with the Mgrid resolution fix
+source /mnt/home/mpadidar/code/near_axis/env_temp/bin/activate
+export PYTHONPATH="${PYTHONPATH}:/mnt/home/mpadidar/code/star_lite"
+cd $HOME/code/star_lite/star_lite_design/free_boundary
+
+# vacuum
+mpiexec -n 128 python vmec_free_boundary.py A 0 0
+
+# no bootstrap current
+# mpiexec -n 128 python vmec_free_boundary.py A 0.01 0
+# mpiexec -n 128 python vmec_free_boundary.py A 0.1 0
+
+# with bootstrap current
+# mpiexec -n 128 python vmec_free_boundary.py A 0.01 -0.1
+# mpiexec -n 128 python vmec_free_boundary.py A 0.1 -1
