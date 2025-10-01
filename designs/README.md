@@ -8,3 +8,4 @@ in `designB_after_scaled.json` could be reduced, so Misha's first attempt to red
 `sheetmetal_chamber.obj` is the vacuum vessel as of July 8, 2025.
 
 Andrew's first attempt at coil force minimization is in `designB_after_forces_9.json`, and the final attempt after scanning a bit more is in `designB_after_forces_19.json`.
+`designB_after_forces_19_23072025.json` is the coil design sent to Georg, contains only the coils.
