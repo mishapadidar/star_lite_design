@@ -48,11 +48,11 @@ design = str(sys.argv[1])
 beta = float(sys.argv[2])
 Imin = float(sys.argv[3])
 
-print("")
-print("Running with parameters", flush=True)
-print("design", design, flush=True)
-print("beta [%]", beta, flush=True)
-print("Imin [A]", Imin, flush=True)
+proc0_print("")
+proc0_print("Running with parameters", flush=True)
+proc0_print("design", design, flush=True)
+proc0_print("beta [%]", beta, flush=True)
+proc0_print("Imin [A]", Imin, flush=True)
 
 
 """
@@ -84,10 +84,10 @@ mu0 = np.pi * 4e-7
 beta_not_percent = beta / 100
 p0 = beta_not_percent * B0**2 / mu0
 p1 = - p0
-print('p0', p0)
-print('p1', p1)
-print('I1', I1)
-print('I2', I2)
+proc0_print('p0', p0)
+proc0_print('p1', p1)
+proc0_print('I1', I1)
+proc0_print('I2', I2)
 
 
 # Create a VMEC object from an input file:
@@ -140,10 +140,10 @@ vmec.indata.ncurr = 1 # use current profile (not iota)
 # vmec.current_profile = current_profile
 
 
-print("Writing VMEC input file", flush=True)
+proc0_print("Writing VMEC input file", flush=True)
 if mpi.proc0_world:
     vmec.write_input(vmec_input)
-print("Wrote", vmec_input, flush=True)
+proc0_print("Wrote", vmec_input, flush=True)
 
 # make sure all ranks have the same input
 vmec = Vmec(vmec_input, mpi=mpi, verbose=True)
