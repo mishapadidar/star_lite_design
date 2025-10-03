@@ -119,9 +119,10 @@ from scipy.interpolate import interp1d
 interp = interp1d(vmec.s_full_grid, vmec.wout.jdotb)
 s_fine = np.linspace(0, 1, 100)
 jb_vmec = interp(s_fine)
-import matplotlib.pyplot as plt
-plt.plot(s_fine, jb_vmec, label='VMEC')
-plt.plot(s1d, jb_redl, 'o', label='REDL')
-plt.legend(loc='upper right')
-plt.savefig(f'optimized_bootstrap_current_design_{design}_n0_{n0}_Ti0_{Ti0}_Te0_{Te0}.pdf', format='pdf')
-# plt.show()
+if mpi.proc0_world:
+    import matplotlib.pyplot as plt
+    plt.plot(s_fine, jb_vmec, label='VMEC')
+    plt.plot(s1d, jb_redl, 'o', label='REDL')
+    plt.legend(loc='upper right')
+    plt.savefig(f'optimized_bootstrap_current_design_{design}_n0_{n0}_Ti0_{Ti0}_Te0_{Te0}.pdf', format='pdf')
+    # plt.show()
