@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 
-# code corrections:
-# lb, ub
-# all currents should be unfixed
-
+import sys
 import os
 import numpy as np
 from scipy.optimize import minimize
@@ -44,14 +41,15 @@ This script was run as a second stage of optimization, after star_lite was optim
 print("Running Optimization with coil forces")
 print("================================")
 
+current_bound = sys.argv[1]
 design = 'B' # A or B
 # load the boozer surfaces (1 per Current configuration, so 3 total.)
-data = load(f"../designs/design{design}_after_currents_opt_5.json")
+data = load(f"../designs/{current_bound}/design{design}_after_currents_opt_9.json")
 boozer_surfaces = data[0] # BoozerSurfaces
 iota_Gs = data[1] # (iota, G) pairs
 axes = data[2] # magnetic axis CurveRZFouriers
 xpoints = data[3] # X-point CurveRZFouriers
-config = yaml.safe_load(open(f"../designs/design{design}_after_currents_opt_5.yaml",'r'))
+config = yaml.safe_load(open(f"../designs/{current_bound}/design{design}_after_currents_opt_9.yaml",'r'))
 
 for axis, boozer_surface in zip(axes, boozer_surfaces):
     axis.run_code(CurveLength(axis.curve).J())
@@ -102,7 +100,7 @@ MODB_WEIGHT = Weight(config['MODB_WEIGHT'])
 ARCLENGTH_WEIGHT = Weight(config['ARCLENGTH_WEIGHT'])
 
 FORCE_WEIGHT = Weight(1e-8)
-FORCE_THRESHOLD = 5e3 # 5216.75
+FORCE_THRESHOLD = float(sys.argv[2]) # 5216.75
 
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
 mr = MajorRadius(boozer_surfaces[0])
@@ -211,7 +209,7 @@ print("n_dofs", len(bbsurf.x))
 
 
 # Directory for output
-OUT_DIR = f"./output/design{design}/force_threshold_{FORCE_THRESHOLD}/"
+OUT_DIR = f"./output/design{design}/current_threshold_{CURRENT_THRESHOLD}_force_threshold_{FORCE_THRESHOLD}/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
