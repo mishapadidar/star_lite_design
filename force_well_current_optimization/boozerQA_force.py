@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
-import sys
+# code corrections:
+# lb, ub
+# all currents should be unfixed
+
 import os
 import numpy as np
 from scipy.optimize import minimize
@@ -25,6 +28,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Column, Table
 
+from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoozerSurfaceDistance
 from star_lite_design.utils.curve_vessel_distance import CurveVesselDistance
@@ -41,15 +45,14 @@ This script was run as a second stage of optimization, after star_lite was optim
 print("Running Optimization with coil forces")
 print("================================")
 
-current_bound = sys.argv[1]
 design = 'B' # A or B
 # load the boozer surfaces (1 per Current configuration, so 3 total.)
-data = load(f"../designs/{current_bound}/design{design}_after_currents_opt_9.json")
+data = load(f"../designs/design{design}_after_forces_opt_19.json")
 boozer_surfaces = data[0] # BoozerSurfaces
 iota_Gs = data[1] # (iota, G) pairs
 axes = data[2] # magnetic axis CurveRZFouriers
 xpoints = data[3] # X-point CurveRZFouriers
-config = yaml.safe_load(open(f"../designs/{current_bound}/design{design}_after_currents_opt_9.yaml",'r'))
+config = yaml.safe_load(open(f"../designs/design{design}_after_forces_opt_19.yaml",'r'))
 
 for axis, boozer_surface in zip(axes, boozer_surfaces):
     axis.run_code(CurveLength(axis.curve).J())
@@ -57,11 +60,23 @@ for axis, boozer_surface in zip(axes, boozer_surfaces):
 for xpoint, boozer_surface in zip(xpoints, boozer_surfaces):
     xpoint.run_code(CurveLength(xpoint.curve).J())
 
+boozer_surfaces_hr = []
 for ii, bsurf in enumerate(boozer_surfaces):
     # rebuild the boozer surface and populate the res attribute
     bsurf = BoozerSurface(bsurf.biotsavart, bsurf.surface, bsurf.label, bsurf.targetlabel, options={'newton_tol':1e-13, 'newton_maxiter':20})
     bsurf.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
     boozer_surfaces[ii] = bsurf
+    
+    
+    temp = bsurf.surface.x.copy() 
+    for alpha in [0.75, 0.5, 0.25]:
+        surface_hr = SurfaceXYZTensorFourier(mpol=bsurf.surface.mpol, ntor=bsurf.surface.ntor, nfp=bsurf.surface.nfp, stellsym=bsurf.surface.stellsym, quadpoints_phi=bsurf.surface.quadpoints_phi, quadpoints_theta=bsurf.surface.quadpoints_theta)
+        surface_hr.x = temp
+        bsurf_hr = BoozerSurface(bsurf.biotsavart, surface_hr, Volume(surface_hr), bsurf.targetlabel*alpha, options={'newton_tol':1e-13, 'newton_maxiter':20})
+        bsurf_hr.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
+        temp = surface_hr.x.copy()
+        print(surface_hr.is_self_intersecting())
+    boozer_surfaces_hr.append(bsurf_hr)
 
 # get the base curves
 biotsavart = boozer_surfaces[0].biotsavart
@@ -100,12 +115,19 @@ MODB_WEIGHT = Weight(config['MODB_WEIGHT'])
 ARCLENGTH_WEIGHT = Weight(config['ARCLENGTH_WEIGHT'])
 
 FORCE_WEIGHT = Weight(1e-8)
-FORCE_THRESHOLD = float(sys.argv[2]) # 5216.75
+FORCE_THRESHOLD = 5e3 # 5216.75
 
+WELL_WEIGHT = Weight(1e3)
+WELL_THRESHOLD = -5e-3
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
+magnetic_wells = [MagneticWell([boozer_surfaces_hr[ii], boozer_surfaces[ii]]) for ii in range(len(boozer_surfaces))]
+J_wells = sum([QuadraticPenalty(Jw, WELL_THRESHOLD, "max") for Jw in magnetic_wells])
+
 mr = MajorRadius(boozer_surfaces[0])
 ls = [CurveLength(c) for c in base_curves]
-brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
+brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces] +\
+    [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces_hr]
+
 J_major_radius = QuadraticPenalty(mr, MR_TARGET, 'identity')  # target major radius is that computed on the initial surface
 
 IOTAS_LIST = [Iotas(boozer_surface) for boozer_surface in boozer_surfaces]
@@ -160,6 +182,7 @@ JF = (J_nonQSRatio
     + MODB_WEIGHT * JmodB
     + COIL_TO_VESSEL_WEIGHT * Jcvd
     + XPOINT_TO_VESSEL_WEIGHT * xv_penalty
+    + WELL_WEIGHT * J_wells
     )
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -173,10 +196,12 @@ penalties = {'nonQS': J_nonQSRatio,
         'force': FORCE_WEIGHT * Jforce,
         'modB': MODB_WEIGHT * JmodB,
         'coil-to-vessel':COIL_TO_VESSEL_WEIGHT * Jcvd,
-        'x-point-to-vessel':XPOINT_TO_VESSEL_WEIGHT * xv_penalty
+        'x-point-to-vessel':XPOINT_TO_VESSEL_WEIGHT * xv_penalty,
+        'magnetic well': WELL_WEIGHT*J_wells
         }
 
 states = {
+        'well': magnetic_wells,
         'iotas': IOTAS_LIST,
         'modB': modBs,
         'lengths':Jls,
@@ -210,7 +235,7 @@ print("n_dofs", len(bbsurf.x))
 
 
 # Directory for output
-OUT_DIR = f"./output/design{design}/current_threshold_{CURRENT_THRESHOLD}_force_threshold_{FORCE_THRESHOLD}/"
+OUT_DIR = f"./output/design{design}/force_threshold_{FORCE_THRESHOLD}/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
@@ -219,12 +244,13 @@ for idx, boozer_surface in enumerate(boozer_surfaces):
 
 # save these as a backup in case the boozer surface Newton solve fails
 res_list = [{'sdofs': boozer_surface.surface.x.copy() , 'iota': boozer_surface.res['iota'], 'G': boozer_surface.res['G']} for boozer_surface in boozer_surfaces]
+res_list_hr = [{'sdofs': boozer_surface.surface.x.copy() , 'iota': boozer_surface.res['iota'], 'G': boozer_surface.res['G']} for boozer_surface in boozer_surfaces_hr]
 axes_res_list = [{'adofs': axis.curve.x.copy() , 'length': axis.res['length']} for axis in axes]
 xpoints_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['length']} for xpoint in xpoints]
 dat_dict = {'iter':0, 'J': JF.J(), 'dJ': JF.dJ().copy()}
 
 def callback(dofs):
-    for res, boozer_surface in zip(res_list, boozer_surfaces):
+    for res, boozer_surface in zip(res_list+res_list_hr, boozer_surfaces+boozer_surfaces_hr):
         res['sdofs'] = boozer_surface.surface.x.copy()
         res['iota'] =  boozer_surface.res['iota']
         res['G'] = boozer_surface.res['G']
@@ -274,7 +300,7 @@ def callback(dofs):
     curves_to_vtk(curves, OUT_DIR + "curves_tmp")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_tmp")
     curves_to_vtk([axis.curve for axis in axes], OUT_DIR + "ma_tmp")
-    for idx, boozer_surface in enumerate(boozer_surfaces):
+    for idx, boozer_surface in enumerate(boozer_surfaces+boozer_surfaces_hr):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_tmp_{idx}")
     save([boozer_surfaces, iota_Gs, axes, xpoints], OUT_DIR + f'design{design}_after_forces_tmp.json')
     dat_dict["iter"] += 1
@@ -291,7 +317,7 @@ def fun(dofs):
     
     fieldline_success = [fieldline.res['success'] for fieldline in axes+xpoints]
     if (not np.all([boozer_surface.res['success'] \
-            and (not boozer_surface.surface.is_self_intersecting()) for boozer_surface in boozer_surfaces])) \
+            and (not boozer_surface.surface.is_self_intersecting()) for boozer_surface in boozer_surfaces+boozer_surfaces_hr])) \
             or not np.all(fieldline_success)\
             or solver_fail:
         print('failed')
@@ -300,7 +326,7 @@ def fun(dofs):
         # the step size.
         J = 1e3
         grad = -dat_dict['dJ']
-        for res, boozer_surface in zip(res_list,  boozer_surfaces): 
+        for res, boozer_surface in zip(res_list+res_list_hr,  boozer_surfaces+boozer_surfaces_hr): 
             boozer_surface.surface.x = res['sdofs']
             boozer_surface.res['iota'] = res['iota']
             boozer_surface.res['G'] = res['G']
@@ -311,25 +337,28 @@ def fun(dofs):
     return J, grad
 
 
-# print("""
-# ################################################################################
-# ### Perform a Taylor test ######################################################
-# ################################################################################
-# """)
-# f = fun
-# dofs = JF.x.copy()
-# np.random.seed(1)
-# # h = np.loadtxt(OUT_DIR+'h.txt')
-# h = 1.0
-# J0, dJ0 = f(dofs)
-# dJh = sum(dJ0 * h)
-# for eps in [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9]:
-#    J1, _ = f(dofs + 2*eps*h)
-#    J2, _ = f(dofs + eps*h)
-#    J3, _ = f(dofs - eps*h)
-#    J4, _ = f(dofs - 2*eps*h)
-#    print("err", ((J1*(-1/12) + J2*(8/12) + J3*(-8/12) + J4*(1/12))/eps - dJh)/np.linalg.norm(dJh))
-# quit()
+#print("""
+#################################################################################
+#### Perform a Taylor test ######################################################
+#################################################################################
+#""")
+#f = fun
+#dofs = JF.x.copy()
+#np.random.seed(1)
+#h = np.random.rand(dofs.size)
+#J0, dJ0 = f(dofs)
+#dJh = sum(dJ0 * h)
+#for eps in [1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9]:
+#   J1, _ = f(dofs + 2*eps*h)
+#   J2, _ = f(dofs + eps*h)
+#   J3, _ = f(dofs - eps*h)
+#   J4, _ = f(dofs - 2*eps*h)
+#   dd = (J1*(-1/12) + J2*(8/12) + J3*(-8/12) + J4*(1/12))/eps
+#   print("err", (dd - dJh)/np.linalg.norm(dJh), dd, dJh)
+#quit()
+
+dofs = JF.x
+callback(dofs)
 
 
 print("""
@@ -361,18 +390,16 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER=200
+MAXITER=500
 
 lb = JF.lower_bounds
 ub = JF.upper_bounds
 bounds = np.vstack((lb, ub)).T
 
-dofs = JF.x
-callback(dofs)
-
 for j in range(10):
     dat_dict["iter"] = 0
-    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor':100}, tol=1e-15, callback=callback)
+    res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
+    #res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor':100}, tol=1e-15, callback=callback)
     dofs = res.x.copy()
     callback(dofs)
     print(res.message)
@@ -391,7 +418,7 @@ for j in range(10):
 #    + COIL_TO_VESSEL_WEIGHT * Jcvd
 #    + XPOINT_TO_VESSEL_WEIGHT * fv_penalty
 #    )
-    
+    well_err = max([max(Jl.J() - WELL_THRESHOLD, 0)/np.abs(WELL_THRESHOLD) for Jl in magnetic_wells])
     iota_err = max([np.abs(IOTAS.J() - IOTAS_TARGET)/np.abs(IOTAS_TARGET) for IOTAS, IOTAS_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
     mr_err = np.abs(mr.J()-MR_TARGET)/MR_TARGET
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
@@ -444,6 +471,9 @@ for j in range(10):
     if alen_err > 0.001:
         ARCLENGTH_WEIGHT*=10
         print("ARCLENGTH ERROR", alen_err)
+    if well_err > 0.001:
+        WELL_WEIGHT*=10
+        print("WELL ERROR", well_err)
 
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")

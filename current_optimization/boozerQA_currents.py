@@ -29,7 +29,7 @@ from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoozerSurfaceDistance
 from star_lite_design.utils.curve_vessel_distance import CurveVesselDistance
 from star_lite_design.utils.fieldline_vessel_distance import FieldLineVesselDistance
-from star_lite_design.utils.modb_on_fieldline import ModB_on_FieldLine
+from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 
 """
 The script optimizes the Star_lite device to have 3 configurations with different iota values, and low coil forces.
@@ -159,7 +159,7 @@ msc_penalty = sum(QuadraticPenalty(J, MEAN_SQUARED_CURVATURE_THRESHOLD, "max") f
 Jbrs = sum(brs)
 
 # penalty on deviation from target mean field strength
-modBs = [ModB_on_FieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
+modBs = [ModBOnFieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
 JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
 
 # sum the objectives together

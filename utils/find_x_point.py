@@ -115,7 +115,7 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     ma_fp = CurveRZFourier(quadpoints, order, nfp, False)
     ma_fp.least_squares_fit(xyz)
 
-    quadpoints = np.linspace(0, nfp, nfp*n, endpoint=False)
+    quadpoints = np.linspace(0, 1, nfp*n, endpoint=False)
     ma_ft = CurveRZFourier(quadpoints, order, nfp, False)
     ma_ft.x = ma_fp.x
 
