@@ -196,74 +196,209 @@ from jax import jit, grad
 #
 #    return_fn_map = {'J': J, 'dJ': dJ}
 
-def pure_well_polynomial(tf, vol, G, B1):
+
+# THIS ONE ONLY NEEDS ONE MAGNETIC SURFACE
+#def pure_well_polynomial(tf, vol, G, B1):
+#        # axis
+#        V0 = 0.
+#        Psi0 = 0
+#        
+#        # surface
+#        V1 = jnp.abs(vol)
+#        Psi1 = jnp.abs(tf)
+#        modB1 = jnp.linalg.norm(B1, axis=-1)
+#        
+#        # G from boozer surfaces is multiplied by 2pi
+#        V1p = jnp.abs(G) * jnp.mean(1/modB1**2)
+#        
+#        a = -((V1 - Psi1*V1p)/Psi1**2)
+#        b = -((-2*V1 + Psi1*V1p)/Psi1)
+#        c = 0
+#        return a, b, c
+#
+#def mean_well_pure(tf, vol, G, B1):
+#    a, b, c = pure_well_polynomial(tf, vol, G, B1)
+#    return 2*a
+#    
+#
+#class MagneticWell(Optimizable):
+#    def __init__(self, boozer_surface):
+#        """A magnetic well evaluator
+#
+#        Args:
+#        """
+#        super().__init__(depends_on=[boozer_surface])
+#        self.boozer_surface = boozer_surface
+#        assert isinstance(boozer_surface.label, Volume)
+#
+#        self.toroidal_flux = ToroidalFlux(boozer_surface.surface, BiotSavart(boozer_surface.biotsavart.coils))
+#        self.J_jax = jit(lambda tf, volume, G, B1: mean_well_pure(tf, volume, G, B1))
+#        self.thisgrad0 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=0)(tf, volume, G, B1))
+#        # dvol_dcoils is 0, so we don't really need this
+#        self.thisgrad1 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=1)(tf, volume, G, B1))
+#        self.thisgrad2 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=2)(tf, volume, G, B1))
+#        self.thisgrad3 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=3)(tf, volume, G, B1))
+#    
+#    def recompute_bell(self, parent=None):
+#        self._J = None
+#        self._dJ = None
+#
+#    def compute(self):
+#        boozer_surface = self.boozer_surface 
+#        if boozer_surface.need_to_run_code:
+#            res = boozer_surface.res
+#            boozer_surface.run_code(res['iota'], G=res['G'])
+#            self.toroidal_flux.recompute_bell()
+#
+#        P, L, U = boozer_surface.res['PLU']
+#        iota = boozer_surface.res['iota']
+#        G = boozer_surface.res['G']
+#        
+#        tf = self.toroidal_flux.J()
+#        vol = boozer_surface.surface.volume()
+#        B1 = boozer_surface.biotsavart.B()
+#        
+#        self.polynomial = np.array(pure_well_polynomial(tf, vol, G, B1))
+#        self._J = self.J_jax(tf, vol, G, B1)
+#        
+#        dJ_dtf = self.thisgrad0(tf, vol, G, B1)
+#        dJ_dvol = self.thisgrad1(tf, vol, G, B1)
+#        dJ_dG = self.thisgrad2(tf, vol, G, B1)
+#        dJ_dB1 = self.thisgrad3(tf, vol, G, B1)
+#                
+#        # Toroidal flux contribution
+#        # tf.dJ(coils) - vjp(tf.dJ(surface))
+#        dJ_dcoils1 = float(dJ_dtf)*self.toroidal_flux.dJ(partials=True)(self.toroidal_flux.biotsavart, as_derivative=True)
+#        dJ_ds = np.concatenate([self.toroidal_flux.dJ(partials=True)(self.toroidal_flux.surface), [0., 0.]])
+#        adj = forward_backward(P, L, U, dJ_ds)
+#        dJ_dcoils1 -= float(dJ_dtf)*boozer_surface.res['vjp'](adj, boozer_surface, iota, G)
+#        
+#        # B contribution
+#        dJ_dcoils2 = boozer_surface.biotsavart.B_vjp(dJ_dB1)
+#        ndofs = boozer_surface.surface.full_x.size
+#        dx_dc = boozer_surface.surface.dgamma_by_dcoeff().reshape((-1, 3, ndofs))
+#        dB_by_dX = boozer_surface.biotsavart.dB_by_dX()
+#        dB1_ds = np.einsum('ikl,ikm->ilm', dB_by_dX, dx_dc)
+#        rhs_ds = np.einsum('ik,ikm->m', dJ_dB1, dB1_ds)
+#        dJ_ds = np.concatenate([rhs_ds, [0., 0.]])
+#        adj = forward_backward(P, L, U, dJ_ds)
+#        dJ_dcoils2 -= boozer_surface.res['vjp'](adj, boozer_surface, iota, G)
+#        
+#        dJ_ds = np.zeros((ndofs+2,))
+#        dJ_ds[-1] = dJ_dG
+#        adj = forward_backward(P, L, U, dJ_ds)
+#        dJ_dcoils3 = (-1.)*boozer_surface.res['vjp'](adj, boozer_surface, iota, G)
+#        self._dJ = dJ_dcoils1 + dJ_dcoils2 + dJ_dcoils3
+#
+#    def J(self):
+#        if self._J is None:
+#            self.compute()
+#        return self._J
+#    
+#    @derivative_dec
+#    def dJ(self):
+#        if self._dJ is None:
+#            self.compute()
+#        return self._dJ
+#
+#    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+def pure_well_polynomial(tf, vol, G, B0, B1):
         # axis
         V0 = 0.
         Psi0 = 0
-        
+        modB0 = jnp.linalg.norm(B0, axis=-1)
+
         # surface
         V1 = jnp.abs(vol)
         Psi1 = jnp.abs(tf)
         modB1 = jnp.linalg.norm(B1, axis=-1)
         
         # G from boozer surfaces is multiplied by 2pi
+        V0p = jnp.abs(G) * jnp.mean(1/modB0**2) 
         V1p = jnp.abs(G) * jnp.mean(1/modB1**2)
         
-        a = -((V1 - Psi1*V1p)/Psi1**2)
-        b = -((-2*V1 + Psi1*V1p)/Psi1)
-        c = 0
-        return a, b, c
+        a = -((-Psi1*V0p + 2*V1 - Psi1*V1p)/Psi1**3)
+        b = -((2*Psi1*V0p - 3*V1 + Psi1*V1p)/Psi1**2)
+        c = V0p 
+        d = 0.
+        return a, b, c, d
 
-def mean_well_pure(tf, vol, G, B1):
-    a, b, c = pure_well_polynomial(tf, vol, G, B1)
-    return 2*a
+def mean_well_pure(tf, vol, G, B0, B1):
+    a, b, c, d = pure_well_polynomial(tf, vol, G, B0, B1)
+    return 2*b + 3*a*tf
     
 
 class MagneticWell(Optimizable):
-    def __init__(self, boozer_surface):
+    def __init__(self, axis, boozer_surface):
         """A magnetic well evaluator
 
         Args:
         """
-        super().__init__(depends_on=[boozer_surface])
+        super().__init__(depends_on=[axis, boozer_surface])
+        self.axis = axis
         self.boozer_surface = boozer_surface
         assert isinstance(boozer_surface.label, Volume)
 
         self.toroidal_flux = ToroidalFlux(boozer_surface.surface, BiotSavart(boozer_surface.biotsavart.coils))
-        self.J_jax = jit(lambda tf, volume, G, B1: mean_well_pure(tf, volume, G, B1))
-        self.thisgrad0 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=0)(tf, volume, G, B1))
+        self.J_jax = jit(lambda tf, volume, G, B0, B1: mean_well_pure(tf, volume, G, B0, B1))
+        self.thisgrad0 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=0)(tf, volume, G, B0, B1))
         # dvol_dcoils is 0, so we don't really need this
-        self.thisgrad1 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=1)(tf, volume, G, B1))
-        self.thisgrad2 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=2)(tf, volume, G, B1))
-        self.thisgrad3 = jit(lambda tf, volume, G, B1: grad(self.J_jax, argnums=3)(tf, volume, G, B1))
+        self.thisgrad1 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=1)(tf, volume, G, B0, B1))
+        self.thisgrad2 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=2)(tf, volume, G, B0, B1))
+        self.thisgrad3 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=3)(tf, volume, G, B0, B1))
+        self.thisgrad4 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=4)(tf, volume, G, B0, B1))
     
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
-
+        self._polynomial = None
+    
     def compute(self):
+        axis = self.axis
         boozer_surface = self.boozer_surface 
         if boozer_surface.need_to_run_code:
             res = boozer_surface.res
             boozer_surface.run_code(res['iota'], G=res['G'])
             self.toroidal_flux.recompute_bell()
+        
+        if axis.need_to_run_code:
+            res = axis.res
+            axis.run_code(res['length'])
 
         P, L, U = boozer_surface.res['PLU']
         iota = boozer_surface.res['iota']
         G = boozer_surface.res['G']
         
+        B0 = axis.biotsavart.B()
+
         tf = self.toroidal_flux.J()
         vol = boozer_surface.surface.volume()
         B1 = boozer_surface.biotsavart.B()
         
-        self.polynomial = np.array(pure_well_polynomial(tf, vol, G, B1))
-        self._J = self.J_jax(tf, vol, G, B1)
+        self._polynomial = np.array(pure_well_polynomial(tf, vol, G, B0, B1))
+        self._J = self.J_jax(tf, vol, G, B0, B1)
         
-        dJ_dtf = self.thisgrad0(tf, vol, G, B1)
-        dJ_dvol = self.thisgrad1(tf, vol, G, B1)
-        dJ_dG = self.thisgrad2(tf, vol, G, B1)
-        dJ_dB1 = self.thisgrad3(tf, vol, G, B1)
-                
+        dJ_dtf = self.thisgrad0(tf, vol, G, B0, B1)
+        dJ_dvol = self.thisgrad1(tf, vol, G, B0, B1)
+        dJ_dG = self.thisgrad2(tf, vol, G, B0, B1)
+        dJ_dB0 = self.thisgrad3(tf, vol, G, B0, B1)
+        dJ_dB1 = self.thisgrad4(tf, vol, G, B0, B1)
+        
+
+        # B0 contribution
+        Pc, Lc, Uc = axis.res['PLU']
+        dJ_dcoils0 = axis.biotsavart.B_vjp(dJ_dB0)
+        ndofs = axis.curve.full_x.size
+        dx_dc = axis.curve.dgamma_by_dcoeff().reshape((-1, 3, ndofs))
+        dB_by_dX = axis.biotsavart.dB_by_dX()
+        dB0_ds = np.einsum('ikl,ikm->ilm', dB_by_dX, dx_dc)
+        rhs_ds = np.einsum('ik,ikm->m', dJ_dB0, dB0_ds)
+        dJ_ds = np.concatenate([rhs_ds, [0.]])
+        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
+        dJ_dcoils0 -= axis.res['vjp'](adj, axis.biotsavart, axis)
+
         # Toroidal flux contribution
         # tf.dJ(coils) - vjp(tf.dJ(surface))
         dJ_dcoils1 = float(dJ_dtf)*self.toroidal_flux.dJ(partials=True)(self.toroidal_flux.biotsavart, as_derivative=True)
@@ -271,7 +406,7 @@ class MagneticWell(Optimizable):
         adj = forward_backward(P, L, U, dJ_ds)
         dJ_dcoils1 -= float(dJ_dtf)*boozer_surface.res['vjp'](adj, boozer_surface, iota, G)
         
-        # B contribution
+        # B1 contribution
         dJ_dcoils2 = boozer_surface.biotsavart.B_vjp(dJ_dB1)
         ndofs = boozer_surface.surface.full_x.size
         dx_dc = boozer_surface.surface.dgamma_by_dcoeff().reshape((-1, 3, ndofs))
@@ -286,7 +421,13 @@ class MagneticWell(Optimizable):
         dJ_ds[-1] = dJ_dG
         adj = forward_backward(P, L, U, dJ_ds)
         dJ_dcoils3 = (-1.)*boozer_surface.res['vjp'](adj, boozer_surface, iota, G)
-        self._dJ = dJ_dcoils1 + dJ_dcoils2 + dJ_dcoils3
+
+        self._dJ = dJ_dcoils1 + dJ_dcoils2 + dJ_dcoils3 + dJ_dcoils0
+    
+    def polynomial(self):
+        if self._polynomial is None:
+            self.compute()
+        return self._polynomial
 
     def J(self):
         if self._J is None:
