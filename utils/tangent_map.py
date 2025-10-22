@@ -8,6 +8,9 @@ import numpy as np
 import jax.numpy as jnp
 from jax import jit, grad, jacfwd
 
+#from jax import config
+#config.update("jax_disable_jit", True)
+
 # adapted from https://hackmd.io/@NCTUIAM5804/Sk1JhoXoI
 def cheb(Npts, a, b):
     N = Npts-1
@@ -100,45 +103,73 @@ def monodromy_pure(B, gradB, L, gamma, D):
     return R
 
 def eigenvalues_pure(B, gradB, L, gamma, D):
+    R = monodromy_pure(B, gradB, L, gamma, D).astype(complex)
+    #tr = jnp.trace(R, axis1=1, axis2=2).astype(complex)
+    # skip the nondifferentiable tr=2 in the IC
+    a = R[1:, 0, 0]
+    b = R[1:, 0, 1]
+    c = R[1:, 1, 0]
+    d = R[1:, 1, 1]
+
+    eigs1 = ((a+d) + jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    eigs2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    return eigs1, eigs2
+
+def angle_pure(B, gradB, L, gamma, D):
     R = monodromy_pure(B, gradB, L, gamma, D)
-    tr = jnp.trace(R, axis1=1, axis2=2).astype(complex)
-    tr = tr[1:]
-    eigs = tr/2 + jnp.sqrt((tr/2)**2-1)
-    return eigs
-
-# obtained from chatGPT
-def sqrtm_2x2_pure(A):
-    A = A.astype(complex)
-    a, b, c = A[0,0], A[0,1], A[1,1]
-    detA = a*c - b*b
-    t = a + c
-    return (A + jnp.sqrt(detA) * jnp.eye(2)) / jnp.sqrt(t + 2*jnp.sqrt(detA))
-
+    Rf = R[-1]
+    a = Rf[0, 0]
+    b = Rf[0, 1]
+    c = Rf[1, 0]
+    d = Rf[1, 1]
+    
+    eig1 = ((a+d) + jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    eig2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    v1 = jnp.array([-b, a-eig1])
+    v2 = jnp.array([-b, a-eig2])
+    v1 /= jnp.linalg.norm(v1)
+    v2 /= jnp.linalg.norm(v2)
+    theta1 = jnp.arccos(jnp.dot(v1, v2))
+    theta2 = jnp.pi - theta1
+    return jnp.min(jnp.array([theta1, theta2]))
+    
 def elongation_pure(B, gradB, L, gamma, D):
     R = monodromy_pure(B, gradB, L, gamma, D)
     # get an eigenvector, then make S
     #v = jnp.linalg.eig(R[-1])[1][:, 0]
     #S = jnp.concatenate([v[:, None].real, v[:, None].imag], axis=1)
-    S = sqrtm_2x2_pure(R[-1].T @ R[-1])
+    #S = sqrtm_2x2_pure(R[-1].T @ R[-1])
+    Rf = R[-1].astype(complex)
+    a = Rf[0, 0]
+    b = Rf[0, 1]
+    c = Rf[1, 0]
+    d = Rf[1, 1]
+
+    eig1 = ((a+d) + jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    eig2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    v1 = jnp.array([-b, a-eig1])
+    S = jnp.concatenate([v1[:, None].real, v1[:, None].imag], axis=1)
 
     a, b = S[0]
     c, d = S[1]
-    eig1 = ((a+d) + jnp.sqrt((a+d)**2 - 4*(a*d - b*c))) / 2
-    eig2 = ((a+d) - jnp.sqrt((a+d)**2 - 4*(a*d - b*c))) / 2
+    eig1 = ((a+d) + jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
+    eig2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
     elong = jnp.abs(eig1/eig2)
     return jnp.max(jnp.array([elong, 1/elong]))
 
 #print("theta is", theta[-1])
 #theta = jnp.atan2(eigs.imag, eigs.real)/np.pi
 def winding_pure(B, gradB, L, gamma, D, wh, nfp):
-    eigs = eigenvalues_pure(B, gradB, L, gamma, D)
+    eigs1, eigs2 = eigenvalues_pure(B, gradB, L, gamma, D)
     #eigs_normalized = eigs/jnp.abs(eigs)
     #winding = nfp*jnp.sum(wh*(D@eigs_normalized)/eigs_normalized)/(2*jnp.pi*1j)
     #return winding.real
-    winding = nfp*jnp.atan2(eigs[-1].imag, eigs[-1].real)/(2*np.pi)
+    winding = nfp*jnp.atan2(eigs1[-1].imag, eigs1[-1].real)/(2*np.pi)
     return winding
 
-class TangentMap(Optimizable):
+
+
+class XTangentMap(Optimizable):
     def __init__(self, axis, biotsavart):
         """
         Evaluate the the tangent map on a fieldline
@@ -151,7 +182,89 @@ class TangentMap(Optimizable):
         nfp = axis.curve.nfp
         #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
         # Example usage:
-        N = 5*axis.curve.order+1  # Number of intervals (N+1 grid points)
+        N = 2*axis.curve.order+1  # Number of intervals (N+1 grid points)
+        D, xh, wh = cheb(N, 0, 1./nfp)
+        self.D = D
+        self.xh = xh
+        self.wh = wh
+        
+        self.angle_jax       = jit(lambda B, gradB, L, gamma: angle_pure(B, gradB, L, gamma, self.D))
+        self.angle_dB        = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=0)(B, gradB, L, gamma))
+        self.angle_dgradB    = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=1)(B, gradB, L, gamma))
+        self.angle_dL        = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=2)(B, gradB, L, gamma))
+        self.angle_dgamma    = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=3)(B, gradB, L, gamma))
+        
+        self.axis = axis
+        curve = axis.curve
+        self.curve = CurveXYZFourierSymmetries(self.xh, curve.order, curve.nfp, curve.stellsym, ntor=curve.ntor, dofs=curve.dofs)
+    
+    def recompute_bell(self, parent=None):
+        self._angle = None
+        self._dangle_dcoils = None
+    
+    @property
+    def angle(self):
+        if self._angle is None:
+            self.compute()
+        return self._angle
+    
+    @property
+    def dangle_dcoils(self):
+        if self._dangle_dcoils is None:
+            self.compute()
+        return self._dangle_dcoils
+
+    def compute(self):
+        axis = self.axis
+        curve = self.curve
+        biotsavart = self.biotsavart
+        
+        if axis.need_to_run_code:
+            res = axis.res
+            axis.run_code(res['length'])
+
+        biotsavart.set_points(curve.gamma())
+        B = biotsavart.B()
+        gradB = biotsavart.dB_by_dX()
+        gradgradB = biotsavart.d2B_by_dXdX()
+        L = axis.res['length']
+        gamma = curve.gamma()
+        self._angle = self.angle_jax(B, gradB, L, gamma)
+
+        dangle_dB = self.angle_dB(B, gradB, L, gamma)
+        dangle_dgradB = self.angle_dgradB(B, gradB, L, gamma)
+        dangle_dL = self.angle_dL(B, gradB, L, gamma)
+        dangle_dgamma_partial = self.angle_dgamma(B, gradB, L, gamma)
+
+        Pc, Lc, Uc = axis.res['PLU']
+        dangle_dcoils = sum(biotsavart.B_and_dB_vjp(dangle_dB, dangle_dgradB))
+        
+        dgamma_da = curve.dgamma_by_dcoeff()
+        dB_da = np.einsum('ikl,ikm->ilm', gradB, dgamma_da, optimize=True)
+        dgradB_da = np.einsum('ijkl,ikm->ijlm', gradgradB, dgamma_da, optimize=True)
+        dangle_dgamma = np.einsum('ij,ijm->m', dangle_dB, dB_da, optimize=True) + \
+                       np.einsum('ijk,ijkm->m', dangle_dgradB, dgradB_da, optimize=True) + \
+                       np.einsum('ik,ikm->m', dangle_dgamma_partial, dgamma_da)
+        dJ_ds = np.concatenate([dangle_dgamma, [dangle_dL]])
+        
+        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
+        dangle_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
+        self._dangle_dcoils = dangle_dcoils
+
+class OTangentMap(Optimizable):
+    def __init__(self, axis, biotsavart):
+        """
+        Evaluate the the tangent map on a fieldline
+
+        Args:
+        """
+        super().__init__(depends_on=[axis])
+        self.biotsavart = biotsavart
+        
+        nfp = axis.curve.nfp
+        #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
+        # Example usage:
+        N = 2*axis.curve.order+1  # Number of intervals (N+1 grid points)
         D, xh, wh = cheb(N, 0, 1./nfp)
         self.D = D
         self.xh = xh
@@ -254,6 +367,18 @@ class TangentMap(Optimizable):
         adj = forward_backward(Pc, Lc, Uc, dJ_ds)
         delongation_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
         self._delongation_dcoils = delongation_dcoils
+
+class Xangle(Optimizable):
+    def __init__(self, tangent_map):
+        super().__init__(depends_on=[tangent_map])
+        self.tangent_map = tangent_map
+
+    def J(self):
+        return self.tangent_map.angle
+    
+    @derivative_dec
+    def dJ(self):
+        return self.tangent_map.dangle_dcoils
 
 class AxisElongation(Optimizable):
     def __init__(self, tangent_map):
