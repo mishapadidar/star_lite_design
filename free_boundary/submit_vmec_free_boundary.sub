@@ -14,12 +14,16 @@ source /mnt/home/mpadidar/code/near_axis/env_temp/bin/activate
 export PYTHONPATH="${PYTHONPATH}:/mnt/home/mpadidar/code/star_lite"
 cd $HOME/code/star_lite/star_lite_design/free_boundary
 
-# no bootstrap current
-# mpiexec -n 128 python vmec_free_boundary.py A 0 0
-# mpiexec -n 128 python vmec_free_boundary.py A 0.01 0
-# mpiexec -n 128 python vmec_free_boundary.py A 0.1 0
-# mpiexec -n 128 python vmec_free_boundary.py A 0.2 0
-
 # with bootstrap current
-# mpiexec -n 128 python vmec_free_boundary.py A 0.01 -0.1
-# mpiexec -n 128 python vmec_free_boundary.py A 0.1 -1
+mpiexec -n 128 python vmec_free_boundary.py A 0 0
+mpiexec -n 128 python vmec_free_boundary.py A 0.01 0
+mpiexec -n 128 python vmec_free_boundary.py A 0.01 0.01
+mpiexec -n 128 python vmec_free_boundary.py A 0.01 0.10
+mpiexec -n 128 python vmec_free_boundary.py A 0.01 1.0
+mpiexec -n 128 python vmec_free_boundary.py A 0.01 10.0
+mpiexec -n 128 python vmec_free_boundary.py A 0.1 0
+mpiexec -n 128 python vmec_free_boundary.py A 0.1 0.01
+mpiexec -n 128 python vmec_free_boundary.py A 0.1 0.10
+mpiexec -n 128 python vmec_free_boundary.py A 0.1 1.0
+mpiexec -n 128 python vmec_free_boundary.py A 0.1 10.0
+
