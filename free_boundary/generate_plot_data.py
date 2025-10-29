@@ -1,6 +1,8 @@
 import numpy as np
 from simsopt._core import load
 from simsopt.mhd import Vmec, vmec_compute_geometry, Quasisymmetry, QuasisymmetryRatioResidual,Boozer
+from vmec_virtual_casing import VirtualCasingField
+from star_lite_design.utils.find_x_point import find_x_point
 import sys, os
 
 """
@@ -41,6 +43,7 @@ bsurf = data[0][0] # BoozerSurfaces
 surf = bsurf.surface
 biotsavart = bsurf.biotsavart
 ma = data[2][0] # magnetic axis CurveRZFourier
+xp_guess = data[3][0] # X-point CurveRZFouriers on one field period
 
 free_boundary_file = indir + f"wout_design_{design}_beta_{beta}_Imin_{Imin}_free_boundary.nc"
 eq_free = Vmec(free_boundary_file)
@@ -56,6 +59,13 @@ s_qs = np.logspace(-2, 0, 64)
 boozer = Boozer(eq_free, mpol=32, ntor=32)
 qs_err = Quasisymmetry(boozer, s_qs, helicity_m=1, helicity_n=helicity_n, normalization="symmetric", weight="stellopt_ornl").J()
 
+# Compute X-point
+vcfield = VirtualCasingField(eq_free, biotsavart, s=1.0, ntheta=256, nphi=512)
+xyz0 = xp_guess.gamma() # (npoints, 3)
+r0 = np.sqrt(xyz0[:, 0]**2 + xyz0[:, 1]**2)
+z0 = xyz0[:, 2]
+xp_fp, xp_ft, xp_success = find_x_point(vcfield, r0, z0, nfp, xp_guess.order)
+
 plot_data = {}
 plot_data['iota_free'] = -data_free.iota
 plot_data['s_iota_free'] = s1d
@@ -64,6 +74,8 @@ plot_data['s_qs_err_free'] = s_qs
 plot_data['design'] = design
 plot_data['beta'] = beta
 plot_data['Imin'] = Imin
+plot_data['xp_fp'] = xp_fp.gamma()
+plot_data['xp_guess'] = xp_guess.gamma()
 
 import pickle
 outdir = "./plot_data/"

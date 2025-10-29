@@ -4,6 +4,7 @@ from simsopt._core import load
 from simsopt.mhd import Vmec, vmec_compute_geometry, Quasisymmetry, QuasisymmetryRatioResidual,Boozer
 import glob
 import pickle
+import pandas as pd
 plt.rc('font', family='serif')
 # plt.rc('text.latex', preamble=r'\\usepackage{amsmath,bm}')
 plt.rcParams.update({'font.size': 12})
@@ -12,54 +13,99 @@ colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
 # colors = ['lightcoral', 'goldenrod', 'mediumseagreen','orange', "lightskyblue", "plum"]
 colors = ['goldenrod', 'mediumseagreen',"lightskyblue", "plum", 'orange', 'lightcoral', 'tab:blue', 'tab:green', 'tab:orange', 'tab:red', 'tab:purple']
 linestyles = ['-', '--', '-.', ':', '-', '--', '-.', ':', '-', '--', '-.']
+markers= ['o', 's', 'o', '^', 'D', 'v', 'P', '*', 'X', '<', '>', 'h']
 
 """
 Plot the result of the free boundary computation e.g.
     python plot.py
-
+First you need to run vmec_free_boundary.py and save the wout files in output/.
+Then run generate_plot_data.py to generate the data files in ./plot_data/.
 """
 
-
-filelist = glob.glob("./plot_data/plot_data*.pkl")
-
-
-fig, (ax1,ax2) = plt.subplots(figsize=(12,4), ncols=2)
+design = 'A'
+filelist = glob.glob(f"./plot_data/plot_data_design_{design}*.pkl")
 
 
-# (beta, Imin)
-keep_list = [(0.0,0.0), (0.01, 0.0), (0.01, -1.0), (0.1, 0.0), (0.1, -10.0)]
+data = pickle.load(open(f'./plot_data/plot_data_design_{design}_beta_0.0_Imin_0.0.pkl', "rb"))
+iota_vac = data['iota_free'][-1] # boundary iota
+qs_err_vac = 100 * np.mean(data['qs_err_free'])
+x_point_vac = data['xp_fp']
+
+df_data = {'qs_err':[], 'iota':[], 'xp_shift':[], 'beta':[], 'Imin':[], 'I0':[]}
 
 for ii, ff in enumerate(filelist):
     data = pickle.load(open(ff, "rb"))
-    iota_free = data['iota_free']
-    s_iota_free = data['s_iota_free']
-    qs_err_free = data['qs_err_free']
-    s_qs_err_free = data['s_qs_err_free']
-    design = data['design']
-    beta = data['beta']
-    Imin = data['Imin']
+    # compute metrics
+    iota = data['iota_free'][-1]
+    qs_err = 100* np.mean(data['qs_err_free'])
+    xp = data['xp_fp']
+    xp_shift = 1000 * np.max(np.linalg.norm(xp - x_point_vac, axis=-1)) # in mm
+    I0 = 4*data['Imin']
 
-    if (beta, Imin) not in keep_list:
+    # save it
+    df_data['iota'].append(iota)
+    df_data['qs_err'].append(qs_err)
+    df_data['xp_shift'].append(xp_shift)
+    df_data['beta'].append(data['beta'])
+    df_data['Imin'].append(data['Imin'])
+    df_data['I0'].append(I0)
+
+
+df = pd.DataFrame(df_data)
+df.sort_values(by=['beta', 'Imin'], inplace=True)
+print(df)
+
+fig, (ax1,ax2,ax3) = plt.subplots(figsize=(12,4), ncols=3)
+
+for ii, beta in enumerate(df['beta'].unique()):
+    if beta == 0.0:
         continue
+    df_sub = df[df['beta']==beta]
+    ax1.plot(df_sub['I0'], df_sub['qs_err'],   marker=markers[ii], color=colors[ii], markersize=4, label=f'beta={beta}%')
+    ax2.plot(df_sub['I0'], df_sub['iota'], marker=markers[ii], color=colors[ii], markersize=4, label=f'beta={beta}%')
+    ax3.plot(df_sub['I0'], df_sub['xp_shift'],   marker=markers[ii], color=colors[ii], markersize=4, label=f'beta={beta}%')
 
-    label = rf'beta={beta :.3f} % , I={Imin :.2f} A'
-    ax1.plot(s_qs_err_free, 100 * qs_err_free, lw=2, ls =linestyles[ii], color=colors[ii], label=label)
-    
-    ax2.plot(s_iota_free, iota_free, lw=2, ls =linestyles[ii], color=colors[ii])
+# plot the expected configuration as a star
+df_sub = df[(df['beta']==0.01) & (df['Imin']==0.01)]
+ax1.scatter(df_sub['I0'], df_sub['qs_err'],   marker='*', s=100, color='red', label=f'TJ-K scale',zorder=100)
+ax2.scatter(df_sub['I0'], df_sub['iota'], marker='*', s=100, color='red', label=f'TJ-K scale',zorder=100)
+ax3.scatter(df_sub['I0'], df_sub['xp_shift'],   marker='*', s=100, color='red', label=f'TJ-K scale',zorder=100)
 
 
-# ax1.set_yscale('log')
-ax1.set_xscale('log')
+ax1.set_xlabel(r'$I_0$ [A]')
+ax1.set_ylabel('$J_{QS}$ [%]')
 ax1.grid(color='lightgrey', linestyle='--', linewidth=0.5)
-ax1.set_xlabel(r'$s$')
-ax1.set_ylabel('QS-error [%]')
-# ax1.legend(loc='upper left')
+ax1.axhline(qs_err_vac, color='black', linestyle=':', label='vacuum')
 
-fig.legend(loc='upper center', ncol=4, bbox_to_anchor=(0.5, 1.1), fontsize=10)
-ax2.set_xlabel(r'$s$')
-ax2.set_ylabel(r'$\iota$')
+gap_scale = 3
+qs_gap = np.abs(df[(df['beta']==0.1) & (df['Imin']==0.0)].qs_err.item() - qs_err_vac)
+ax1.set_ylim(qs_err_vac-gap_scale*qs_gap, qs_err_vac+gap_scale*qs_gap)
+
+
+ax2.set_xlabel(r'$I_0$ [A]')
+ax2.set_ylabel(r'$\iota_{edge}$')
+ax2.axhline(iota_vac, color='black', linestyle=':', label='vacuum')
 ax2.grid(color='lightgrey', linestyle='--', linewidth=0.5)
+# ax2.set_ylim(0.18, 0.20)
+iota_gap = np.abs(df[(df['beta']==0.1) & (df['Imin']==0.0)].iota.item() - iota_vac)
+ax2.set_ylim(iota_vac-gap_scale*iota_gap, iota_vac+gap_scale*iota_gap)
+ax2.legend(loc='upper left', fontsize=10)
 
+ax3.set_xlabel(r'$I_0$ [A]')
+ax3.set_ylabel('X-point displacement [mm]')
+ax3.axhline(0.0, color='black', linestyle=':', label='vacuum')
+ax3.grid(color='lightgrey', linestyle='--', linewidth=0.5)
+# ax3.set_ylim(-0.3, 5.0)
+xp_shift_gap = np.abs(df[(df['beta']==0.1) & (df['Imin']==0.0)].xp_shift.item())
+ax3.set_ylim(-0.3, 2*gap_scale*xp_shift_gap)
+
+ax1.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+5)
+ax2.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+5)
+ax3.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+5)
+
+ax1.set_xscale('symlog',linthresh=1e-2)
+ax2.set_xscale('symlog',linthresh=1e-2)
+ax3.set_xscale('symlog',linthresh=1e-2)
 plt.tight_layout()
-plt.savefig("./plot_data/qs_iota_plot.pdf", bbox_inches='tight', format='pdf')
-# plt.show()
+plt.savefig(f"./plot_data/design_{design}_free_boundary_plot.pdf", bbox_inches='tight', format='pdf')
+plt.show()
