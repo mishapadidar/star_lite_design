@@ -258,7 +258,7 @@ from jax import jit, grad
 #        vol = boozer_surface.surface.volume()
 #        B1 = boozer_surface.biotsavart.B()
 #        
-#        self.polynomial = np.array(pure_well_polynomial(tf, vol, G, B1))
+#        self._polynomial = np.array(pure_well_polynomial(tf, vol, G, B1))
 #        self._J = self.J_jax(tf, vol, G, B1)
 #        
 #        dJ_dtf = self.thisgrad0(tf, vol, G, B1)
@@ -301,6 +301,11 @@ from jax import jit, grad
 #            self.compute()
 #        return self._dJ
 #
+#    def polynomial(self):
+#        if self._polynomial is None:
+#            self.compute()
+#        return self._polynomial
+#
 #    return_fn_map = {'J': J, 'dJ': dJ}
 
 
@@ -315,8 +320,10 @@ def pure_well_polynomial(tf, vol, G, B0, B1):
         Psi1 = jnp.abs(tf)
         modB1 = jnp.linalg.norm(B1, axis=-1)
         
-        # G from boozer surfaces is multiplied by 2pi
-        V0p = jnp.abs(G) * jnp.mean(1/modB0**2) 
+        # G from boozer surfaces is multiplied by 2pi, Psi is also multiplied by 2pi, hence we don't need to have a (2pi)^2 in front
+        #V0p = jnp.abs(G) * jnp.mean(1/modB0**2)
+        # because the axis is not perfectly QS
+        V0p = jnp.abs(G) * jnp.mean(1/modB0) / jnp.mean(modB0)
         V1p = jnp.abs(G) * jnp.mean(1/modB1**2)
         
         a = -((-Psi1*V0p + 2*V1 - Psi1*V1p)/Psi1**3)
