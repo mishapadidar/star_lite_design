@@ -182,7 +182,7 @@ class XTangentMap(Optimizable):
         nfp = axis.curve.nfp
         #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
         # Example usage:
-        N = 2*axis.curve.order+1  # Number of intervals (N+1 grid points)
+        N = 5*axis.curve.order+1  # Number of intervals (N+1 grid points)
         D, xh, wh = cheb(N, 0, 1./nfp)
         self.D = D
         self.xh = xh
@@ -252,7 +252,7 @@ class XTangentMap(Optimizable):
         self._dangle_dcoils = dangle_dcoils
 
 class OTangentMap(Optimizable):
-    def __init__(self, axis, biotsavart):
+    def __init__(self, axis, biotsavart, phi=0.):
         """
         Evaluate the the tangent map on a fieldline
 
@@ -264,8 +264,8 @@ class OTangentMap(Optimizable):
         nfp = axis.curve.nfp
         #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
         # Example usage:
-        N = 2*axis.curve.order+1  # Number of intervals (N+1 grid points)
-        D, xh, wh = cheb(N, 0, 1./nfp)
+        N = 5*axis.curve.order+1  # Number of intervals (N+1 grid points)
+        D, xh, wh = cheb(N, phi, phi+1./nfp)
         self.D = D
         self.xh = xh
         self.wh = wh
