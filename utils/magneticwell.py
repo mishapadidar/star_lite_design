@@ -258,7 +258,7 @@ from jax import jit, grad
 #        vol = boozer_surface.surface.volume()
 #        B1 = boozer_surface.biotsavart.B()
 #        
-#        self._polynomial = np.array(pure_well_polynomial(tf, vol, G, B1))
+#        self.polynomial = np.array(pure_well_polynomial(tf, vol, G, B1))
 #        self._J = self.J_jax(tf, vol, G, B1)
 #        
 #        dJ_dtf = self.thisgrad0(tf, vol, G, B1)
@@ -301,11 +301,6 @@ from jax import jit, grad
 #            self.compute()
 #        return self._dJ
 #
-#    def polynomial(self):
-#        if self._polynomial is None:
-#            self.compute()
-#        return self._polynomial
-#
 #    return_fn_map = {'J': J, 'dJ': dJ}
 
 
@@ -332,13 +327,19 @@ def pure_well_polynomial(tf, vol, G, B0, B1):
         d = 0.
         return a, b, c, d
 
-def mean_well_pure(tf, vol, G, B0, B1):
+def well_pure(tf, vol, G, B0, B1):
     a, b, c, d = pure_well_polynomial(tf, vol, G, B0, B1)
-    return 2*b + 3*a*tf
+    x = jnp.linspace(0, tf, 100)
+    d2V_dtf2 = 6*a*x + 2*b
+    return d2V_dtf2
+
+def thresholded_well_pure(tf, vol, G, B0, B1, threshold):
+    d2V_dtf2 = well_pure(tf, vol, G, B0, B1)
+    return jnp.mean(jnp.maximum(d2V_dtf2-threshold, 0)**2)
     
 
 class MagneticWell(Optimizable):
-    def __init__(self, axis, boozer_surface):
+    def __init__(self, axis, boozer_surface, threshold):
         """A magnetic well evaluator
 
         Args:
@@ -346,10 +347,11 @@ class MagneticWell(Optimizable):
         super().__init__(depends_on=[axis, boozer_surface])
         self.axis = axis
         self.boozer_surface = boozer_surface
+        self.threshold = threshold
         assert isinstance(boozer_surface.label, Volume)
 
         self.toroidal_flux = ToroidalFlux(boozer_surface.surface, BiotSavart(boozer_surface.biotsavart.coils))
-        self.J_jax = jit(lambda tf, volume, G, B0, B1: mean_well_pure(tf, volume, G, B0, B1))
+        self.J_jax = jit(lambda tf, volume, G, B0, B1: thresholded_well_pure(tf, volume, G, B0, B1, self.threshold))
         self.thisgrad0 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=0)(tf, volume, G, B0, B1))
         # dvol_dcoils is 0, so we don't really need this
         self.thisgrad1 = jit(lambda tf, volume, G, B0, B1: grad(self.J_jax, argnums=1)(tf, volume, G, B0, B1))
@@ -361,6 +363,7 @@ class MagneticWell(Optimizable):
         self._J = None
         self._dJ = None
         self._polynomial = None
+        self._well = None
     
     def compute(self):
         axis = self.axis
@@ -384,6 +387,7 @@ class MagneticWell(Optimizable):
         vol = boozer_surface.surface.volume()
         B1 = boozer_surface.biotsavart.B()
         
+        self._well = np.array(well_pure(tf, vol, G, B0, B1))
         self._polynomial = np.array(pure_well_polynomial(tf, vol, G, B0, B1))
         self._J = self.J_jax(tf, vol, G, B0, B1)
         
@@ -431,6 +435,11 @@ class MagneticWell(Optimizable):
 
         self._dJ = dJ_dcoils1 + dJ_dcoils2 + dJ_dcoils3 + dJ_dcoils0
     
+    def well(self):
+        if self._well is None:
+            self.compute()
+        return self._well
+
     def polynomial(self):
         if self._polynomial is None:
             self.compute()
