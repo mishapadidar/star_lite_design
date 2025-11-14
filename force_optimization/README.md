@@ -1,3 +1,5 @@
-# Optimize the designs for reduced magnetic forces on the coils
+# Analyze the coil forces and coil inductances
 
-`optimization_with_forces.py` is the script that misha used to optimize the design for reduced coil forces.
+`inductance.py` contains code to compute coil inductance.
+`generate_plot_data.py` generates data for coil force and inductance plots.
+`plot.py` plots the data.
