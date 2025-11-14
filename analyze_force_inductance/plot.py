@@ -52,4 +52,5 @@ ax2.set_ylabel('Current [kA]')
 ax2.set_title('Current Ramp-up in Coils')
 
 plt.tight_layout()
+plt.savefig(outdir + "force_inductance_analysis.pdf", format='pdf')
 plt.show()
