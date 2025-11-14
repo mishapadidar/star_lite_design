@@ -28,6 +28,7 @@ ax1.set_xlabel('Arc Length [m]')
 ax1.set_ylabel('Force Magnitude [N/m]')
 ax1.set_title('Force Distribution Along Coils')
 ax1.legend(loc='upper right')
+ax1.grid(color='lightgray', linestyle='--', linewidth=0.5)
 
 
 # plot current I(t)

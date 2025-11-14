@@ -5,7 +5,7 @@ from simsopt._core import load
 from simsopt.field.force import coil_force
 from simsopt.field.selffield import regularization_circ
 from simsopt.geo import curves_to_vtk
-from star_lite_design.force_optimization.inductance import Inductance
+from star_lite_design.analyze_force_inductance.inductance import Inductance
 
 
 design_file = "../designs/designA_after_scaled.json"
