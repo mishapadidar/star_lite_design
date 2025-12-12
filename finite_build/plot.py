@@ -18,6 +18,13 @@ markers= ['o', 's', 'o', '^', 'D', 'v', 'P', '*', 'X', '<', '>', 'h']
 
 """
 Plot finite build coils
+
+Run with 
+    python plot.py design
+
+Arguments:
+design : str
+    Design to plot, either "A" or "B"
 """
 
 
@@ -55,8 +62,8 @@ curves_fb = []
 for c in center_curves:
     curves = create_hexagonal_filament_grid(c, n_layers=n_layers, radius=cable_radius)
     curves_fb.extend(curves)
-curves_to_vtk(curves_fb, outdir + "hex_filament_grid")
-curves_to_vtk(center_curves, outdir + "hex_filament_grid_center")
+curves_to_vtk(curves_fb, outdir + "finite_build", close=True)
+curves_to_vtk(center_curves, outdir + "finite_build_center", close=True)
 
 
 # make a plot of the hexagonal grid
@@ -92,4 +99,5 @@ plt.gca().set_aspect('equal', adjustable='box')
 plt.xticks([-0.04,0.0,0.04])
 plt.yticks([-0.04,0.0,0.04])
 plt.tight_layout()
+plt.savefig(outdir + "coil_cross_section.pdf", format='pdf')
 plt.show()
