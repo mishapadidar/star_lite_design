@@ -11,7 +11,8 @@ plt.rcParams.update({'font.size': 16})
 colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", 
           "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
 # colors = ['lightcoral', 'goldenrod', 'mediumseagreen','orange', "lightskyblue", "plum"]
-colors = ['goldenrod', 'mediumseagreen',"lightskyblue", "plum", 'orange', 'lightcoral', 'tab:blue', 'tab:green', 'tab:orange', 'tab:red', 'tab:purple']
+# colors = ['goldenrod', 'mediumseagreen',"lightskyblue", "plum", 'orange', 'lightcoral', 'tab:blue', 'tab:green', 'tab:orange', 'tab:red', 'tab:purple']
+colors = ['#1F77B4', '#D62728']
 linestyles = ['-', '--', '-.', ':', '-', '--', '-.', ':', '-', '--', '-.']
 markers= ['o', 's', 'o', '^', 'D', 'v', 'P', '*', 'X', '<', '>', 'h']
 
@@ -61,9 +62,9 @@ for ii, beta in enumerate(df['beta'].unique()):
     if beta == 0.0:
         continue
     df_sub = df[df['beta']==beta]
-    ax1.plot(df_sub['I0'], df_sub['qs_err'],   lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=f'beta={beta}%')
-    ax2.plot(df_sub['I0'], df_sub['iota'], lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=f'beta={beta}%')
-    ax3.plot(df_sub['I0'], df_sub['xp_shift'],  lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=f'beta={beta}%')
+    ax1.plot(df_sub['I0'], df_sub['qs_err'],   lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=r'$\beta$' + f'={beta}%')
+    ax2.plot(df_sub['I0'], df_sub['iota'], lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=r'$\beta$' + f'={beta}%')
+    ax3.plot(df_sub['I0'], df_sub['xp_shift'],  lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=r'$\beta$' + f'={beta}%')
 
 # # plot the expected configuration as a star
 # df_sub = df[(df['beta']==0.01) & (df['Imin']==0.01)]
@@ -72,8 +73,9 @@ for ii, beta in enumerate(df['beta'].unique()):
 # ax3.scatter(df_sub['I0'], df_sub['xp_shift'],   marker='*', s=100, color='red', label=f'TJ-K scale',zorder=100)
 
 
-ax1.set_xlabel(r'$I_0$ [A]')
-ax1.set_ylabel('$J_{QS}$ [%]')
+axis_fontsize = 18
+ax1.set_xlabel(r'$I_0$ [A]', fontsize=axis_fontsize)
+ax1.set_ylabel('$J_{QS}$ [%]', fontsize=axis_fontsize)
 ax1.grid(color='lightgrey', linestyle='--', linewidth=0.5)
 ax1.axhline(qs_err_vac, color='black', linestyle=':', lw=2, label='vacuum')
 
@@ -82,8 +84,8 @@ qs_gap = np.abs(df[(df['beta']==0.1) & (df['Imin']==0.0)].qs_err.item() - qs_err
 ax1.set_ylim(qs_err_vac-gap_scale*qs_gap, qs_err_vac+gap_scale*qs_gap)
 
 
-ax2.set_xlabel(r'$I_0$ [A]')
-ax2.set_ylabel(r'$\iota_{edge}$')
+ax2.set_xlabel(r'$I_0$ [A]', fontsize=axis_fontsize)
+ax2.set_ylabel(r'$\iota_{edge}$', fontsize=axis_fontsize)
 ax2.axhline(iota_vac, color='black', linestyle=':', lw=2,label='vacuum')
 ax2.grid(color='lightgrey', linestyle='--', linewidth=0.5)
 # ax2.set_ylim(0.18, 0.20)
@@ -91,17 +93,17 @@ iota_gap = np.abs(df[(df['beta']==0.1) & (df['Imin']==0.0)].iota.item() - iota_v
 ax2.set_ylim(iota_vac-gap_scale*iota_gap, iota_vac+gap_scale*iota_gap)
 ax2.legend(loc='upper left', fontsize=14)
 
-ax3.set_xlabel(r'$I_0$ [A]')
-ax3.set_ylabel('X-point displacement [mm]')
+ax3.set_xlabel(r'$I_0$ [A]', fontsize=axis_fontsize)
+ax3.set_ylabel('X-point displacement [mm]', fontsize=16)
 ax3.axhline(0.0, color='black', linestyle=':', lw=2,label='vacuum')
 ax3.grid(color='lightgrey', linestyle='--', linewidth=0.5)
 # ax3.set_ylim(-0.3, 5.0)
 xp_shift_gap = np.abs(df[(df['beta']==0.1) & (df['Imin']==0.0)].xp_shift.item())
 ax3.set_ylim(-0.3, 2*gap_scale*xp_shift_gap)
 
-ax1.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+5)
-ax2.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+5)
-ax3.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+5)
+ax1.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+20)
+ax2.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+20)
+ax3.set_xlim(np.min(df['I0'])-2e-3, np.max(df['I0'])+20)
 
 ax1.set_xscale('symlog',linthresh=1e-2)
 ax2.set_xscale('symlog',linthresh=1e-2)
