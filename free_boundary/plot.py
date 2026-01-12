@@ -62,9 +62,9 @@ for ii, beta in enumerate(df['beta'].unique()):
     if beta == 0.0:
         continue
     df_sub = df[df['beta']==beta]
-    ax1.plot(df_sub['I0'], df_sub['qs_err'],   lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=r'$\beta$' + f'={beta}%')
-    ax2.plot(df_sub['I0'], df_sub['iota'], lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=r'$\beta$' + f'={beta}%')
-    ax3.plot(df_sub['I0'], df_sub['xp_shift'],  lw=3, marker=markers[ii], color=colors[ii-1], markersize=6, label=r'$\beta$' + f'={beta}%')
+    ax1.plot(df_sub['I0'], df_sub['qs_err'],   lw=3, marker=markers[ii], color=colors[ii-1], alpha=0.8, markersize=8, label=r'$\beta$' + f'={beta}%')
+    ax2.plot(df_sub['I0'], df_sub['iota'], lw=3, marker=markers[ii], color=colors[ii-1], alpha=0.8, markersize=8, label=r'$\beta$' + f'={beta}%')
+    ax3.plot(df_sub['I0'], df_sub['xp_shift'],  lw=3, marker=markers[ii], color=colors[ii-1], alpha=0.8, markersize=8, label=r'$\beta$' + f'={beta}%')
 
 # # plot the expected configuration as a star
 # df_sub = df[(df['beta']==0.01) & (df['Imin']==0.01)]

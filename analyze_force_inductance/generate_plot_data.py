@@ -73,6 +73,23 @@ outdir = "./plot_data/"
 os.makedirs(outdir, exist_ok=True)
 curves_to_vtk(curves, outdir + f"/curves_with_forces", close=True, extra_data=point_data)
 
+print("")
+# arclength of flange points
+flange_arclength = []
+for curve in curves:
+    xyz = curve.gamma()
+    # flange is at max z and min z
+    idx1 = np.argmax(xyz[:,2])  # max z
+    idx2 = np.argmin(xyz[:,2])  # min z
+    # gp = curve.gammadash()
+    # quadpoints = curve.quadpoints
+    # dphi = np.diff(quadpoints)[0]
+    # arclengths = np.cumsum(np.linalg.norm(gp, axis=-1) * dphi)
+    # arcl1 = arclengths[idx1]
+    # arcl2 = arclengths[idx2]
+    flange_arclength.append([idx1, idx2])
+
+
 # save the data
 outfile = outdir + "plot_data.pkl"
 outdata = {}
@@ -85,6 +102,7 @@ outdata['forces'] = forces
 outdata['resistances'] = resistances
 outdata['arc_lengths'] = arc_lengths
 outdata['currents'] = currents
+outdata['flange_arclength'] = flange_arclength
 pickle.dump(outdata, open(outfile, "wb"))
 
 
