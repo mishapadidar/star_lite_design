@@ -8,11 +8,16 @@ from simsopt.geo import curves_to_vtk
 from star_lite_design.analyze_force_inductance.inductance import Inductance
 
 
+"""
+Generate force and inducatance data for plotting. 
+Run once per current configuration (0, 1, 2).
+"""
+
 design_file = "../designs/designA_after_scaled.json"
+current_group = 2
 
 # load the biotsavart (1 per Current configuration, so 3 total.)
 data = load(design_file)
-current_group = 0
 bsurf = data[0][current_group] # BoozerSurfaces
 axis_curve = data[2][current_group] # magnetic axis CurveRZFouriers
 
@@ -91,7 +96,7 @@ for curve in curves:
 
 
 # save the data
-outfile = outdir + "plot_data.pkl"
+outfile = outdir + f"plot_data_group_{current_group}.pkl"
 outdata = {}
 outdata['design_file'] = design_file
 outdata['current_group'] = current_group

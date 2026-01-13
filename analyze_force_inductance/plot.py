@@ -9,34 +9,45 @@ colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
 # colors = ['lightcoral', 'goldenrod', 'mediumseagreen','orange', "lightskyblue", "plum"]
 # colors = ['goldenrod', 'mediumseagreen',"lightskyblue", "plum", 'orange', 'lightcoral', 'tab:blue', 'tab:green', 'tab:orange', 'tab:red', 'tab:purple']
 colors = ['#1F77B4', '#D62728']
-linestyles = ['-', '--', '-.', ':', '-', '--', '-.', ':', '-', '--', '-.']
+linestyles = ['-', '--', ':',]
 markers= ['o', 's', 'o', '^', 'D', 'v', 'P', '*', 'X', '<', '>', 'h']
 
 outdir = "./plot_data/"
-data = pickle.load(open(outdir + "plot_data.pkl", "rb"))
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
 idx_distinct = [0, -1]  # indices of two distinct coils
 labels = ['L-coil', 'T-coil']
 
-# plot forces
-arc_lengths = data['arc_lengths']
-forces = data['forces']
-flange_points = data['flange_arclength']
-ax1.plot(arc_lengths[idx_distinct[0]], forces[idx_distinct[0]], label=labels[0], color=colors[0], lw=3, alpha=0.8)
-ax1.plot(arc_lengths[idx_distinct[1]],forces[idx_distinct[1]], label=labels[1], color=colors[1], lw=3, alpha=0.8)
-# # plot flange points
-# idx_flange = flange_points[idx_distinct[0]]
-# ax1.scatter(arc_lengths[idx_distinct[0]][idx_flange], forces[idx_distinct[0]][idx_flange], color='k', ls='--', lw=2)
-# idx_flange = flange_points[idx_distinct[1]]
-# ax1.scatter(arc_lengths[idx_distinct[1]][idx_flange], forces[idx_distinct[1]][idx_flange], color='k', ls='--', lw=2)
+for ii, current_group in enumerate([0, 1, 2]):
+    data = pickle.load(open(outdir + f"plot_data_group_{current_group}.pkl", "rb"))
+
+    # plot forces
+    arc_lengths = data['arc_lengths']
+    forces = data['forces']
+    flange_points = data['flange_arclength']
+    if ii == 0:
+        label1 = labels[0]
+        label2 = labels[1]
+    else:
+        label1 = None
+        label2 = None
+    ax1.plot(arc_lengths[idx_distinct[0]], forces[idx_distinct[0]], label=label1, color=colors[0], lw=3, alpha=0.8, ls=linestyles[ii])
+    ax1.plot(arc_lengths[idx_distinct[1]],forces[idx_distinct[1]], label=label2, color=colors[1], lw=3, alpha=0.8, ls=linestyles[ii])
+    # # plot flange points
+    # idx_flange = flange_points[idx_distinct[0]]
+    # ax1.scatter(arc_lengths[idx_distinct[0]][idx_flange], forces[idx_distinct[0]][idx_flange], color='k', ls='--', lw=2)
+    # idx_flange = flange_points[idx_distinct[1]]
+    # ax1.scatter(arc_lengths[idx_distinct[1]][idx_flange], forces[idx_distinct[1]][idx_flange], color='k', ls='--', lw=2)
 
 ax1.set_xlabel('Arc Length [m]')
 ax1.set_ylabel('Force Magnitude [N/m]')
 ax1.set_title('Force Distribution Along Coils')
 ax1.legend(loc='upper right')
 ax1.grid(color='lightgray', linestyle='-', linewidth=0.5)
+
+current_group = 0
+data = pickle.load(open(outdir + f"plot_data_group_{current_group}.pkl", "rb"))
 
 
 # plot current I(t)
