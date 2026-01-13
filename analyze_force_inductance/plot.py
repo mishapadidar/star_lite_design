@@ -40,33 +40,36 @@ for ii, current_group in enumerate([0, 1, 2]):
     # idx_flange = flange_points[idx_distinct[1]]
     # ax1.scatter(arc_lengths[idx_distinct[1]][idx_flange], forces[idx_distinct[1]][idx_flange], color='k', ls='--', lw=2)
 
+
+    # current_group = 0
+    # data = pickle.load(open(outdir + f"plot_data_group_{current_group}.pkl", "rb"))
+
+
+    # plot current I(t)
+    L = np.diag(data['L'])
+    R = data['resistances']
+    currents = np.abs(data['currents'])
+    tmax = 6*np.max(L/R)
+    print(L)
+    print(R)
+    for jj, idx in enumerate(idx_distinct):
+        L_i = L[idx]
+        R_i = R[idx]
+        I_i = currents[idx]
+        def I_t(t):
+            return I_i * (1 - np.exp(-R_i/L_i * t))
+        ts = np.linspace(0, tmax, 100)
+        Is = I_t(ts)
+        ax2.plot(ts*1000, Is/1000, label=labels[jj], color=colors[jj], lw=3, alpha=1.0,ls=linestyles[ii], zorder=100)  # in kA and ms
+        ax2.axhline(I_i/1000, color=colors[jj], lw=1, ls='-', alpha=0.6, zorder=1)
+
 ax1.set_xlabel('Arc Length [m]')
 ax1.set_ylabel('Force Magnitude [N/m]')
 ax1.set_title('Force Distribution Along Coils')
 ax1.legend(loc='upper right')
 ax1.grid(color='lightgray', linestyle='-', linewidth=0.5)
 
-current_group = 0
-data = pickle.load(open(outdir + f"plot_data_group_{current_group}.pkl", "rb"))
 
-
-# plot current I(t)
-L = np.diag(data['L'])
-R = data['resistances']
-currents = np.abs(data['currents'])
-tmax = 6*np.max(L/R)
-print(L)
-print(R)
-for ii, idx in enumerate(idx_distinct):
-    L_i = L[idx]
-    R_i = R[idx]
-    I_i = currents[idx]
-    def I_t(t):
-        return I_i * (1 - np.exp(-R_i/L_i * t))
-    ts = np.linspace(0, tmax, 100)
-    Is = I_t(ts)
-    ax2.plot(ts*1000, Is/1000, label=labels[ii], color=colors[ii], lw=3, alpha=0.8)  # in kA and ms
-    ax2.axhline(I_i/1000, color=colors[ii], lw=2, ls='--', alpha=0.8)
 ax2.set_xlabel('Time [ms]')
 ax2.set_ylabel('Current [kA]')
 ax2.set_title('Current Ramp-up in Coils')
