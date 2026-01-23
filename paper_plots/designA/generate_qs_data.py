@@ -3,13 +3,19 @@
 
 import os
 import numpy as np
-import sys
 from tqdm import tqdm
 import pandas as pd
 from simsopt._core import load
 from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, NonQuasiSymmetricRatio, CurveXYZFourierSymmetries, CurveLength, Volume
 from simsopt.field import BiotSavart
 from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
+
+TARGET_MODB = 87.5e-3
+LBFGS_TOL = 1e-13
+NEWTON_TOL = 1e-12
+NEWTON_MAXITER = 10
+LBFGS_MAXITER = 50
+CONSTRAINT_WEIGHT = 100.
 
 def compute_data(current0, current1, boozer_surface, axis):
     coils = boozer_surface.biotsavart.coils
@@ -18,7 +24,7 @@ def compute_data(current0, current1, boozer_surface, axis):
     coils[0].current.x = current0
     coils[-1].current.x = current1
     
-    # recompute the magnetic axis
+    # recompute the magnetic axis in the configuration with a new current ratio
     res_fl = axis.run_code(axis.res['length'])
     assert res_fl['success']
     
@@ -26,27 +32,26 @@ def compute_data(current0, current1, boozer_surface, axis):
     bs = BiotSavart(coils)
     bs.set_points(axis.curve.gamma())
     mean_modB = np.mean(bs.AbsB().flatten())
-    target_modB = 87.5*1e-3
-    scale = target_modB/mean_modB
+    scale = TARGET_MODB/mean_modB
     
-    # scale the L and T coil currents to the target_modB
+    # scale the L and T coil currents to the TARGET_MODB
     coils[0].current.x*=scale
     coils[-1].current.x*=scale
     new_mean_modB = np.mean(bs.AbsB().flatten())
-    assert np.abs(new_mean_modB-target_modB) < 1e-16
+    assert np.abs(new_mean_modB-TARGET_MODB) < 1e-16
 
     iota, G = boozer_surface.res['iota'], boozer_surface.res['G']
 
     # compute surface first using LBFGS, this will just be a rough initial guess
-    res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(tol=1e-13, maxiter=50, constraint_weight=100., iota=iota, G=G)
+    res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(tol=LBFGS_TOL, maxiter=LBFGS_MAXITER, constraint_weight=CONSTRAINT_WEIGHT, iota=iota, G=G)
     boozer_surface.need_to_run_code = True
     
     # polish 
-    res = boozer_surface.minimize_boozer_penalty_constraints_ls(tol=1e-13, maxiter=50, constraint_weight=100., iota=res['iota'], G=res['G'], method='manual')
+    res = boozer_surface.minimize_boozer_penalty_constraints_ls(tol=LBFGS_TOL, maxiter=LBFGS_MAXITER, constraint_weight=CONSTRAINT_WEIGHT, iota=res['iota'], G=res['G'], method='manual')
     boozer_surface.need_to_run_code = True
     
     # Newton
-    res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=1e-12, maxiter=20, iota=res['iota'], G=res['G'], verbose=False, weight_inv_modB=True)
+    res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=NEWTON_TOL, maxiter=NEWTON_MAXITER, iota=res['iota'], G=res['G'], verbose=False, weight_inv_modB=True)
     assert res['success'] and not boozer_surface.surface.is_self_intersecting()
     
     nonQS = NonQuasiSymmetricRatio(boozer_surface, BiotSavart(coils))
@@ -79,10 +84,12 @@ elif '0104183_symmetrized.json' in name:
     in_vol = Volume(in_surface)
     in_vol_target = -0.0555166952946639
 
-    in_boozer_surface = BoozerSurface(BiotSavart(coils), in_surface, in_vol, in_vol_target, options={'newton_tol':1e-12, 'newton_maxiter':10})
+    in_boozer_surface = BoozerSurface(BiotSavart(in_coils), in_surface, in_vol, in_vol_target, options={'newton_tol':NEWTON_TOL, 'newton_maxiter':NEWTON_MAXITER})
     boozer_surfaces = [in_boozer_surface]
     axes = [in_axis]
     xpoints = [None]
+else:
+    raise Exception("This script only works for designA_after_scaled.json and 0104183_symmetrized.json")
 
 # unfix all the currents
 for boozer_surface in boozer_surfaces:
@@ -111,20 +118,20 @@ current_sum = sum(abs(c.current.get_value()) for c in boozer_surfaces[0].biotsav
 G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
 
 ## compute the surface
-boozer_surface = BoozerSurface(BiotSavart(boozer_surfaces[0].biotsavart.coils), surface_ls, vol, vol_target, options={'newton_tol':1e-12, 'newton_maxiter':10})
+boozer_surface = BoozerSurface(BiotSavart(boozer_surfaces[0].biotsavart.coils), surface_ls, vol, vol_target, options={'newton_tol':NEWTON_TOL, 'newton_maxiter':NEWTON_MAXITER})
 
 boozer_surface.need_to_run_code = True
 # compute surface first using LBFGS, this will just be a rough initial guess
-res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(tol=1e-13, \
+res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(tol=LBFGS_TOL, \
         maxiter=50, constraint_weight=100., iota=iota0, G=G0, weight_inv_modB=True)
 boozer_surface.need_to_run_code = True
 
 # now drive the residual down using a specialised least squares algorithm
-res = boozer_surface.minimize_boozer_penalty_constraints_ls(tol=1e-13, \
+res = boozer_surface.minimize_boozer_penalty_constraints_ls(tol=LBFGS_TOL, \
         maxiter=50, constraint_weight=100., iota=res['iota'], G=res['G'], method='manual')
 
 boozer_surface.need_to_run_code = True
-res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=1e-12, \
+res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=NEWTON_TOL, \
         maxiter=20, iota=res['iota'], G=res['G'], verbose=True, weight_inv_modB=True)
 
 if res['success'] and not surface_ls.is_self_intersecting():
@@ -150,7 +157,8 @@ dat_list = {'current1':[], 'current2':[], 'nonqs':[], 'edge_iota':[]}
 for r in tqdm(1. + 0.01*np.arange(50)):
     try:
         dat = compute_data(c0*r, c1, boozer_surface, axis)
-    except:
+    except Exception as e:
+        tqdm.write(f"Failed at r={r}: {e}")
         break
 
     for key in dat.keys():
@@ -161,14 +169,15 @@ axis.curve.x = adofs_orig
 boozer_surface.biotsavart.x = dofs_orig
 boozer_surface.surface.x = sdofs_orig
 boozer_surface.need_to_run_code = True
-res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=1e-12, \
+res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=NEWTON_TOL, \
         maxiter=20, iota=iotaG[0], G=iotaG[1], verbose=True, weight_inv_modB=True)
 
 # SCALE DOWN THE L-COIL CURRENT
 for r in tqdm(1. - 0.01*np.arange(50)):
     try:
         dat = compute_data(c0*r, c1, boozer_surface, axis)
-    except:
+    except Exception as e:
+        tqdm.write(f"Failed at r={r}: {e}")
         break
 
     for key in dat.keys():
