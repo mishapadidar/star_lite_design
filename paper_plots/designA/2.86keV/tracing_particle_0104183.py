@@ -52,16 +52,14 @@ proc0_print("Mean(|B|) on axis =", modB, flush=True)
 proc0_print("Mean(Axis radius) =", np.mean(np.linalg.norm(ma.gamma(), axis=1)), flush=True)
 
 # LOAD THE SURFACE FOR ORBIT CLASSIFICATION (LOST/CONFINED)
-[boozer_surfaces_designA, _, _, _] = load('designA_after_scaled.json')
-ntor_sc=boozer_surfaces_designA[0].surface.ntor
-mpol_sc=boozer_surfaces_designA[0].surface.mpol
-stellsym_sc=boozer_surfaces_designA[0].surface.stellsym
-nfp_sc=boozer_surfaces_designA[0].surface.nfp
+ntor_sc=boozer_surfaces[config].surface.ntor
+mpol_sc=boozer_surfaces[config].surface.mpol
+stellsym_sc=boozer_surfaces[config].surface.stellsym
+nfp_sc=boozer_surfaces[config].surface.nfp
 s = SurfaceXYZTensorFourier.from_nphi_ntheta(mpol=mpol_sc, ntor=ntor_sc, stellsym=stellsym_sc, nfp=nfp_sc,
-                                      range="full torus", nphi=64, ntheta=64)
-s.x = boozer_surfaces_designA[0].surface.x
-s.extend_via_normal(-0.1)
-proc0_print(f'config0s lower AR is {s.aspect_ratio()}\n')
+                                      range="full torus", nphi=128, ntheta=128)
+s.x = boozer_surfaces[config].surface.x
+proc0_print(f'loss surface has AR={s.aspect_ratio()}\n')
 ##########################################################
 
 ot1 = time.time()
