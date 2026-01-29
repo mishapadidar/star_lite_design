@@ -14,7 +14,8 @@ markers= ['o', 's', 'o', '^', 'D', 'v', 'P', '*', 'X', '<', '>', 'h']
 
 outdir = "./plot_data/"
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+# fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+fig, ax1 = plt.subplots(1, 1, figsize=(8, 6))
 
 idx_distinct = [0, -1]  # indices of two distinct coils
 labels = ['L-coil', 'T-coil']
@@ -45,23 +46,23 @@ for ii, current_group in enumerate([0, 1, 2]):
     # data = pickle.load(open(outdir + f"plot_data_group_{current_group}.pkl", "rb"))
 
 
-    # plot current I(t)
-    L = np.diag(data['L'])
-    R = data['resistances']
-    currents = np.abs(data['currents'])
-    tmax = 6*np.max(L/R)
-    print(L)
-    print(R)
-    for jj, idx in enumerate(idx_distinct):
-        L_i = L[idx]
-        R_i = R[idx]
-        I_i = currents[idx]
-        def I_t(t):
-            return I_i * (1 - np.exp(-R_i/L_i * t))
-        ts = np.linspace(0, tmax, 100)
-        Is = I_t(ts)
-        ax2.plot(ts*1000, Is/1000, label=labels[jj], color=colors[jj], lw=3, alpha=1.0,ls=linestyles[ii], zorder=100)  # in kA and ms
-        ax2.axhline(I_i/1000, color=colors[jj], lw=1, ls='-', alpha=0.6, zorder=1)
+    # # plot current I(t)
+    # L = np.diag(data['L'])
+    # R = data['resistances']
+    # currents = np.abs(data['currents'])
+    # tmax = 6*np.max(L/R)
+    # print(L)
+    # print(R)
+    # for jj, idx in enumerate(idx_distinct):
+    #     L_i = L[idx]
+    #     R_i = R[idx]
+    #     I_i = currents[idx]
+    #     def I_t(t):
+    #         return I_i * (1 - np.exp(-R_i/L_i * t))
+    #     ts = np.linspace(0, tmax, 100)
+    #     Is = I_t(ts)
+    #     ax2.plot(ts*1000, Is/1000, label=labels[jj], color=colors[jj], lw=3, alpha=1.0,ls=linestyles[ii], zorder=100)  # in kA and ms
+    #     ax2.axhline(I_i/1000, color=colors[jj], lw=1, ls='-', alpha=0.6, zorder=1)
 
 ax1.set_xlabel('Arc Length [m]')
 ax1.set_ylabel('Force Magnitude [N/m]')
@@ -70,10 +71,10 @@ ax1.legend(loc='upper right')
 ax1.grid(color='lightgray', linestyle='-', linewidth=0.5)
 
 
-ax2.set_xlabel('Time [ms]')
-ax2.set_ylabel('Current [kA]')
-ax2.set_title('Current Ramp-up in Coils')
-ax2.grid(color='lightgray', linestyle='-', linewidth=0.5)
+# ax2.set_xlabel('Time [ms]')
+# ax2.set_ylabel('Current [kA]')
+# ax2.set_title('Current Ramp-up in Coils')
+# ax2.grid(color='lightgray', linestyle='-', linewidth=0.5)
 
 
 plt.tight_layout()

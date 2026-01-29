@@ -14,7 +14,7 @@ Run once per current configuration (0, 1, 2).
 """
 
 design_file = "../designs/designA_after_scaled.json"
-current_group = 2
+current_group = 1
 
 # load the biotsavart (1 per Current configuration, so 3 total.)
 data = load(design_file)
@@ -55,13 +55,20 @@ for ii, c in enumerate(coils):
 
 forces = np.array(forces)
 
+# idx_distinct = [0, -1]  # indices of two distinct coils
+idx_plot = [1, -1]  # indices of two distinct coils
+
 # generate vtk data
 f_plot = []
-for f in forces:
+for f in forces[idx_plot]:
     f = np.append(f, f[0])
     f_plot = np.concatenate([f_plot, f])
 point_data = {"F": f_plot}
 
+outdir = "./plot_data/"
+os.makedirs(outdir, exist_ok=True)
+curves_distinct = [curves[i] for i in idx_plot]
+curves_to_vtk(curves_distinct, outdir + f"/curves_with_forces_current_group_{current_group}", close=True, extra_data=point_data)
 
 # curve lengths (for resistance calculation)
 N = len(curves[0].quadpoints)
@@ -74,9 +81,6 @@ resistances = np.array([resistance_per_meter * L for L in lengths])
 print("Coil resistances (Ohms):", resistances)
 currents = np.array([coil.current.get_value() for coil in coils])
 
-outdir = "./plot_data/"
-os.makedirs(outdir, exist_ok=True)
-curves_to_vtk(curves, outdir + f"/curves_with_forces", close=True, extra_data=point_data)
 
 print("")
 # arclength of flange points
