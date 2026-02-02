@@ -47,12 +47,13 @@ def get_nonstellsym_curve(curve, order_new=None):
     curve_new.least_squares_fit(tmp.gamma())
     return curve_new
 
-def compute_data(current0, current1, boozer_surface, axis):
+def compute_data(current0, current1, current2, boozer_surface, axis):
     coils = boozer_surface.biotsavart.coils
     
     # rescale the currents in the L and T coils
     coils[0].current.x = current0
-    coils[-1].current.x = current1
+    coils[1].current.x = current1
+    coils[2].current.x = current2
     
     # recompute the magnetic axis in the configuration with a new current ratio
     res_fl = axis.run_code(axis.res['length'])
@@ -66,7 +67,8 @@ def compute_data(current0, current1, boozer_surface, axis):
     
     # scale the L and T coil currents to the TARGET_MODB
     coils[0].current.x*=scale
-    coils[-1].current.x*=scale
+    coils[1].current.x*=scale
+    coils[2].current.x*=scale
     new_mean_modB = np.mean(bs.AbsB().flatten())
     assert np.abs(new_mean_modB-TARGET_MODB) < 1e-16
 
@@ -85,27 +87,25 @@ def compute_data(current0, current1, boozer_surface, axis):
     assert res['success'] and not boozer_surface.surface.is_self_intersecting()
     
     nonQS = NonQuasiSymmetricRatio(boozer_surface, BiotSavart(coils))
-    dat = {'nonqs': nonQS.J(), 'current1':coils[0].current.get_value(), 'current2':coils[-1].current.get_value(), 'edge_iota': res['iota']}
+    dat = {'nonqs': nonQS.J(), 'current1':coils[0].current.get_value(), 'current2':coils[1].current.get_value(), 'current3':coils[2].current.get_value(), 'edge_iota': res['iota']}
     return dat
 
 fname = sys.argv[1]
 dat = load(fname)
 
+
 #in_vol_target = -0.0555166952946639
-if 'designA_after_scaled.json' in fname or '0104183_symmetrized.json' in fname:
-    [boozer_surfaces, iota_Gs, in_axes, in_xpoints] = dat
-    
-    # convert axes to PeriodicFieldLine
+if 'serial0104183_iota.json' in fname:
+    [boozer_surfaces, iota_Gs, in_axes] = load(fname)
     axes = []
-    for axis_RZ, boozer_surface in zip(in_axes, boozer_surfaces):
-        axis = CurveXYZFourierSymmetries(axis_RZ.quadpoints, (axis_RZ.quadpoints.size-1)//2, axis_RZ.nfp, axis_RZ.stellsym)
-        axis.least_squares_fit(axis_RZ.gamma())
+    for axis, boozer_surface in zip(in_axes, boozer_surfaces):
         axis_fl = PeriodicFieldLine(BiotSavart(boozer_surface.biotsavart.coils), axis)
         res = axis_fl.run_code(CurveLength(axis_fl.curve).J())
         assert res['success']
         axes.append(axis_fl)
 else:
-    raise Exception("This script only works for designA_after_scaled.json and 0104183_symmetrized.json")
+    raise Exception("This script only works for serial0104183_iota.json")
+
 
 # unfix all the currents
 for boozer_surface in boozer_surfaces:
@@ -179,7 +179,8 @@ axis_dofs_orig = axis.x.copy()
 
 # save the original currents, axis
 c0 = coils_pert[0].current.x 
-c1 = coils_pert[-1].current.x
+c1 = coils_pert[1].current.x
+c2 = coils_pert[2].current.x
 
 adofs_orig = axis_fl.curve.x.copy()
 dofs_orig = boozer_surface.biotsavart.x.copy()
@@ -187,16 +188,18 @@ sdofs_orig = boozer_surface.surface.x.copy()
 iotaG = [res['iota'], res['G']]
 
 # SCALE UP THE L-COIL CURRENT
-dat_list = {'current1':[], 'current2':[], 'nonqs':[], 'edge_iota':[]}
-for r in tqdm(1. + 0.01*np.arange(50)):
-    try:
-        dat = compute_data(c0*r, c1, boozer_surface, axis_fl)
-    except Exception as e:
-        tqdm.write(f"Failed at r={r}: {e}")
-        break
+dat_list = {'current1':[], 'current2':[], 'current3':[], 'nonqs':[], 'edge_iota':[]}
+#for r in tqdm(1. + 0.01*np.arange(50)):
+#    try:
+#        dat = compute_data(c0*r, c1, c2*r, boozer_surface, axis_fl)
+#    except Exception as e:
+#        tqdm.write(f"Failed at r={r}: {e}")
+#        break
+#
+#    for key in dat.keys():
+#        dat_list[key].append(dat[key])
 
-    for key in dat.keys():
-        dat_list[key].append(dat[key])
+import ipdb;ipdb.set_trace()
 
 # reset back to the original surface, axis
 axis_fl.curve.x = adofs_orig
@@ -209,7 +212,7 @@ res = boozer_surface.minimize_boozer_penalty_constraints_newton(tol=NEWTON_TOL, 
 # SCALE DOWN THE L-COIL CURRENT
 for r in tqdm(1. - 0.01*np.arange(50)[1:]):
     try:
-        dat = compute_data(c0*r, c1, boozer_surface, axis_fl)
+        dat = compute_data(c0*r, c1, c2*r, boozer_surface, axis_fl)
     except Exception as e:
         tqdm.write(f"Failed at r={r}: {e}")
         break
