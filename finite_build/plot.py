@@ -13,7 +13,8 @@ colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
           "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
 # colors = ['lightcoral', 'goldenrod', 'mediumseagreen','orange', "lightskyblue", "plum"]
 # colors = ['goldenrod', 'mediumseagreen',"lightskyblue", "plum", 'orange', 'lightcoral', 'tab:blue', 'tab:green', 'tab:orange', 'tab:red', 'tab:purple']
-colors = ['#1F77B4', '#D62728']
+# colors = ['#1F77B4', '#D62728']
+colors = ['#1F77B4', "#d95f02","#7570b3", "#1b9e77",]
 linestyles = ['-', '--', '-.', ':', '-', '--', '-.', ':', '-', '--', '-.']
 markers= ['o', 's', 'o', '^', 'D', 'v', 'P', '*', 'X', '<', '>', 'h']
 
@@ -70,9 +71,11 @@ curves_to_vtk(center_curves, outdir + "finite_build_center", close=True)
 curves0 = create_hexagonal_filament_grid(center_curves[0], n_layers=n_layers, radius=cable_radius)
 # idx of filaments in layer 2
 idx_layer1 = [4,5,8,9,12,13]
-idx_layer2 = [0,1,2,3,6,7,10,11,14,15,16,17]
+idx_layer2a = [0,2,7,10,15,17]
+idx_layer2b = [1, 3, 6, 11, 14, 16]
 curves_to_vtk([curves0[i] for i in idx_layer1], outdir + f"finite_build_coil_0_layer1", close=True)
-curves_to_vtk([curves0[i] for i in idx_layer2], outdir + f"finite_build_coil_0_layer2", close=True)
+curves_to_vtk([curves0[i] for i in idx_layer2a], outdir + f"finite_build_coil_0_layer2a", close=True)
+curves_to_vtk([curves0[i] for i in idx_layer2b], outdir + f"finite_build_coil_0_layer2b", close=True)
 curves_to_vtk([center_curves[0]], outdir + f"finite_build_center_coil_0", close=True)
 
 
@@ -85,16 +88,22 @@ plt.figure(figsize=(6,6))
 # circles
 for dn, db in zip(shifts_normal, shifts_binormal):
     if np.sqrt(dn**2 + db**2) < 2.5*cable_radius:
-        color=colors[0]
-    else:
         color=colors[1]
-    circle = plt.Circle((dn, db), cable_radius, fill=True, facecolor=color, edgecolor=color, linewidth=1, alpha=0.5)
+    else:
+        angle = round(np.arctan2(db, dn) * 180 / np.pi)
+        if np.isclose((angle - 30)%(60), 0.0, atol=1e-12):
+            color=colors[2]
+        else:
+            color=colors[0]
+    circle = plt.Circle((dn, db), 0.98*cable_radius, fill=True, facecolor=color, edgecolor=color, linewidth=1, alpha=0.5)
+    plt.gca().add_patch(circle)
+    circle = plt.Circle((dn, db), 0.98*cable_radius, fill=False, facecolor=color, edgecolor=color, linewidth=2, alpha=1.0)
     plt.gca().add_patch(circle)
 # center circle
-circle = plt.Circle((0, 0), cable_radius, fill=True, edgecolor='lightgrey', facecolor='lightgrey', linewidth=1, label='spine',alpha=0.7)
+circle = plt.Circle((0, 0), 0.98*cable_radius, fill=False, edgecolor='grey', facecolor='lightgrey', linewidth=2, label='spine',alpha=0.7)
 plt.gca().add_patch(circle)
 # outer circle
-circle = plt.Circle((0, 0), winding_pack_radius, fill=False, edgecolor='k', linewidth=1, label='spine')
+circle = plt.Circle((0, 0), 1.00*winding_pack_radius, fill=False, edgecolor='k', linewidth=1, label='spine')
 plt.gca().add_patch(circle)
 # line showing radius
 plt.plot((0,winding_pack_radius), (-0.001,-0.001), color='k', lw=2, ls='--')
