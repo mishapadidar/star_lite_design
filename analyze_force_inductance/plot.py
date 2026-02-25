@@ -46,6 +46,10 @@ for ii, current_group in enumerate([0, 1, 2]):
     # data = pickle.load(open(outdir + f"plot_data_group_{current_group}.pkl", "rb"))
 
 
+    L = np.diag(data['L'])
+    R = data['resistances']
+    print(L/R)
+    # currents = np.abs(data['currents'])
     # # plot current I(t)
     # L = np.diag(data['L'])
     # R = data['resistances']
