@@ -355,7 +355,7 @@ class TraceBoozer(Optimizable):
         return mu_crit
 
     # set up the objective
-    def compute_confinement_times(self, stz_inits, vpar_inits, tmax, field=None, bri=None):
+    def compute_confinement_times(self, stz_inits, vpar_inits, tmax, energy=FUSION_ALPHA_PARTICLE_ENERGY, mass=ALPHA_PARTICLE_MASS, charge=ALPHA_PARTICLE_CHARGE,field=None, bri=None):
         """
         Trace particles in boozer coordinates according to the vacuum GC
         approximation using simsopt.
@@ -384,9 +384,9 @@ class TraceBoozer(Optimizable):
                 stz_inits,
                 vpar_inits,
                 tmax=tmax,
-                mass=ALPHA_PARTICLE_MASS,
-                charge=ALPHA_PARTICLE_CHARGE,
-                Ekin=FUSION_ALPHA_PARTICLE_ENERGY,
+                mass=mass,
+                charge=charge,
+                Ekin=energy,
                 tol=self.tracing_tol,
                 mode="gc",
                 comm=self.mpi.comm_groups,
@@ -423,7 +423,7 @@ class TraceBoozer(Optimizable):
         return energy
 
     # set up the objective
-    def compute_trajectories(self, stz_inits, vpar_inits, tmax, field=None, bri=None):
+    def compute_trajectories(self, stz_inits, vpar_inits, tmax, energy=FUSION_ALPHA_PARTICLE_ENERGY, mass=ALPHA_PARTICLE_MASS, charge=ALPHA_PARTICLE_CHARGE, field=None, bri=None):
         """
         Trace particles in boozer coordinates according to the vacuum GC
         approximation using simsopt.
@@ -439,7 +439,7 @@ class TraceBoozer(Optimizable):
             field, bri = self.compute_boozer_field()
         if field is None:
             # VMEC failure
-            return -np.inf * np.ones(len(stz_inits))
+            return [], -np.inf * np.ones(len(stz_inits))
 
         stopping_criteria = [MaxToroidalFluxStoppingCriterion(self.smax), MinToroidalFluxStoppingCriterion(self.smin)]
 
@@ -450,9 +450,9 @@ class TraceBoozer(Optimizable):
             stz_inits,
             vpar_inits,
             tmax=tmax,
-            mass=ALPHA_PARTICLE_MASS,
-            charge=ALPHA_PARTICLE_CHARGE,
-            Ekin=FUSION_ALPHA_PARTICLE_ENERGY,
+            mass=mass,
+            charge=charge,
+            Ekin=energy,
             tol=self.tracing_tol,
             mode="gc",
             comm=self.vmec.mpi.comm_groups,
