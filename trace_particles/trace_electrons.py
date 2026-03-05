@@ -23,7 +23,7 @@ A script for tracing electrons in Boozer coordinates at low and high energies.
 
 
 # Ars
-energy_type = "slow"
+energy_type = "fast"
 current_group = 0
 design_file = "../designs/designA_after_scaled.json"
 #design_file = "./designs/serial0104183_iota.json"
@@ -109,7 +109,7 @@ if mpi.proc0_world:
     tag = os.path.basename(design_file).removesuffix(".json")
     if not os.path.exists(outdir):
        os.makedirs(outdir)
-    fname = os.path.join(outdir, f"tracing_data_{tag}_iota_{iota}.pkl")
+    fname = os.path.join(outdir, f"tracing_data_{tag}_iota_{iota}_{energy_type}.pkl")
     print("\nDumping to ", fname)
     pickle.dump(data, open(fname, "wb"))
     
