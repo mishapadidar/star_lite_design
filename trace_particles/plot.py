@@ -7,8 +7,10 @@ from nfft import nfft,ndft_adjoint
 from scipy.interpolate import CubicSpline
 
 # Set these values directly:
-FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_slow.pkl"
-FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_fast.pkl"
+# FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_slow.pkl"
+# FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_fast.pkl"
+FILENAME = "./output/tracing_data_serial0104183_iota_iota_0.18833628114085987_fast.pkl"
+# FILENAME = "./output/tracing_data_serial0104183_iota_iota_0.18833628114085987_slow.pkl"
 
 infile = Path(FILENAME)
 
@@ -22,18 +24,19 @@ energy_type = data['energy_type']
 iota = data['iota']
 
 
-fig,(ax1,ax2) = plt.subplots(figsize=(12,6), ncols=2)
+fig,(ax1,ax2,ax3) = plt.subplots(figsize=(14,5), ncols=3)
 
 for i in range(len(trajectories)):
     # if c_times[i] < tmax - 1e-12:
     #     continue
     if c_times[i] >= tmax:
         continue
+    # if (i < 20) or (i>30):
+    #     continue
     traj = np.asarray(trajectories[i])
     t = traj[:, 0] #/ tmax
     s = traj[:, 1]
     theta = traj[:, 2]
-    theta = theta % (2*np.pi)
     phi = traj[:, 3]
 
     # spl = CubicSpline(t, s)
@@ -63,8 +66,9 @@ for i in range(len(trajectories)):
     # plt.plot(np.abs(fhat[1:]))
     # plt.plot(fhat[:round(len())].imag / len(t_unif))
 
-    ax1.plot(t, s, lw=0.8, alpha=0.9)
-    ax2.plot(np.sqrt(s) * np.cos(theta), np.sqrt(s) * np.sin(theta), lw=0.8, alpha=0.9)
+    ax1.plot(np.sqrt(s) * np.cos(theta), np.sqrt(s) * np.sin(theta), lw=0.8, alpha=0.9)
+    ax2.plot(t, s, lw=0.8, alpha=0.9)
+    ax3.plot(t, theta, lw=0.8, alpha=0.9)
 
     # plt.plot(t, theta % (2*np.pi), lw=0.8, alpha=0.9)
     # plt.plot(t, phi, lw=0.8, alpha=0.9)
@@ -77,19 +81,22 @@ for i in range(len(trajectories)):
     #     quit()
 
 circ = plt.Circle((0.0,0.0), 1.0, fill=False)
-ax2.scatter([0],[0], color='k')
-ax2.add_artist(circ)
-ax2.set_xlim(-1.1,1.1)
-ax2.set_ylim(-1.1,1.1)
-ax2.set_xlabel("$\sqrt{s}\cos(\\theta)$")
-ax2.set_ylabel("$\sqrt{s}\sin(\\theta)$")
-ax2.grid(True, alpha=0.3)
-ax2.set_title(f"Orbits of lost particle; $\iota$ = {iota:.2f}; energy = {energy_type}")
-
-ax1.set_xlabel("$t$ [sec]")
-ax1.set_ylabel("$s$")
+ax1.scatter([0],[0], color='k')
+ax1.add_artist(circ)
+ax1.set_xlim(-1.1,1.1)
+ax1.set_ylim(-1.1,1.1)
+ax1.set_xlabel("$\sqrt{s}\cos(\\theta)$")
+ax1.set_ylabel("$\sqrt{s}\sin(\\theta)$")
 ax1.grid(True, alpha=0.3)
-ax1.set_title(f"Radial coordinate of lost particles; $\iota$ = {iota:.2f}; energy = {energy_type}")
+ax1.set_title(f"Orbits of lost particle; $\iota$ = {iota:.2f}; energy = {energy_type}")
+
+ax2.set_xlabel("$t$ [sec]")
+ax2.set_ylabel("$s$")
+ax2.grid(True, alpha=0.3)
+
+ax3.set_xlabel("$t$ [sec]")
+ax3.set_ylabel("$\\theta$")
+ax3.grid(True, alpha=0.3)
 plt.tight_layout()
 
 plt.show()

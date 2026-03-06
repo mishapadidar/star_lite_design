@@ -26,13 +26,16 @@ Args:
 
 
 # Set these values directly:
-FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_slow.pkl"
+# FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_slow.pkl"
 # FILENAME = "./output/tracing_data_designA_after_scaled_iota_0.18824534785229502_fast.pkl"
+FILENAME = "./output/tracing_data_serial0104183_iota_iota_0.18833628114085987_fast.pkl"
+# FILENAME = "./output/tracing_data_serial0104183_iota_iota_0.18833628114085987_slow.pkl"
 
 infile = Path(FILENAME)
 
 with infile.open("rb") as f:
     data = pickle.load(f)
+
 
 c_times = data['c_times']
 tmax = data['tmax']
