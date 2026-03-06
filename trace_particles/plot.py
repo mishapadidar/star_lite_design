@@ -24,20 +24,23 @@ energy_type = data['energy_type']
 iota = data['iota']
 
 
-fig,(ax1,ax2,ax3) = plt.subplots(figsize=(14,5), ncols=3)
+fig,(ax1,ax2,ax3,ax4) = plt.subplots(figsize=(16,4), ncols=4)
 
 for i in range(len(trajectories)):
-    # if c_times[i] < tmax - 1e-12:
-    #     continue
+
     if c_times[i] >= tmax:
         continue
-    # if (i < 20) or (i>30):
+    # if c_times[i] < tmax - 1e-12:
+    #     continue
+    # if (i < 20) or (i>25):
+    # if (i != 24):
     #     continue
     traj = np.asarray(trajectories[i])
     t = traj[:, 0] #/ tmax
     s = traj[:, 1]
     theta = traj[:, 2]
     phi = traj[:, 3]
+    vpar = traj[:,4]
 
     # spl = CubicSpline(t, s)
     # n = len(t)
@@ -69,6 +72,7 @@ for i in range(len(trajectories)):
     ax1.plot(np.sqrt(s) * np.cos(theta), np.sqrt(s) * np.sin(theta), lw=0.8, alpha=0.9)
     ax2.plot(t, s, lw=0.8, alpha=0.9)
     ax3.plot(t, theta, lw=0.8, alpha=0.9)
+    ax4.plot(t, vpar, lw=0.8, alpha=0.9)
 
     # plt.plot(t, theta % (2*np.pi), lw=0.8, alpha=0.9)
     # plt.plot(t, phi, lw=0.8, alpha=0.9)
@@ -97,6 +101,10 @@ ax2.grid(True, alpha=0.3)
 ax3.set_xlabel("$t$ [sec]")
 ax3.set_ylabel("$\\theta$")
 ax3.grid(True, alpha=0.3)
+
+ax4.set_xlabel("$t$ [sec]")
+ax4.set_ylabel("$v_{\parallel}$")
+ax4.grid(True, alpha=0.3)
 plt.tight_layout()
 
 plt.show()
