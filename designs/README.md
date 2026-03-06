@@ -1,4 +1,5 @@
 
+`serial0104183_iota.json` contains the three versions of QUASR-0104183 found by rescaling current ratios.
 
 `designA_after_scaled.json` and `designB_after_scaled.json` were the designs that Andrew created by doing the optimization with multiple iotas.  
 
