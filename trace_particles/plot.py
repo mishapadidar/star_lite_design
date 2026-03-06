@@ -21,31 +21,6 @@ trajectories = data["res_tys"]
 energy_type = data['energy_type']
 iota = data['iota']
 
-# def compute_bad(t, theta, s, deltat = 1e-5):
-    
-#     n_fft = deltat / 1e-7
-#     spl_s = CubicSpline(t, s)
-#     spl_theta = CubicSpline(t, theta)
-#     n = len(t)
-#     lb = np.min(t)
-#     ub = np.max(t)
-#     window_half_width = deltat / 2
-#     n_steps = (ub - lb) / deltat
-#     for ii in range(n_steps):
-#         window_center = lb + (deltat/2) * ii
-#         window_lb = window_center - window_half_width
-#         window_ub = window_center + window_half_width
-#         t_window = np.linspace(window_lb, window_ub, n_fft, endpoint=False)
-#         # compute bounce frequency
-#         theta_window = spl_theta(t_window)
-#         coeffs = np.fft.fft(theta_window)
-#         idx_dom = np.argmax(np.abs(coeffs[1:])) + 1
-#         # get bounce period
-#         bounce_period = ...
-#         # average s over bounce period
-#         bad = spl_s(window_center + bounce_period) - spl_s(window_center - bounce_period)
-#     return bad
-
 
 fig,(ax1,ax2) = plt.subplots(figsize=(12,6), ncols=2)
 
