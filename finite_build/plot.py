@@ -107,7 +107,7 @@ circle = plt.Circle((0, 0), 1.00*winding_pack_radius, fill=False, edgecolor='k',
 plt.gca().add_patch(circle)
 # line showing radius
 plt.plot((0,winding_pack_radius), (-0.001,-0.001), color='k', lw=2, ls='--')
-plt.text(winding_pack_radius*0.6 + 0.002, 0.00, f'$r=${winding_pack_radius:.3f}m', ha='center', fontsize=22)
+plt.text(winding_pack_radius*0.5, 0.00, f'$r=${winding_pack_radius:.3f}m', ha='center', fontsize=30)
 
 
 # plt.title(f'Hexagonal filament grid with {n_layers} layers')
