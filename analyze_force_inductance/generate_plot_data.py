@@ -14,7 +14,7 @@ Run once per current configuration (0, 1, 2).
 """
 
 design_file = "../designs/designA_after_scaled.json"
-current_group = 2
+current_group = 1
 
 # load the biotsavart (1 per Current configuration, so 3 total.)
 data = load(design_file)
@@ -24,20 +24,25 @@ axis_curve = data[2][current_group] # magnetic axis CurveRZFouriers
 biotsavart = bsurf.biotsavart
 coils = biotsavart.coils
 
-# minor radius
-minor_radius = 0.054 # 54mm
+# account for number of windings
+n_turns = 18
+
+# minor radius or 1 coil turn
+minor_radius = 0.02 / 2 # 19mm diameter (from Georg's measurement)
 
 # coil resistance of 4/0 AWG copper wire at 20C
 resistance_4_0_awg = 0.04901/1000 # Ohms / ft
-meter_per_ft = 0.3048 
+meter_per_ft = 0.3048
 resistance_per_meter = resistance_4_0_awg / meter_per_ft  # Ohms / meter
 print('Resistance per meter (Ohms/m):', resistance_per_meter)
 
 # compute the inductance matrix
 ind = Inductance(coils, minor_radius)
 L = ind.calculate()
+L = (n_turns**2) * L 
 
 print("self inductances", np.diag(L))
+
 
 # check mean |B| on axis
 xyz = axis_curve.gamma()
@@ -55,28 +60,32 @@ for ii, c in enumerate(coils):
 
 forces = np.array(forces)
 
+# idx_distinct = [0, -1]  # indices of two distinct coils
+idx_plot = [1, -1]  # indices of two distinct coils
+
 # generate vtk data
 f_plot = []
-for f in forces:
+for f in forces[idx_plot]:
     f = np.append(f, f[0])
     f_plot = np.concatenate([f_plot, f])
 point_data = {"F": f_plot}
 
+outdir = "./plot_data/"
+os.makedirs(outdir, exist_ok=True)
+curves_distinct = [curves[i] for i in idx_plot]
+curves_to_vtk(curves_distinct, outdir + f"/curves_with_forces_current_group_{current_group}", close=True, extra_data=point_data)
 
 # curve lengths (for resistance calculation)
 N = len(curves[0].quadpoints)
 arc_lengths = np.array([np.cumsum(curve.incremental_arclength())/N for curve in curves])  # (n_coils, N)
 length_per_turn = np.array([np.mean(curve.incremental_arclength()) for curve in curves])
-n_turns = 18
 lengths = n_turns * length_per_turn
 print("Coil lengths (m):", lengths)
 resistances = np.array([resistance_per_meter * L for L in lengths])
 print("Coil resistances (Ohms):", resistances)
 currents = np.array([coil.current.get_value() for coil in coils])
 
-outdir = "./plot_data/"
-os.makedirs(outdir, exist_ok=True)
-curves_to_vtk(curves, outdir + f"/curves_with_forces", close=True, extra_data=point_data)
+print("L/R", np.diag(L) / resistances)
 
 print("")
 # arclength of flange points
@@ -114,5 +123,5 @@ pickle.dump(outdata, open(outfile, "wb"))
 # analytic formula for self-inductance of circular loop
 R = length_per_turn[0] / (2 * np.pi)
 L_circular = 4e-7 * np.pi * R * (np.log(8 * R / minor_radius) - 7/4)
-print(f"Analytic self-inductance of circular loop: {L_circular}")
+print(f"Analytic self-inductance of circular loop with {n_turns} turns: {n_turns**2 * L_circular}")
 
