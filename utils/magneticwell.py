@@ -97,7 +97,8 @@ from jax import jit, grad
 #        modB1 = jnp.linalg.norm(B1, axis=-1)
 #        
 #        # G from boozer surfaces is multiplied by 2pi
-#        V0p = jnp.abs(G) * jnp.mean(1/modB0**2)
+##        V0p = jnp.abs(G) * jnp.mean(1/modB0**2)
+#        V0p = jnp.abs(G) * jnp.mean(1/modB0) / jnp.mean(modB0)
 #        V1p = jnp.abs(G) * jnp.mean(1/modB1**2)
 #        
 #        a = -((-Psi1*V0p + 2*V1 - Psi1*V1p)/Psi1**3)

@@ -46,6 +46,7 @@ data = load(f"../designs/design{design}_after_scaled.json")
 bsurf = data[0][0] # BoozerSurfaces
 surf = bsurf.surface
 biotsavart = bsurf.biotsavart
+iota_Gs = data[1][0]
 ma = data[2][0] # magnetic axis CurveRZFourier
 xpoint = data[3][0] # X-point CurveRZFouriers
 
@@ -92,6 +93,23 @@ xpoint_fb, _, _ = find_x_point(biotsavart_fb, r0, z0, nfp, order)
 xyz_xpoint_fb = xpoint_fb.gamma()
 diff = xyz_xpoint_fb - xyz_xpoint
 print('Max difference in X-point:', np.max(np.linalg.norm(diff, axis=1)))
+
+# compute the QS error on the Boozer surface
+from simsopt.geo import BoozerSurface, Volume, NonQuasiSymmetricRatio
+vol = Volume(surf)
+surf.unfix_all()
+# recompute bsurf
+bsurf = BoozerSurface(biotsavart, surf, label=vol, targetlabel=bsurf.targetlabel)
+bsurf.run_code(iota=iota_Gs[0], G=iota_Gs[1])
+J_qs = np.sqrt(NonQuasiSymmetricRatio(bsurf, biotsavart).J())
+print('original: qs error', J_qs)
+
+biotsavart_fb.fix_all()
+bsurf_fb = BoozerSurface(biotsavart_fb, surf, label=vol, targetlabel=bsurf.targetlabel)
+bsurf_fb.run_code(iota=iota_Gs[0], G=iota_Gs[1])
+J_qs_fb = np.sqrt(NonQuasiSymmetricRatio(bsurf_fb, biotsavart_fb).J())
+print('finite build: qs error', J_qs_fb)
+print('Rel error', (J_qs_fb - J_qs) / J_qs)
 
 
 
