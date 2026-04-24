@@ -274,7 +274,6 @@ states = {
         'major radius': [MajorRadius(boozer_surface) for boozer_surface in boozer_surfaces],
         'Boozer residuals': brs,
         'mean-squared curvature': Jmscs,
-        'well': magnetic_wells
         }
 
 # fix some currents
@@ -356,6 +355,7 @@ def callback(dofs):
     table2 = Table(expand=False, show_header=False) 
     for k in states.keys():
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
+    table2.add_row('well', ' '.join([f'{w.well().max():.3e}' for w in magnetic_wells]))
     table2.add_row('currents', ' '.join([f'{curr:.3e}' for curr in currents_list]))
     table2.add_row('trim currents', ' '.join([f'{curr:.3e}' for curr in trim_currents_list]))
     table2.add_row('trim radius', ' '.join([f'{curr:.3e}' for curr in trim_radius_list]))
@@ -510,6 +510,7 @@ for j in range(20):
     alen_err = np.max([ArclengthVariation(c).J() for c in base_curves])
 
     modB_err = max([np.abs(modB.J()-MODB_TARGET)/MODB_TARGET for modB in modBs])
+    well_err = max([max(Jl.well().max() - WELL_THRESHOLD, 0)/np.abs(WELL_THRESHOLD) for Jl in magnetic_wells])
     
     # check which constraints are violated and increase weight if violated by more than 0.1%
     if curr_err > 0.001:
@@ -541,6 +542,10 @@ for j in range(20):
     if alen_err > 0.001:
         ARCLENGTH_WEIGHT*=10
         print("ARCLENGTH ERROR", alen_err)
+    if well_err > 0.001:
+        WELL_WEIGHT*=10
+        print("WELL ERROR", well_err)
+
 
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")
@@ -561,6 +566,7 @@ for j in range(20):
     config['COIL_TO_VESSEL_WEIGHT'] = COIL_TO_VESSEL_WEIGHT.value
     config['MODB_WEIGHT'] = MODB_WEIGHT.value
     config['ARCLENGTH_WEIGHT'] = ARCLENGTH_WEIGHT.value
+    config['WELL_WEIGHT'] = WELL_WEIGHT.value
     # Save to YAML
     with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
