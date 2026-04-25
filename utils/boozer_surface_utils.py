@@ -8,6 +8,7 @@ from simsopt.geo.jit import jit
 from simsopt.geo.surfaceobjectives import boozer_surface_residual, boozer_surface_residual_dB
 import simsoptpp as sopp
 from simsopt.objectives import forward_backward
+from simsopt.geo.surfaceobjectives import boozer_surface_dexactresidual_dcoils_dcurrents_vjp, boozer_surface_dlsqgrad_dcoils_vjp
 
 class BoozerResidual(Optimizable):
     r"""
@@ -269,3 +270,99 @@ class CurveBoozerSurfaceDistance(Optimizable):
         return res
 
     return_fn_map = {'J': J, 'dJ': dJ}
+
+def solve_residual_equation_exactly_newton2(self, tol=1e-10, maxiter=10, iota=0., G=None, verbose=False):
+    from scipy.linalg import lu
+    if not self.need_to_run_code:
+        return self.res
+    
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    s = self.surface
+    if not isinstance(s, SurfaceXYZTensorFourier):
+        raise RuntimeError('Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier')
+    
+    # In the case of stellarator symmetry, some of the information is
+    # redundant, since the coordinates at (-phi, -theta) are the same (up
+    # to sign changes) to those at (phi, theta). In addition, for stellsym
+    # surfaces and stellsym magnetic fields, the residual in the x
+    # component is always satisfied at phi=theta=0, so we ignore that one
+    # too. The mask object below is True for those parts of the residual
+    # that we need to keep, and False for those that we ignore.
+    m = s.get_stellsym_mask()
+    mask = np.concatenate((m[..., None], m[..., None], m[..., None]), axis=2)
+    mask[0, 0, 0] = False
+    mask = mask.flatten()
+    
+    label = self.label
+    if G is None:
+        G = 2. * np.pi * np.sum(np.abs([c.current.get_value() for c in self.biotsavart.coils])) * (4 * np.pi * 10**(-7) / (2 * np.pi))
+    x = np.concatenate((s.get_dofs(), [iota, G]))
+    i = 0
+    r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
+    norm = 1e6
+    while i < maxiter:
+        if s.stellsym:
+            b = np.concatenate((r[mask], [(label.J()-self.targetlabel)]))
+        else:
+            b = np.concatenate((r[mask], [(label.J()-self.targetlabel), s.gamma()[0, 0, 1], s.gamma()[0, 0, 2]]))
+        norm = np.linalg.norm(b, ord=np.inf)
+        if norm <= tol:
+            break
+        if s.stellsym:
+            J = np.vstack((
+                J[mask, :],
+                np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+            ))
+        else:
+            J = np.vstack((
+                J[mask, :],
+                np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+                np.concatenate((s.dgamma_by_dcoeff()[0, 0, 1, :], [0., 0.])),
+                np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
+            ))
+        dx = np.linalg.solve(J, b)
+        dx += np.linalg.solve(J, b-J@dx)
+        x -= dx
+        s.set_dofs(x[:-2])
+        iota = x[-2]
+        G = x[-1]
+        i += 1
+        r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
+    
+    if s.stellsym:
+        J = np.vstack((
+            J[mask, :],
+            np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+        ))
+    else:
+        J = np.vstack((
+            J[mask, :],
+            np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+            np.concatenate((s.dgamma_by_dcoeff()[0, 0, 1, :], [0., 0.])),
+            np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
+        ))
+    
+    P, L, U = lu(J)
+    res = {
+        "residual": r, "jacobian": J, "iter": i, "success": norm <= tol, "G": G, "iota": iota, "PLU": (P, L, U),
+        "mask": mask, 'type': 'exact', "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
+        "is_self_intersecting":s.is_self_intersecting(), "aspect_ratio": s.aspect_ratio(), "minor_radius":s.minor_radius(),
+        "major_radius":s.major_radius()
+    }
+    res_short = {
+        "iter": i, "success": norm <= tol, "G": G, "iota": iota,
+        "mask": mask, 'type': 'exact', "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
+        "is_self_intersecting":s.is_self_intersecting(), "aspect_ratio": s.aspect_ratio(), "minor_radius":s.minor_radius(),
+        "major_radius":s.major_radius()
+    }
+    
+    
+    #if verbose:
+    #    print(f"NEWTON solve - {res['success']}  iter={res['iter']}, iota={res['iota']:.16f}, ||residual||_inf = {norm:.3e}, cond(J) = {np.linalg.cond(J):.4e}", flush=True)
+    
+    self.res = res
+    self.res_short = res_short
+    self.need_to_run_code = False
+    return res
+
+

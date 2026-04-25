@@ -31,6 +31,7 @@ from star_lite_design.utils.fieldline_vessel_distance import FieldLineVesselDist
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.pillpipevessel import VesselDistance, PillCurve, PillPipeSDF
+from star_lite_design.utils.displacement import FieldLineDistance
 import yaml
 
 #import jax
@@ -46,13 +47,13 @@ print("Running ALL IN ONE Optimization")
 print("================================")
 
 # load the boozer surfaces (1 per Current configuration, so 3 total.)
-data = load(f"output_VV/design_opt_final.json")
+data = load(f"output_well/design_opt_final.json")
 boozer_surfaces = data[0] # BoozerSurfaces
 iota_Gs = data[1] # (iota, G) pairs
 axes = data[2] # magnetic axis CurveRZFouriers
 xpoints = data[3] # X-point CurveRZFouriers
 in_sdf = data[4] # X-point CurveRZFouriers
-config = yaml.safe_load(open(f"output_VV/design_opt_final.yaml",'r'))
+config = yaml.safe_load(open(f"output_well/design_opt_final.yaml",'r'))
 
 for axis, boozer_surface in zip(axes, boozer_surfaces):
     axis.run_code(CurveLength(axis.curve).J())
@@ -175,7 +176,9 @@ IOTAS_WEIGHT=Weight(config['IOTAS_WEIGHT'])
 MAJOR_RADIUS_WEIGHT=Weight(config['MAJOR_RADIUS_WEIGHT'])
 
 BOOZER_RESIDUAL_WEIGHT=Weight(config['BOOZER_RESIDUAL_WEIGHT'])
-#BOOZER_RESIDUAL_WEIGHT*=1/100
+
+FIELDLINE_DISTANCE_WEIGHT = Weight(config['FIELDLINE_DISTANCE_WEIGHT'])
+FIELDLINE_DISTANCE_THRESHOLD = config['FIELDLINE_DISTANCE_THRESHOLD']
 
 
 COIL_TO_VESSEL_WEIGHT = Weight(config['COIL_TO_VESSEL_WEIGHT'])
@@ -230,6 +233,9 @@ Jcvd = VesselDistance(sdf, entities, sign, CV_THRESHOLD)
 magnetic_wells = [MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes, boozer_surfaces)]
 J_wells = sum(magnetic_wells)
 
+fds = [FieldLineDistance(xpoints[0], xpoint, FIELDLINE_DISTANCE_THRESHOLD) for xpoint in xpoints[1:]]
+J_fdist = sum(fds)
+
 
 
 # sum the objectives together
@@ -246,6 +252,7 @@ JF = (J_nonQSRatio
     + COIL_TO_VESSEL_WEIGHT * Jcvd
     + CURRENT_WEIGHT * J_curr
     + WELL_WEIGHT * J_wells
+    + FIELDLINE_DISTANCE_WEIGHT * J_fdist
     )
 
 #entities = base_curves + xpoints + boozer_surfaces
@@ -264,7 +271,8 @@ penalties = {'nonQS': J_nonQSRatio,
         'modB': MODB_WEIGHT * JmodB,
         'coil-to-vessel':COIL_TO_VESSEL_WEIGHT * Jcvd,
         'current':CURRENT_WEIGHT * J_curr,
-        'magnetic well': WELL_WEIGHT*J_wells
+        'magnetic well': WELL_WEIGHT*J_wells,
+        'fieldline distance': FIELDLINE_DISTANCE_WEIGHT * J_fdist
         }
 
 states = {
@@ -303,7 +311,7 @@ print(JF.dof_names, JF.x.size)
 
 
 # Directory for output
-OUT_DIR = f"./output_well/"
+OUT_DIR = f"./output_VV_well_distance/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
@@ -367,6 +375,7 @@ def callback(dofs):
     table2.add_row('minimum Boozer surface-to-vessel distance', f'{md_bs:.3e}')
     table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
+    table2.add_row('fieldline distances', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in fds]))
     console.print(table2)
     
     for idx, tc in enumerate(trim_coils): 
@@ -511,6 +520,7 @@ for j in range(20):
 
     modB_err = max([np.abs(modB.J()-MODB_TARGET)/MODB_TARGET for modB in modBs])
     well_err = max([max(Jl.well().max() - WELL_THRESHOLD, 0)/np.abs(WELL_THRESHOLD) for Jl in magnetic_wells])
+    fld_err = (max([Jfl.max_distance() for Jfl in fds])-FIELDLINE_DISTANCE_THRESHOLD)/np.abs(FIELDLINE_DISTANCE_THRESHOLD)
     
     # check which constraints are violated and increase weight if violated by more than 0.1%
     if curr_err > 0.001:
@@ -545,7 +555,10 @@ for j in range(20):
     if well_err > 0.001:
         WELL_WEIGHT*=10
         print("WELL ERROR", well_err)
-
+    if fld_err > 0.001:
+        print("FLD ERROR", fld_err)
+        FIELDLINE_DISTANCE_WEIGHT*=10
+ 
 
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")
@@ -567,6 +580,7 @@ for j in range(20):
     config['MODB_WEIGHT'] = MODB_WEIGHT.value
     config['ARCLENGTH_WEIGHT'] = ARCLENGTH_WEIGHT.value
     config['WELL_WEIGHT'] = WELL_WEIGHT.value
+    config['FIELDLINE_DISTANCE_WEIGHT'] = FIELDLINE_DISTANCE_WEIGHT.value
     # Save to YAML
     with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
