@@ -46,6 +46,10 @@ class PillPipeSDF(Optimizable):
         self.quadratic_threshold = quadratic_threshold
     def num_dofs(self):
         return 4
+    
+    def eval(self, x, y, z):
+        pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
+        return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
 
     def to_vtk(self, name):
         bx, by, r, rr = self.local_full_x

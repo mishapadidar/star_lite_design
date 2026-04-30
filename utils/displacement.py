@@ -8,6 +8,89 @@ import numpy as np
 import jax.numpy as jnp
 from jax import jit, grad, jacfwd
 
+def mean_z_pure(gamma, maximum_distance):
+    """
+    This function is used in a Python+Jax implementation of the curve-surface distance
+    formula.
+    """
+    z = gamma[:, 2]
+    mean_z = jnp.mean(z)
+    dz = jnp.abs(z-mean_z)
+    return jnp.mean(jnp.maximum(dz-maximum_distance, 0)**2)
+
+
+class FieldLineMeanZ(Optimizable):
+    def __init__(self, fieldline, maximum_distance):
+        """A curve-vessel distance function
+
+        Args:
+            curves (list): list of curves
+            vessel (array): (n, 3) array representing the vessel surface
+            minimum_distance (float): minimum distance threshold for the distance calculation.
+        """
+        self.fieldline = fieldline
+        self.maximum_distance = maximum_distance
+
+        self.J_jax = jit(lambda gamma: mean_z_pure(gamma, maximum_distance))
+        self.thisgrad0 = jit(lambda gamma: grad(self.J_jax)(gamma))
+        super().__init__(depends_on=[fieldline])  # Bharat's comment: Shouldn't we add surface here
+    def max_distance(self):
+        gamma = self.fieldline.curve.gamma()
+        z = gamma[:, 2]
+        mean_z = np.mean(z)
+        dz = np.abs(z-mean_z)
+        return np.max(dz)
+
+    def J(self):
+        """
+        This returns the value of the quantity.
+        """
+        if self.fieldline.need_to_run_code:
+            res = self.fieldline.res
+            res = self.fieldline.run_code(res['length'])
+
+        gamma = self.fieldline.curve.gamma()
+        
+        res = self.J_jax(gamma)
+        return res
+
+    @derivative_dec
+    def dJ(self):
+        """
+        This returns the derivative of the quantity with respect to the curve dofs.
+        """
+        if self.fieldline.need_to_run_code:
+            res = self.fieldline.res
+            res = self.fieldline.run_code(res['length'])
+    
+        fieldline = self.fieldline
+
+        gamma = self.fieldline.curve.gamma()
+        dJ_dgamma = self.thisgrad0(gamma)
+        
+        if fieldline.need_to_run_code:
+            res = self.fieldline.res
+            res = self.fieldline.run_code(res['length'])
+
+        curve = fieldline.curve
+        res_curve = curve.dgamma_by_dcoeff_vjp(dJ_dgamma)
+        res_curve = res_curve(curve)
+
+        P, L, U = fieldline.res['PLU']
+        dconstraint_dcoils_vjp = fieldline.res['vjp']
+
+        # tack on dJ_dlength = 0 to the end of dJ_ds
+        dJ_dc = np.zeros(L.shape[0])
+        dj_dc = res_curve.copy()
+        dJ_dc[:dj_dc.size] = dj_dc
+        adj = forward_backward(P, L, U, dJ_dc)
+
+        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, fieldline.biotsavart, fieldline)
+        res =-1 * adj_times_dg_dcoil
+        return res
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
 def distance_pure(gamma1, gamma2, maximum_distance):
     """
     This function is used in a Python+Jax implementation of the curve-surface distance

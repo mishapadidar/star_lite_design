@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 
-# 176 dofs
-# 99 + 49 + 2*3 + 6*3
-# 4 dofs for the vessel
-
 import sys
 import os
 import numpy as np
@@ -13,8 +9,6 @@ from simsopt.field.coil import ScaledCurrent
 from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.configs import get_ncsx_data
 from simsopt.field import BiotSavart, coils_via_symmetries
-from simsopt.field.force import coil_force, LpCurveForce
-from simsopt.field.selffield import regularization_circ
 from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, boozer_surface_residual, \
     Volume, MajorRadius, CurveLength, NonQuasiSymmetricRatio, Iotas, RotatedCurve
 from simsopt.objectives import QuadraticPenalty
@@ -37,7 +31,7 @@ from star_lite_design.utils.fieldline_vessel_distance import FieldLineVesselDist
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.pillpipevessel import VesselDistance, PillCurve, PillPipeSDF
-from star_lite_design.utils.displacement import FieldLineDistance
+from star_lite_design.utils.displacement import FieldLineDistance, FieldLineMeanZ
 import yaml
 
 #import jax
@@ -54,27 +48,27 @@ print("================================")
 
 # load the boozer surfaces (1 per Current configuration, so 3 total.)
 data = load(f"output_VV_well_distance/design_opt_final.json")
-boozer_surfaces_DN = data[0] # BoozerSurfaces
-iota_Gs_DN = data[1] # (iota, G) pairs
-axes_DN = data[2] # magnetic axis CurveRZFouriers
-xpoints_DN = data[3] # X-point CurveRZFouriers
+boozer_surfaces = data[0] # BoozerSurfaces
+iota_Gs = data[1] # (iota, G) pairs
+axes = data[2] # magnetic axis CurveRZFouriers
+xpoints = data[3] # X-point CurveRZFouriers
 in_sdf = data[4] # X-point CurveRZFouriers
 config = yaml.safe_load(open(f"output_VV_well_distance/design_opt_final.yaml",'r'))
 
-for axis in axes_DN:
+for axis, boozer_surface in zip(axes, boozer_surfaces):
     axis.run_code(CurveLength(axis.curve).J())
 
-for xpoint in xpoints_DN:
+for xpoint, boozer_surface in zip(xpoints, boozer_surfaces):
     xpoint.run_code(CurveLength(xpoint.curve).J())
 
-for ii, bsurf in enumerate(boozer_surfaces_DN):
+for ii, bsurf in enumerate(boozer_surfaces):
     # rebuild the boozer surface and populate the res attribute
     bsurf = BoozerSurface(bsurf.biotsavart, bsurf.surface, bsurf.label, bsurf.targetlabel, options={'newton_tol':1e-13, 'newton_maxiter':20})
-    bsurf.run_code(iota_Gs_DN[ii][0], iota_Gs_DN[ii][1])
-    boozer_surfaces_DN[ii] = bsurf
+    bsurf.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
+    boozer_surfaces[ii] = bsurf
 
 # get the base curves
-biotsavart = boozer_surfaces_DN[0].biotsavart
+biotsavart = boozer_surfaces[0].biotsavart
 coils = biotsavart.coils
 curves = [c.curve for c in coils]
 base_curve_idx = [0, 4]
@@ -119,20 +113,20 @@ print("hooking up the new lattice!")
 
 trim_coils = []
 base_trim_currents = []
-for config_idx in range(len(boozer_surfaces_DN)):
+for config_idx in range(len(boozer_surfaces)):
     config_currents = [ScaledCurrent(Current(0.), (1/4/np.pi)*1e7) for c in base_trim_curves]
     base_trim_currents += config_currents
     tcoils = coils_via_symmetries(base_trim_curves, config_currents, 2, True)
     trim_coils.append(tcoils)
 
 print("rerunning boozer computation!")
-for ii, bsurf in enumerate(boozer_surfaces_DN):
+for ii, bsurf in enumerate(boozer_surfaces):
     biotsavart_new = BiotSavart(bsurf.biotsavart.coils + trim_coils[ii])
     bsurf = BoozerSurface(biotsavart_new, bsurf.surface, bsurf.label, bsurf.targetlabel, options={'newton_tol':1e-13, 'newton_maxiter':20})
-    bsurf.run_code(iota_Gs_DN[ii][0], iota_Gs_DN[ii][1])
-    boozer_surfaces_DN[ii] = bsurf
+    bsurf.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
+    boozer_surfaces[ii] = bsurf
     print(bsurf.surface.minor_radius())
-for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces_DN, xpoints_DN, axes_DN)):
+for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces, xpoints, axes)):
     biotsavart_new = BiotSavart(bsurf.biotsavart.coils + trim_coils[ii])
     xpoint_fl = PeriodicFieldLine(biotsavart_new, xp.curve)
     xpoint_fl.run_code(CurveLength(xpoint_fl.curve).J())
@@ -142,117 +136,22 @@ for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces_DN, xpoints_DN, axes_
     axis_fl.run_code(CurveLength(axis_fl.curve).J())
 
     
-    xpoints_DN[ii] = xpoint_fl
-    axes_DN[ii] = axis_fl
-
-boozer_surfaces_SN = []
-xpoints_new = []
-axes_SN = []
-
-print("creating SN surfaces and X-points!")
-for ii, bsurf in enumerate(boozer_surfaces_DN):
-    # create new currents
-    coils_new = []
-    for coil in bsurf.biotsavart.coils:
-        curr_val = coil.current.get_value()
-        scale = (1/4/np.pi)*1e7
-        coil_new = Coil(coil.curve, ScaledCurrent(Current(curr_val/scale), scale))
-        coils_new.append(coil_new)
-    biotsavart_new = BiotSavart(coils_new)
-
-    mpol=6
-    ntor=6
-    phis = np.linspace(0, 1., 2*2*ntor+1, endpoint=False)
-    thetas = np.linspace(0, 1., 2*mpol+1, endpoint=False)
-    
-    stemp1 = SurfaceXYZTensorFourier(
-        mpol=bsurf.surface.mpol, ntor=bsurf.surface.ntor, stellsym=bsurf.surface.stellsym, nfp=bsurf.surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
-    stemp1.x = bsurf.surface.x
-
-    stemp2 = SurfaceXYZTensorFourier(
-        mpol=mpol, ntor=2*ntor, stellsym=False, nfp=1, quadpoints_phi=phis, quadpoints_theta=thetas)
-    stemp2.least_squares_fit(stemp1.gamma())
-
-    snew = SurfaceXYZTensorFourier(
-        mpol=mpol, ntor=2*ntor, stellsym=False, nfp=1, quadpoints_phi=phis, quadpoints_theta=thetas)
-    snew.x = stemp2.x
-    
-    bsurf_new = BoozerSurface(biotsavart_new, snew, Volume(snew), bsurf.targetlabel, options={'newton_tol':1e-13, 'newton_maxiter':20})
-    bsurf_new.run_code(iota_Gs_DN[ii][0], iota_Gs_DN[ii][1])
-    boozer_surfaces_SN.append(bsurf_new)
-
-
-order_new = 2*xp.curve.order
-quadpoints = np.linspace(0, 1., 2*order_new+1, endpoint=False)
-tmp = CurveXYZFourierSymmetries(quadpoints, xp.curve.order, xp.curve.nfp, xp.curve.stellsym, xp.curve.ntor)
-tmp.x = xpoints_DN[0].curve.x
-
-nfp = 2
-quadpoints = np.linspace(0, 1., 2*order_new+1, endpoint=False)
-stellsym = False
-ntor = 1
-curve0 = CurveXYZFourierSymmetries(quadpoints, order_new, nfp, stellsym, ntor)
-curve0.least_squares_fit(tmp.gamma())
-
-# top
-xpoint0_full = PeriodicFieldLine(BiotSavart(boozer_surfaces_DN[0].biotsavart.coils), curve0)
-xpoint0_full.run_code(CurveLength(xpoint0_full.curve).J())
+    xpoints[ii] = xpoint_fl
+    axes[ii] = axis_fl
 
 
 
 
-xpoints_top_SN = []
-xpoints_bot_SN = []
-axes_SN = []
-for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces_SN, xpoints_DN, axes_DN)):
-    order_new = xp.curve.order*xp.curve.nfp
-    quadpoints = np.linspace(0, 1., 2*order_new+1, endpoint=False)
-    tmp = CurveXYZFourierSymmetries(quadpoints, xp.curve.order, xp.curve.nfp, xp.curve.stellsym, xp.curve.ntor)
-    tmp.x = xp.curve.x
 
-    nfp = 1
-    quadpoints = np.linspace(0, 1., 2*order_new+1, endpoint=False)
-    stellsym = False
-    ntor = 1
-    curve_top = CurveXYZFourierSymmetries(quadpoints, order_new, nfp, stellsym, ntor)
-    curve_top.least_squares_fit(tmp.gamma())
-   
-    gnew = tmp.gamma().copy()
-    gnew[:, 1]*=-1
-    gnew[:, 2]*=-1
-    gnew = np.flipud(gnew)
-    gnew = np.roll(gnew, 1, axis=0)
 
-    curve_bot = CurveXYZFourierSymmetries(quadpoints, order_new, nfp, stellsym, ntor)
-    curve_bot.least_squares_fit(gnew)
 
-    # top
-    xpoint_top = PeriodicFieldLine(BiotSavart(bsurf.biotsavart.coils), curve_top)
-    xpoint_top.run_code(CurveLength(xpoint_top.curve).J())
-    
-    ## bottom
-    xpoint_bot = PeriodicFieldLine(BiotSavart(bsurf.biotsavart.coils), curve_bot)
-    xpoint_bot.run_code(CurveLength(xpoint_bot.curve).J())
-    
-    
-    order_new = axis.curve.order*axis.curve.nfp
-    quadpoints = np.linspace(0, 1., 2*order_new+1, endpoint=False)
-    tmp = CurveXYZFourierSymmetries(quadpoints, axis.curve.order, axis.curve.nfp, axis.curve.stellsym, axis.curve.ntor)
-    tmp.x = axis.curve.x
 
-    nfp = 1
-    quadpoints = np.linspace(0, 1., 2*order_new+1, endpoint=False)
-    stellsym = False
-    ntor = 1
-    curve = CurveXYZFourierSymmetries(quadpoints, order_new, nfp, stellsym, ntor)
-    curve.least_squares_fit(tmp.gamma())
 
-    axis_fl = PeriodicFieldLine(BiotSavart(bsurf.biotsavart.coils), axis.curve)
-    axis_fl.run_code(CurveLength(axis_fl.curve).J())
 
-    xpoints_top_SN.append(xpoint_top)
-    xpoints_bot_SN.append(xpoint_bot)
-    axes_SN.append(axis_fl)
+
+
+
+
 
 
 # load all the target, and threshold quantities along with their associated penalty weights
@@ -281,28 +180,27 @@ BOOZER_RESIDUAL_WEIGHT=Weight(config['BOOZER_RESIDUAL_WEIGHT'])
 FIELDLINE_DISTANCE_WEIGHT = Weight(config['FIELDLINE_DISTANCE_WEIGHT'])
 FIELDLINE_DISTANCE_THRESHOLD = config['FIELDLINE_DISTANCE_THRESHOLD']
 
+FIELDLINE_MEANZ_WEIGHT = Weight(config['FIELDLINE_MEANZ_WEIGHT'])
+FIELDLINE_MEANZ_THRESHOLD = config['FIELDLINE_MEANZ_THRESHOLD']
 
-COIL_TO_VESSEL_WEIGHT1 = Weight(config['COIL_TO_VESSEL_WEIGHT1'])
-COIL_TO_VESSEL_WEIGHT2 = Weight(config['COIL_TO_VESSEL_WEIGHT2'])
+COIL_TO_VESSEL_WEIGHT = Weight(config['COIL_TO_VESSEL_WEIGHT'])
 MODB_WEIGHT = Weight(config['MODB_WEIGHT'])
 ARCLENGTH_WEIGHT = Weight(config['ARCLENGTH_WEIGHT'])
 
 WELL_WEIGHT = Weight(config['WELL_WEIGHT'])
 WELL_THRESHOLD = float(config['WELL_THRESHOLD'])
 
-FORCE_THRESHOLD = float(config['FORCE_THRESHOLD'])
-
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
-mr = MajorRadius(boozer_surfaces_DN[0])
+mr = MajorRadius(boozer_surfaces[0])
 ls = [CurveLength(c) for c in base_curves]
-brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces_DN + boozer_surfaces_SN]
+brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
 J_major_radius = QuadraticPenalty(mr, MR_TARGET, 'identity')  # target major radius is that computed on the initial surface
 
-IOTAS_LIST = [Iotas(boozer_surface) for boozer_surface in boozer_surfaces_DN+boozer_surfaces_SN]
-J_iotas = sum([QuadraticPenalty(IOTAS, IOTAS_TARGET, 'identity') for IOTAS, IOTAS_TARGET in zip(IOTAS_LIST, IOTAS_TARGET+IOTAS_TARGET)])
-nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces_DN+boozer_surfaces_SN]
+IOTAS_LIST = [Iotas(boozer_surface) for boozer_surface in boozer_surfaces]
+J_iotas = sum([QuadraticPenalty(IOTAS, IOTAS_TARGET, 'identity') for IOTAS, IOTAS_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)]) # target rotational transform is that computed on the initial surface
+nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
 print([J.J()**0.5 for J in nonQS_list])
-J_nonQSRatio = (1./len(boozer_surfaces_DN)) * sum(nonQS_list)
+J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
 
 Jls = [CurveLength(c) for c in base_curves]
 Jccdist = CurveCurveDistance(curves, COIL_TO_COIL_THRESHOLD)
@@ -313,22 +211,15 @@ Jal = sum(ArclengthVariation(curve) for curve in base_curves)
 length_penalty = sum([QuadraticPenalty(Jl, LENGTH_THRESHOLD, "max") for Jl in Jls])
 curvature_penalty = sum(Jcs)
 msc_penalty = sum(QuadraticPenalty(J, MEAN_SQUARED_CURVATURE_THRESHOLD, "max") for J in Jmscs)
-Jbrs = sum(brs) * (1./len(brs))
+Jbrs = sum(brs)
 
 # penalty on deviation from target mean field strength
-modBs = [ModBOnFieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes_DN+axes_SN, boozer_surfaces_DN+boozer_surfaces_SN)]
-JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB in modBs])
+modBs = [ModBOnFieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
+JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
 
 J_curr = None
-for boozer_surface in boozer_surfaces_DN:
+for boozer_surface in boozer_surfaces:
     for idx in base_curve_idx:
-        curr = boozer_surface.biotsavart.coils[idx].current
-        if J_curr is None:
-            J_curr = CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
-        else:
-            J_curr += CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
-for boozer_surface in boozer_surfaces_SN:
-    for idx in range(len(boozer_surface.biotsavart.coils)):
         curr = boozer_surface.biotsavart.coils[idx].current
         if J_curr is None:
             J_curr = CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
@@ -336,24 +227,19 @@ for boozer_surface in boozer_surfaces_SN:
             J_curr += CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
 
 # sign=1.0 because I want the coils to be OUTSIDE the toroidal vessel
-entities = base_curves                     + xpoints_DN                  + boozer_surfaces_DN 
-sign = np.array([1.0 for c in base_curves] + [-1.0 for xp in xpoints_DN] + [-1.0 for boozer_surface in boozer_surfaces_DN])
-Jcvd1 = VesselDistance(sdf, entities, sign, CV_THRESHOLD)
-
-entities_new = boozer_surfaces_SN                               +  xpoints_top_SN                  + xpoints_bot_SN
-sign_new = np.array([-1.0 for boozer_surface in boozer_surfaces_SN] + [-1.0 for xp in xpoints_top_SN] + [1.0 for xp in xpoints_bot_SN])
-Jcvd2 = VesselDistance(sdf, entities_new, sign_new, CV_THRESHOLD)
-
+entities = base_curves + xpoints + boozer_surfaces
+sign = np.array([1.0 for c in base_curves] + [-1.0 for xp in xpoints] + [-1.0 for boozer_surface in boozer_surfaces])
+Jcvd = VesselDistance(sdf, entities, sign, CV_THRESHOLD)
 
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
-magnetic_wells = [MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes_DN+axes_SN, boozer_surfaces_DN + boozer_surfaces_SN)]
+magnetic_wells = [MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes, boozer_surfaces)]
 J_wells = sum(magnetic_wells)
 
-fds = [FieldLineDistance(xpoints_DN[0], xpoint, FIELDLINE_DISTANCE_THRESHOLD) for xpoint in xpoints_DN[1:]]
-fds +=[FieldLineDistance(xpoint0_full, xpoint, FIELDLINE_DISTANCE_THRESHOLD) for xpoint in xpoints_top_SN]
+fds = [FieldLineDistance(xpoints[0], xpoint, FIELDLINE_DISTANCE_THRESHOLD) for xpoint in xpoints[1:]]
 J_fdist = sum(fds)
 
-
+meanzs = [FieldLineMeanZ(xpoint, FIELDLINE_MEANZ_THRESHOLD) for xpoint in xpoints]
+J_meanz = sum(meanzs)
 
 # sum the objectives together
 JF = (J_nonQSRatio 
@@ -366,16 +252,15 @@ JF = (J_nonQSRatio
     + ARCLENGTH_WEIGHT * Jal
     + BOOZER_RESIDUAL_WEIGHT * Jbrs
     + MODB_WEIGHT * JmodB
-    + COIL_TO_VESSEL_WEIGHT1 * Jcvd1
-    + COIL_TO_VESSEL_WEIGHT2 * Jcvd2
+    + COIL_TO_VESSEL_WEIGHT * Jcvd
     + CURRENT_WEIGHT * J_curr
     + WELL_WEIGHT * J_wells
     + FIELDLINE_DISTANCE_WEIGHT * J_fdist
+    + FIELDLINE_MEANZ_WEIGHT * J_meanz
     )
 
-#import ipdb;ipdb.set_trace()
-#entities = base_curves + xpoints_DN + boozer_surfaces_DN
-#sign = np.array([1.0 for c in base_curves] + [-1.0 for xp in xpoints_DN]+ [-1.0 for boozer_surface in boozer_surfaces_DN])
+#entities = base_curves + xpoints + boozer_surfaces
+#sign = np.array([1.0 for c in base_curves] + [-1.0 for xp in xpoints]+ [-1.0 for boozer_surface in boozer_surfaces])
 #Jcvd2 = VesselDistance(sdf, entities, sign, CV_THRESHOLD*1e3)
 #JF = Jcvd2
 
@@ -388,32 +273,37 @@ penalties = {'nonQS': J_nonQSRatio,
         'arclength':ARCLENGTH_WEIGHT * Jal,
         'Boozer residual': BOOZER_RESIDUAL_WEIGHT * Jbrs,
         'modB': MODB_WEIGHT * JmodB,
-        'DN-to-vessel':COIL_TO_VESSEL_WEIGHT1 * Jcvd1,
-        'SN-to-vessel':COIL_TO_VESSEL_WEIGHT2 * Jcvd2,
+        'coil-to-vessel':COIL_TO_VESSEL_WEIGHT * Jcvd,
         'current':CURRENT_WEIGHT * J_curr,
         'magnetic well': WELL_WEIGHT*J_wells,
-        'fieldline distance': FIELDLINE_DISTANCE_WEIGHT * J_fdist
+        'fieldline distance': FIELDLINE_DISTANCE_WEIGHT * J_fdist,
+        'fieldline meanz': FIELDLINE_MEANZ_WEIGHT * J_meanz
         }
 
 states = {
         'iotas': IOTAS_LIST,
         'modB': modBs,
         'lengths':Jls,
-        'major radius': [MajorRadius(boozer_surface) for boozer_surface in boozer_surfaces_DN],
+        'major radius': [MajorRadius(boozer_surface) for boozer_surface in boozer_surfaces],
         'Boozer residuals': brs,
         'mean-squared curvature': Jmscs,
         }
 
 # fix some currents
-for bbsurf in boozer_surfaces_DN+boozer_surfaces_SN:
+for bbsurf in boozer_surfaces:
     for coil in bbsurf.biotsavart.coils:
         coil.current.unfix_all()
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
 
+    # set lower/upper bounds on the remaining currents
+    for jj in base_curve_idx:
+        bbsurf.biotsavart.coils[jj].current.upper_bounds = [CURRENT_THRESHOLD/bbsurf.biotsavart.coils[jj].current.scale]
+        bbsurf.biotsavart.coils[jj].current.lower_bounds = [-CURRENT_THRESHOLD/bbsurf.biotsavart.coils[jj].current.scale]
+
 # make sure coils are stellarator symmetric
 for ii in [base_curve_idx[-1]]:
-    c = boozer_surfaces_DN[0].biotsavart.coils[ii].curve
+    c = boozer_surfaces[0].biotsavart.coils[ii].curve
     if isinstance(c, RotatedCurve):
         c = c.curve
     for df in c.local_dof_names:
@@ -426,65 +316,41 @@ print(JF.dof_names, JF.x.size)
 
 
 # Directory for output
-OUT_DIR = f"./output_SN_DN/"
+OUT_DIR = f"./output_VV_well_distance/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
-for idx, boozer_surface in enumerate(boozer_surfaces_DN):
+for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_init_{idx}")
 
 # save these as a backup in case the boozer surface Newton solve fails
-res_DN_list = [{'sdofs': boozer_surface.surface.x.copy() , 'iota': boozer_surface.res['iota'], 'G': boozer_surface.res['G']} for boozer_surface in boozer_surfaces_DN]
-axes_DN_res_list = [{'adofs': axis.curve.x.copy() , 'length': axis.res['length']} for axis in axes_DN]
-xpoints_DN_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['length']} for xpoint in xpoints_DN]
-
-res_SN_list = [{'sdofs': boozer_surface.surface.x.copy() , 'iota': boozer_surface.res['iota'], 'G': boozer_surface.res['G']} for boozer_surface in boozer_surfaces_SN]
-axes_SN_res_list = [{'adofs': axis.curve.x.copy() , 'length': axis.res['length']} for axis in axes_SN]
-xpoints_top_SN_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['length']} for xpoint in xpoints_top_SN]
-xpoints_bot_SN_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['length']} for xpoint in xpoints_bot_SN]
-
+res_list = [{'sdofs': boozer_surface.surface.x.copy() , 'iota': boozer_surface.res['iota'], 'G': boozer_surface.res['G']} for boozer_surface in boozer_surfaces]
+axes_res_list = [{'adofs': axis.curve.x.copy() , 'length': axis.res['length']} for axis in axes]
+xpoints_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['length']} for xpoint in xpoints]
 dat_dict = {'iter':0, 'J': JF.J(), 'dJ': JF.dJ().copy()}
 
-xpoint0_SN_res = {'xdofs':xpoint0_full.curve.x.copy(), 'length':xpoint0_full.res['length']}
 def callback(dofs):
-    for res, boozer_surface in zip(res_DN_list, boozer_surfaces_DN):
+    for res, boozer_surface in zip(res_list, boozer_surfaces):
         res['sdofs'] = boozer_surface.surface.x.copy()
         res['iota'] =  boozer_surface.res['iota']
         res['G'] = boozer_surface.res['G']
+    for res, axis in zip(axes_res_list, axes):
+        res['adofs'] = axis.curve.x.copy()
+        res['length'] =  axis.res['length']
+    for res, axis in zip(xpoints_res_list, xpoints):
+        res['xdofs'] = axis.curve.x.copy()
+        res['length'] =  axis.res['length']
     
-    xpoint0_SN_res['xdofs'] = xpoint0_full.curve.x.copy()
-    xpoint0_SN_res['length'] = xpoint0_full.res['length']
-
-    for res, axis in zip(axes_DN_res_list, axes_DN):
-        res['adofs'] = axis.curve.x.copy()
-        res['length'] =  axis.res['length']
-    for res, axis in zip(xpoints_DN_res_list, xpoints_DN):
-        res['xdofs'] = axis.curve.x.copy()
-        res['length'] =  axis.res['length']
-    for res, boozer_surface in zip(res_SN_list, boozer_surfaces_SN):
-        res['sdofs'] = boozer_surface.surface.x.copy()
-        res['iota'] =  boozer_surface.res['iota']
-        res['G'] = boozer_surface.res['G']
-    for res, axis in zip(axes_SN_res_list, axes_SN):
-        res['adofs'] = axis.curve.x.copy()
-        res['length'] =  axis.res['length']
-    for res, axis in zip(xpoints_top_SN_res_list, xpoints_top_SN):
-        res['xdofs'] = axis.curve.x.copy()
-        res['length'] =  axis.res['length']
-    for res, axis in zip(xpoints_bot_SN_res_list, xpoints_bot_SN):
-        res['xdofs'] = axis.curve.x.copy()
-        res['length'] =  axis.res['length']
-
     dat_dict['J'] = JF.J()
     dat_dict['dJ'] = JF.dJ().copy()
     
-    trim_currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces_DN for idx in range(len(coils), len(boozer_surface.biotsavart.coils))]
+    trim_currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in range(len(coils), len(boozer_surface.biotsavart.coils))]
     if len(trim_currents_list) > 0:
         trim_currents_list = [np.min(trim_currents_list), np.max(trim_currents_list)]
     trim_radius_list = [curve.get('radius') for curve in base_trim_curves]
     if len(trim_radius_list) > 0:
         trim_radius_list = [np.min(trim_radius_list), np.max(trim_radius_list)]
-    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces_DN for idx in base_curve_idx]
+    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     kappas = [np.max(c.kappa()) for c in base_curves]
     
     console = Console(width=250)
@@ -508,17 +374,14 @@ def callback(dofs):
     table2.add_row('trim radius', ' '.join([f'{curr:.3e}' for curr in trim_radius_list]))
     table2.add_row('curvatures', ' '.join([f'{curv:.3e}' for curv in kappas]))
     #table2.add_row('minimum X-point-to-vessel distance', ' '.join([f'{Jxv.shortest_distance():.3e}' for Jxv in Jxvs]))
+    md_coil, md_fieldline, md_bs = Jcvd.shortest_distance()
+    table2.add_row('minimum coil-to-vessel distance', f'{md_coil:.3e}')
+    table2.add_row('minimum X-point-to-vessel distance', f'{md_fieldline:.3e}')
+    table2.add_row('minimum Boozer surface-to-vessel distance', f'{md_bs:.3e}')
     table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
-    md_coil, md_fieldline, md_bs = Jcvd1.shortest_distance()
-    table2.add_row('DN minimum coil-to-vessel distance', f'{md_coil:.3e}')
-    table2.add_row('DN minimum X-point-to-vessel distance', f'{md_fieldline:.3e}')
-    table2.add_row('DN minimum Boozer surface-to-vessel distance', f'{md_bs:.3e}')
-    md_coil, md_fieldline, md_bs = Jcvd2.shortest_distance()
-    table2.add_row('SN minimum coil-to-vessel distance', f'{md_coil:.3e}')
-    table2.add_row('SN minimum X-point-to-vessel distance', f'{md_fieldline:.3e}')
-    table2.add_row('SN minimum Boozer surface-to-vessel distance', f'{md_bs:.3e}')
     table2.add_row('fieldline distances', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in fds]))
+    table2.add_row('fieldline mean-z', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in meanzs]))
     console.print(table2)
     
     for idx, tc in enumerate(trim_coils): 
@@ -526,16 +389,11 @@ def callback(dofs):
             curves_to_vtk([coil.curve for coil in tc], OUT_DIR + f'array_tmp_{idx}')
     sdf.to_vtk(OUT_DIR + 'vessel_tmp')
     curves_to_vtk(curves, OUT_DIR + "curves_tmp")
-    curves_to_vtk([xpoint.curve for xpoint in xpoints_DN], OUT_DIR + f"xpoint_DN_curves_tmp")
-    curves_to_vtk([xpoint.curve for xpoint in xpoints_top_SN + xpoints_bot_SN + [xpoint0_full]], OUT_DIR + f"xpoint_SN_curves_tmp")
-    curves_to_vtk([axis.curve for axis in axes_DN], OUT_DIR + "ma_DN_tmp")
-    curves_to_vtk([axis.curve for axis in axes_SN], OUT_DIR + "ma_SN_tmp")
-    for idx, boozer_surface in enumerate(boozer_surfaces_DN):
-        boozer_surface.surface.to_vtk(OUT_DIR + f"surf_DN_tmp_{idx}")
-    for idx, boozer_surface in enumerate(boozer_surfaces_SN):
-        boozer_surface.surface.to_vtk(OUT_DIR + f"surf_SN_tmp_{idx}")
-
-    save([boozer_surfaces_DN, iota_Gs_DN, axes_DN, xpoints_DN, boozer_surfaces_SN, axes_SN, xpoints_top_SN, xpoints_bot_SN, [xpoint0_full], sdf], OUT_DIR + f'design_tmp.json')
+    curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_tmp")
+    curves_to_vtk([axis.curve for axis in axes], OUT_DIR + "ma_tmp")
+    for idx, boozer_surface in enumerate(boozer_surfaces):
+        boozer_surface.surface.to_vtk(OUT_DIR + f"surf_tmp_{idx}")
+    save([boozer_surfaces, iota_Gs, axes, xpoints, sdf], OUT_DIR + f'design_tmp.json')
     dat_dict["iter"] += 1
 
 def fun(dofs):
@@ -548,9 +406,9 @@ def fun(dofs):
     except: # the objective function evaluation failed unfortunately
         solver_fail = True
     
-    fieldline_success = [fieldline.res['success'] for fieldline in axes_DN+xpoints_DN + xpoints_top_SN + xpoints_bot_SN + [xpoint0_full]]
+    fieldline_success = [fieldline.res['success'] for fieldline in axes+xpoints]
     if (not np.all([boozer_surface.res['success'] \
-            and (not boozer_surface.surface.is_self_intersecting()) for boozer_surface in boozer_surfaces_DN + boozer_surfaces_SN])) \
+            and (not boozer_surface.surface.is_self_intersecting()) for boozer_surface in boozer_surfaces])) \
             or not np.all(fieldline_success)\
             or solver_fail:
         print('failed')
@@ -559,56 +417,19 @@ def fun(dofs):
         # the step size.
         J = 1e3
         grad = -dat_dict['dJ']
-        for res, boozer_surface in zip(res_DN_list,  boozer_surfaces_DN): 
+        for res, boozer_surface in zip(res_list,  boozer_surfaces): 
             boozer_surface.surface.x = res['sdofs']
             boozer_surface.res['iota'] = res['iota']
             boozer_surface.res['G'] = res['G']
-        for res, axis in zip(axes_DN_res_list,  axes_DN): 
+        for res, axis in zip(axes_res_list,  axes): 
             axis.curve.x = res['adofs']
             axis.res['length'] = res['length']
-        for res, axis in zip(xpoints_DN_res_list,  xpoints_DN): 
+        for res, axis in zip(xpoints_res_list,  xpoints): 
             axis.curve.x = res['xdofs']
             axis.res['length'] = res['length']
 
-        for res, boozer_surface in zip(res_SN_list,  boozer_surfaces_SN): 
-            boozer_surface.surface.x = res['sdofs']
-            boozer_surface.res['iota'] = res['iota']
-            boozer_surface.res['G'] = res['G']
-        for res, axis in zip(axes_SN_res_list,  axes_SN): 
-            axis.curve.x = res['adofs']
-            axis.res['length'] = res['length']
-        for res, axis in zip(xpoints_top_SN_res_list+xpoints_bot_SN_res_list,  xpoints_top_SN+xpoints_bot_SN): 
-            axis.curve.x = res['xdofs']
-            axis.res['length'] = res['length']
-        
-        xpoint0_full.curve.x = xpoint0_SN_res['xdofs']
-        xpoint0_full.res['length'] = xpoint0_SN_res['length']
- 
+
     return J, grad
-
-# compute the lower X points
-
-
-
-# break the stellsym in the coils ...
-
-## coil forces on all current groups
-#coil_force_list = []
-#for bbsurf in boozer_surfaces_DN:
-#    # only compute force on base coils
-#    coil_force_list += [LpCurveForce(bbsurf.biotsavart.coils[i], bbsurf.biotsavart.coils, regularization_circ(COIL_MINOR_RADIUS), p=2, threshold=FORCE_THRESHOLD) for i in base_curve_idx]
-#Jforce = sum(coil_force_list)
-#
-#force = []
-## print out coil forces
-#for bbsurf in boozer_surfaces_DN:
-#    for coil in bbsurf.biotsavart.coils:
-#        force += [np.linalg.norm(coil_force(coil, bbsurf.biotsavart.coils, regularization_circ(COIL_MINOR_RADIUS)), axis=1)]
-#import ipdb;ipdb.set_trace()
-#max_force = np.max(force)
-#print(f"max force on coils {max_force:.2f}")
-#print(force)
-#quit()
 
 #print("""
 #################################################################################
@@ -656,7 +477,7 @@ print("Norm gradient", np.linalg.norm(dJ0))
 print("Norm QS gradient", np.linalg.norm(J_nonQSRatio.dJ()))
 
 # print the currents
-for bbsurf in boozer_surfaces_DN:
+for bbsurf in boozer_surfaces:
     for ii in base_curve_idx:
         print(f"Coil {ii} current: {bbsurf.biotsavart.coils[ii].current.full_x} A")
 
@@ -684,17 +505,15 @@ for j in range(20):
     callback(dofs)
     print(res.message)
     
-    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces_DN for idx in base_curve_idx]
+    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     curr_err = max([max([c-CURRENT_THRESHOLD, 0.])/CURRENT_THRESHOLD for c in currents_list])
     iota_err = max([np.abs(IOTAS.J() - IOTAS_TARGET)/np.abs(IOTAS_TARGET) for IOTAS, IOTAS_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
     mr_err = np.abs(mr.J()-MR_TARGET)/MR_TARGET
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
     cc_err = max(COIL_TO_COIL_THRESHOLD-Jccdist.shortest_distance(), 0)/np.abs(COIL_TO_COIL_THRESHOLD)
-    md_coil, md_fieldline, md_bs = Jcvd1.shortest_distance()
-    cv_err1 = max(CV_THRESHOLD-np.min([md_coil, md_fieldline, md_bs]), 0)/np.abs(CV_THRESHOLD)
-    md_coil, md_fieldline, md_bs = Jcvd2.shortest_distance()
-    cv_err2 = max(CV_THRESHOLD-np.min([md_coil, md_fieldline, md_bs]), 0)/np.abs(CV_THRESHOLD)
+    md_coil, md_fieldline, md_bs = Jcvd.shortest_distance()
+    cv_err = max(CV_THRESHOLD-np.min([md_coil, md_fieldline, md_bs]), 0)/np.abs(CV_THRESHOLD)
     
     bx, by, r, rr = sdf.local_full_x.copy()
     cv_cons_err = max([r-bx, r-by, 0])
@@ -708,16 +527,14 @@ for j in range(20):
     modB_err = max([np.abs(modB.J()-MODB_TARGET)/MODB_TARGET for modB in modBs])
     well_err = max([max(Jl.well().max() - WELL_THRESHOLD, 0)/np.abs(WELL_THRESHOLD) for Jl in magnetic_wells])
     fld_err = (max([Jfl.max_distance() for Jfl in fds])-FIELDLINE_DISTANCE_THRESHOLD)/np.abs(FIELDLINE_DISTANCE_THRESHOLD)
-    
+    meanz_err = (max([Jfl.max_distance() for Jfl in meanzs])-FIELDLINE_MEANZ_THRESHOLD)/np.abs(FIELDLINE_MEANZ_THRESHOLD)
+   
     # check which constraints are violated and increase weight if violated by more than 0.1%
     if curr_err > 0.001:
         CURRENT_WEIGHT*=10
-    if cv_err1 > 0.001 or cv_cons_err > 0.001:
-        COIL_TO_VESSEL_WEIGHT1*=10
-        print("DN DIST ERROR", cv1_err)
-    if cv_err2 > 0.001 or cv_cons_err > 0.001:
-        COIL_TO_VESSEL_WEIGHT2*=10
-        print("SN DIST ERROR", cv2_err)
+    if cv_err > 0.001 or cv_cons_err > 0.001:
+        COIL_TO_VESSEL_WEIGHT*=10
+        print("CV ERROR", cv_err)
     if iota_err > 0.001:
         IOTAS_WEIGHT*=10
         print("IOTA ERROR", iota_err)
@@ -748,14 +565,17 @@ for j in range(20):
     if fld_err > 0.001:
         print("FLD ERROR", fld_err)
         FIELDLINE_DISTANCE_WEIGHT*=10
- 
+    if meanz_err > 0.001:
+        print("MEANZ ERROR", meanz_err)
+        FIELDLINE_MEANZ_WEIGHT*=10
+  
 
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
-    curves_to_vtk([xpoint.curve for xpoint in xpoints_DN], OUT_DIR + f"xpoint_curves_opt_{j}")
-    curves_to_vtk([axis.curve for axis in axes_DN], OUT_DIR + f"ma_opt_{j}")
-    for idx, boozer_surface in enumerate(boozer_surfaces_DN):
+    curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")
+    curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_{j}")
+    for idx, boozer_surface in enumerate(boozer_surfaces):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_{j}")
-    save([boozer_surfaces_DN, iota_Gs_DN, axes_DN, xpoints_DN, sdf], OUT_DIR + f'design_opt_{j}.json')
+    save([boozer_surfaces, iota_Gs, axes, xpoints, sdf], OUT_DIR + f'design_opt_{j}.json')
     
     # save the weights in a yaml file
     config['CURRENT_THRESHOLD'] = CURRENT_THRESHOLD
@@ -766,12 +586,12 @@ for j in range(20):
     config['IOTAS_WEIGHT'] = IOTAS_WEIGHT.value
     config['MAJOR_RADIUS_WEIGHT'] = MAJOR_RADIUS_WEIGHT.value
     config['BOOZER_RESIDUAL_WEIGHT'] = BOOZER_RESIDUAL_WEIGHT.value
-    config['COIL_TO_VESSEL_WEIGHT1'] = COIL_TO_VESSEL_WEIGHT1.value
-    config['COIL_TO_VESSEL_WEIGHT2'] = COIL_TO_VESSEL_WEIGHT2.value
+    config['COIL_TO_VESSEL_WEIGHT'] = COIL_TO_VESSEL_WEIGHT.value
     config['MODB_WEIGHT'] = MODB_WEIGHT.value
     config['ARCLENGTH_WEIGHT'] = ARCLENGTH_WEIGHT.value
     config['WELL_WEIGHT'] = WELL_WEIGHT.value
     config['FIELDLINE_DISTANCE_WEIGHT'] = FIELDLINE_DISTANCE_WEIGHT.value
+    config['FIELDLINE_MEANZ_WEIGHT'] = FIELDLINE_MEANZ_WEIGHT.value
     # Save to YAML
     with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
