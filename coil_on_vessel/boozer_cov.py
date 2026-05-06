@@ -120,13 +120,11 @@ for config_idx in range(len(boozer_surfaces)):
     trim_coils.append(tcoils)
 
 print("rerunning boozer computation!")
-for ii, bsurf in enumerate(boozer_surfaces):
+for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces, xpoints, axes)):
     biotsavart_new = BiotSavart(bsurf.biotsavart.coils + trim_coils[ii])
     bsurf = BoozerSurface(biotsavart_new, bsurf.surface, bsurf.label, bsurf.targetlabel, options={'newton_tol':1e-13, 'newton_maxiter':20})
     bsurf.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
-    boozer_surfaces[ii] = bsurf
-    print(bsurf.surface.minor_radius())
-for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces, xpoints, axes)):
+    
     biotsavart_new = BiotSavart(bsurf.biotsavart.coils + trim_coils[ii])
     xpoint_fl = PeriodicFieldLine(biotsavart_new, xp.curve)
     xpoint_fl.run_code(CurveLength(xpoint_fl.curve).J())
@@ -134,8 +132,8 @@ for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces, xpoints, axes)):
     biotsavart_new = BiotSavart(bsurf.biotsavart.coils + trim_coils[ii])
     axis_fl = PeriodicFieldLine(biotsavart_new, axis.curve)
     axis_fl.run_code(CurveLength(axis_fl.curve).J())
-
     
+    boozer_surfaces[ii] = bsurf
     xpoints[ii] = xpoint_fl
     axes[ii] = axis_fl
 
@@ -150,9 +148,8 @@ for ii, (bsurf, xp, axis) in enumerate(zip(boozer_surfaces, xpoints, axes)):
 
 
 
-
 config['COIL_ON_VESSEL_THRESHOLD']=-0.005
-config['COIL_ON_VESSEL_WEIGHT']=1e-1
+config['COIL_ON_VESSEL_WEIGHT']=1e-2
 COV_THRESHOLD = config['COIL_ON_VESSEL_THRESHOLD']
 COIL_ON_VESSEL_WEIGHT = Weight(config['COIL_ON_VESSEL_WEIGHT'])
 
@@ -302,7 +299,7 @@ print(JF.dof_names, JF.x.size)
 
 
 # Directory for output
-OUT_DIR = f"./output/"
+OUT_DIR = f"./output_cov/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 curves_to_vtk(curves, OUT_DIR + "curves_init")
@@ -486,8 +483,8 @@ callback(dofs)
 for j in range(20):
     dat_dict["iter"] = 0
     res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
-    #res = minimize(fun, dofs, jac=True, method='L-BFGS-B', bounds=bounds, options={'maxiter': MAXITER, 'maxcor':500}, tol=1e-15, callback=callback)
     dofs = res.x.copy()
+    import ipdb;ipdb.set_trace()
     callback(dofs)
     print(res.message)
     
