@@ -172,11 +172,13 @@ class RennaissanceSDF(Optimizable):
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
 
     def to_vtk(self, name, nx=20, ny=20, nz=20):
-        x, y1, y2, rr = self.local_full_x
+        d1, d2, d3, rr = self.local_full_x
         pad = 0.1
+
+        d = np.max([d1, d2, d3])
         # domain extents
-        x_min, x_max = -(x+rr + pad), (x + rr + pad)
-        y_min, y_max = -(y2+rr + pad), (y2+rr + pad)
+        x_min, x_max = -(d+rr + pad), (d + rr + pad)
+        y_min, y_max = -(d+rr + pad), (d + rr + pad)
         z_min, z_max = -(rr + pad),  (rr + pad)
         
         xs = np.linspace(x_min, x_max, nx).astype(np.float32)
