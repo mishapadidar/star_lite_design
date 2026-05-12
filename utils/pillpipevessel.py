@@ -11,6 +11,28 @@ from pyevtk.hl import gridToVTK  # pip install pyevtk
 import jax
 import jax.numpy as jnp
 
+@jax.custom_jvp
+def safe_norm2d(qx, qy):
+    return jnp.sqrt(qx * qx + qy * qy)
+
+@safe_norm2d.defjvp
+def safe_norm2d_jvp(primals, tangents):
+    qx, qy = primals
+    dqx, dqy = tangents
+
+    sq = qx * qx + qy * qy
+    norm = jnp.sqrt(sq)
+
+    # Choose a subgradient at the origin: zero.
+    safe_denom = jnp.where(norm > 0.0, norm, 1.0)
+    tangent_out = jnp.where(
+        norm > 0.0,
+        (qx * dqx + qy * dqy) / safe_denom,
+        0.0,
+    )
+
+    return norm, tangent_out
+
 # > 0 if outside
 # = 0 if on
 # < 0 if inside
@@ -20,7 +42,7 @@ def sdf_round_rect(x, y, bx, by, r):
     ay = jnp.abs(y) - (by - r)
     qx = jnp.maximum(ax, 0.0)
     qy = jnp.maximum(ay, 0.0)
-    outside = jnp.sqrt(qx*qx + qy*qy)
+    outside = safe_norm2d(qx, qy)
     inside = jnp.minimum(jnp.maximum(ax, ay), 0.0)
     return outside + inside - r
 
@@ -30,12 +52,18 @@ def sdf_pill_pipe(pts, params, sign):
     d2 = sdf_round_rect(pts[:, 0], pts[:, 1], bx, by, r)
     return sign*(jnp.sqrt(d2**2 + pts[:, 2]**2) - rr)
 
-def quadratic_threshold(pts, params, sign, threshold):
+def quadratic_threshold_pill_pipe(pts, params, sign, threshold):
     sls = sdf_pill_pipe(pts, params, sign)
     bx, by, r, rr = params
     cons1 = jnp.maximum(r-bx, 0)**2
     cons2 = jnp.maximum(r-by, 0)**2
     return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons1 + cons2
+
+def quadratic_distance_pill_pipe(pts, params, sign, threshold):
+    sls = sdf_pill_pipe(pts, params, sign)
+    mean_value = jnp.mean(sls)
+    dvalue = jnp.abs(sls-mean_value)
+    return jnp.mean(jnp.maximum(dvalue-threshold, 0)**2)
 
 class PillPipeSDF(Optimizable):
     def __init__(self, bx, by, r, rr, **kwargs):
@@ -43,7 +71,8 @@ class PillPipeSDF(Optimizable):
         self.bx, self.by, self.r, self.rr = bx, by, r, rr
 
         self.pure = sdf_pill_pipe
-        self.quadratic_threshold = quadratic_threshold
+        self.quadratic_threshold = quadratic_threshold_pill_pipe
+        self.quadratic_distance = quadratic_distance_pill_pipe
     def num_dofs(self):
         return 4
     
@@ -51,7 +80,7 @@ class PillPipeSDF(Optimizable):
         pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
 
-    def to_vtk(self, name):
+    def to_vtk(self, name, nx=20, ny=20, nz=20):
         bx, by, r, rr = self.local_full_x
         pad = 0.1
         # domain extents
@@ -59,7 +88,6 @@ class PillPipeSDF(Optimizable):
         y_min, y_max = -(by+rr + pad), (by+rr + pad)
         z_min, z_max = -(rr + pad),  (rr + pad)
         
-        nx, ny, nz = 20, 20, 20
         xs = np.linspace(x_min, x_max, nx).astype(np.float32)
         ys = np.linspace(y_min, y_max, ny).astype(np.float32)
         zs = np.linspace(z_min, z_max, nz).astype(np.float32)
@@ -79,8 +107,95 @@ class PillPipeSDF(Optimizable):
         )
 
 
+def cyl_sdf(P, P0, u, rad):
+    v = P - P0
+    proj = jnp.sum(v * u, axis=-1, keepdims=True) * u
+    return jnp.linalg.norm(v - proj, axis=-1) - rad
+
+# ---------- 3D circular pipe SDF ----------
+def sdf_rennaissance(pts, params, sign):
+    x, y1, y2, rr = params
+
+    A = jnp.array([x,  0.0, 0.0])
+    B = jnp.array([x,  y1,  0.0])
+    C = jnp.array([0.0, y2,  0.0])
+    
+    AB = A - B
+    AB /= jnp.linalg.norm(uAB)
+    
+    BC = C - B
+    BC /= jnp.linalg.norm(uBC)
+    
+    # Bisector plane normal
+    n = 0.5 * (AB + BC)
+    n /= jnp.linalg.norm(n)
+
+    sdf1 = cyl_sdf(pts, A, AB, rr)
+    sdf2 = cyl_sdf(pts, B, BC, rr)
+    s = jnp.sum(pts * n, axis=-1)
+    sdf = jnp.where(s > 0, sdf1, sf2)
+    return sign*sdf
+
+def quadratic_threshold_rennaissance(pts, params, sign, threshold):
+    sls = sdf_rennaissance(pts, params, sign)
+    x, y1, y2, rr = params
+    cons = jnp.maximum(y2-y1, 0)**2
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
+
+def quadratic_distance_rennaissance(pts, params, sign, threshold):
+    sls = sdf_pill_pipe(pts, params, sign)
+    mean_value = jnp.mean(sls)
+    dvalue = jnp.abs(sls-mean_value)
+    return jnp.mean(jnp.maximum(dvalue-threshold, 0)**2)
+
+class RennaissanceSDF(Optimizable):
+    def __init__(self, x, y1, y2, rr, **kwargs):
+        super().__init__(depends_on=[], x0=np.array([x, y1, y2, rr]), names=['x', 'y1', 'y2', 'rr'], **kwargs)
+        self.x, self.y1, self.y2, self.rr = x, y1, y2, rr
+
+        self.pure = sdf_rennaissance
+        self.quadratic_threshold = quadratic_threshold_rennaissance
+        self.quadratic_distance = quadratic_distance_rennaissance
+    
+    def num_dofs(self):
+        return 4
+    
+    def eval(self, x, y, z):
+        pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
+        return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
+
+    def to_vtk(self, name, nx=20, ny=20, nz=20):
+        x, y1, y2, rr = self.local_full_x
+        pad = 0.1
+        # domain extents
+        x_min, x_max = -(x+rr + pad), (x + rr + pad)
+        y_min, y_max = -(y2+rr + pad), (y2+rr + pad)
+        z_min, z_max = -(rr + pad),  (rr + pad)
+        
+        xs = np.linspace(x_min, x_max, nx).astype(np.float32)
+        ys = np.linspace(y_min, y_max, ny).astype(np.float32)
+        zs = np.linspace(z_min, z_max, nz).astype(np.float32)
+
+        # meshgrid in ij indexing (nx,ny,nz)
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        
+        pts = np.concatenate((X.flatten()[:, None], Y.flatten()[:, None], Z.flatten()[:, None]), axis=-1)
+        D = np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape((nx, ny, nz)))
+        
+        # write to .vts file
+        gridToVTK(
+            name,
+            x=xs, y=ys, z=zs,
+            cellData=None,
+            pointData={"sdf": D},
+        )
+
+
+
+
+
 class VesselDistance(Optimizable):
-    def __init__(self, sdf, entities, sign, minimum_distance):
+    def __init__(self, sdf, entities, sign, minimum_distance, metric='threshold'):
         """A entity-vessel distance function
 
         Args:
@@ -92,11 +207,42 @@ class VesselDistance(Optimizable):
         self.sign = sign
         self.minimum_distance = minimum_distance
         self.sdf = sdf
+        
+        if metric == 'threshold':
+            self.J_jax = jit(lambda pts, params, sign: self.sdf.quadratic_threshold(pts, params, sign, minimum_distance))
+        else:
+            self.J_jax = jit(lambda pts, params, sign: self.sdf.quadratic_distance(pts, params, sign, minimum_distance))
 
-        self.J_jax = jit(lambda pts, params, sign: self.sdf.quadratic_threshold(pts, params, sign, minimum_distance))
         self.thisgrad0 = jit(lambda pts, params, sign: grad(self.J_jax, argnums=0)(pts, params, sign))
         self.thisgrad1 = jit(lambda pts, params, sign: grad(self.J_jax, argnums=1)(pts, params, sign))
         super().__init__(depends_on=entities + [sdf])
+
+    def longest_distance(self):
+        max_dist_curve = -np.inf
+        max_dist_fieldline = -np.inf
+        max_dist_bs = -np.inf
+        for sign, entity in zip(self.sign, self.entities):
+            if isinstance(entity, PeriodicFieldLine):
+                curve = entity.curve
+                sd_tmp = self.sdf.pure(curve.gamma(), self.sdf.local_full_x, sign)
+                max_dist_tmp = np.abs(sd_tmp-sd_tmp.mean()).max()
+                if max_dist_tmp > max_dist_fieldline:
+                    max_dist_fieldline = max_dist_tmp
+            elif isinstance(entity, Curve):
+                sd_tmp = self.sdf.pure(entity.gamma(), self.sdf.local_full_x, sign)
+                max_dist_tmp = np.abs(sd_tmp-sd_tmp.mean()).max()
+                if max_dist_tmp > max_dist_curve:
+                    max_dist_curve = max_dist_tmp
+            elif isinstance(entity, BoozerSurface):
+                sd_tmp = self.sdf.pure(entity.surface.gamma().reshape((-1, 3)), self.sdf.local_full_x, sign)
+                max_dist_tmp = np.abs(sd_tmp-sd_tmp.mean()).max()
+                if max_dist_tmp > max_dist_bs:
+                    max_dist_bs = max_dist_tmp
+            else:
+                raise Exception('entity not supported')
+
+        return max_dist_curve, max_dist_fieldline, max_dist_bs
+ 
 
     def shortest_distance(self):
         min_dist_curve = np.inf
