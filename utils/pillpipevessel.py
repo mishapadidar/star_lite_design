@@ -115,16 +115,23 @@ def cyl_sdf(P, P0, u, rad):
 # ---------- 3D circular pipe SDF ----------
 def sdf_rennaissance(pts, params, sign):
     x, y1, y2, rr = params
-
-    A = jnp.array([x,  0.0, 0.0])
-    B = jnp.array([x,  y1,  0.0])
-    C = jnp.array([0.0, y2,  0.0])
     
-    AB = A - B
-    AB /= jnp.linalg.norm(uAB)
+    pts = jnp.abs(pts)
+
+    #A = jnp.array([x,  0.0, 0.0])
+    #B = jnp.array([x,  y1,  0.0])
+    #C = jnp.array([0.0, y2,  0.0])
+
+    A = jnp.array([0.0, x,  0.0])
+    B = jnp.array([y1,  x,  0.0])
+    C = jnp.array([y2, 0.0,  0.0])
+
+
+    AB = B - A
+    AB /= jnp.linalg.norm(AB)
     
     BC = C - B
-    BC /= jnp.linalg.norm(uBC)
+    BC /= jnp.linalg.norm(BC)
     
     # Bisector plane normal
     n = 0.5 * (AB + BC)
@@ -132,8 +139,8 @@ def sdf_rennaissance(pts, params, sign):
 
     sdf1 = cyl_sdf(pts, A, AB, rr)
     sdf2 = cyl_sdf(pts, B, BC, rr)
-    s = jnp.sum(pts * n, axis=-1)
-    sdf = jnp.where(s > 0, sdf1, sf2)
+    s = jnp.sum((pts - B) * n, axis=-1)
+    sdf = jnp.where(s < 0, sdf1, sdf2)
     return sign*sdf
 
 def quadratic_threshold_rennaissance(pts, params, sign, threshold):
@@ -143,7 +150,7 @@ def quadratic_threshold_rennaissance(pts, params, sign, threshold):
     return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
 
 def quadratic_distance_rennaissance(pts, params, sign, threshold):
-    sls = sdf_pill_pipe(pts, params, sign)
+    sls = sdf_rennaissance(pts, params, sign)
     mean_value = jnp.mean(sls)
     dvalue = jnp.abs(sls-mean_value)
     return jnp.mean(jnp.maximum(dvalue-threshold, 0)**2)
@@ -151,7 +158,6 @@ def quadratic_distance_rennaissance(pts, params, sign, threshold):
 class RennaissanceSDF(Optimizable):
     def __init__(self, x, y1, y2, rr, **kwargs):
         super().__init__(depends_on=[], x0=np.array([x, y1, y2, rr]), names=['x', 'y1', 'y2', 'rr'], **kwargs)
-        self.x, self.y1, self.y2, self.rr = x, y1, y2, rr
 
         self.pure = sdf_rennaissance
         self.quadratic_threshold = quadratic_threshold_rennaissance
