@@ -117,7 +117,7 @@ def sdf_torus(pts, params, sign):
 
 def quadratic_threshold_torus(pts, params, sign, threshold):
     sls = sdf_torus(pts, params, sign)
-    d1, d2, rr = params
+    d1, d2 = params
     return jnp.mean(jnp.maximum(threshold-sls, 0)**2)
 
 def quadratic_distance_torus(pts, params, sign, threshold):
