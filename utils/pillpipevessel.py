@@ -73,6 +73,7 @@ class PillPipeSDF(Optimizable):
         self.pure = sdf_pill_pipe
         self.quadratic_threshold = quadratic_threshold_pill_pipe
         self.quadratic_distance = quadratic_distance_pill_pipe
+    
     def num_dofs(self):
         return 4
     
@@ -114,18 +115,13 @@ def cyl_sdf(P, P0, u, rad):
 
 # ---------- 3D circular pipe SDF ----------
 def sdf_rennaissance(pts, params, sign):
-    d1, d2, d3, rr = params
+    d1, d2, rr = params
     
     pts = jnp.abs(pts)
 
-    #A = jnp.array([d1,  0.0, 0.0])
-    #B = jnp.array([d1,  d2,  0.0])
-    #C = jnp.array([0.0, d3,  0.0])
-
-    A = jnp.array([0.0,  d1, 0.0])
-    B = jnp.array([d2 ,  d1, 0.0])
-    C = jnp.array([d3 , 0.0,  0.0])
-
+    A = jnp.array([d1,  0.0, 0.0])
+    B = jnp.array([d1,  d2,  0.0])
+    C = jnp.array([0.0, d2,  0.0])
 
     AB = B - A
     AB /= jnp.linalg.norm(AB)
@@ -145,9 +141,8 @@ def sdf_rennaissance(pts, params, sign):
 
 def quadratic_threshold_rennaissance(pts, params, sign, threshold):
     sls = sdf_rennaissance(pts, params, sign)
-    d1, d2, d3, rr = params
-    cons = jnp.maximum(d3-d2, 0)**2
-    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
+    d1, d2, rr = params
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2)
 
 def quadratic_distance_rennaissance(pts, params, sign, threshold):
     sls = sdf_rennaissance(pts, params, sign)
@@ -156,26 +151,26 @@ def quadratic_distance_rennaissance(pts, params, sign, threshold):
     return jnp.mean(jnp.maximum(dvalue-threshold, 0)**2)
 
 class RennaissanceSDF(Optimizable):
-    def __init__(self, d1, d2, d3, rr, **kwargs):
-        super().__init__(depends_on=[], x0=np.array([d1, d2, d3, rr]), names=['d1', 'd2', 'd3', 'rr'], **kwargs)
-        self.d1, self.d2, self.d3, self.rr = d1, d2, d3, rr
+    def __init__(self, d1, d2, rr, **kwargs):
+        super().__init__(depends_on=[], x0=np.array([d1, d2, rr]), names=['d1', 'd2', 'rr'], **kwargs)
+        self.d1, self.d2, self.rr = d1, d2, rr
 
         self.pure = sdf_rennaissance
         self.quadratic_threshold = quadratic_threshold_rennaissance
         self.quadratic_distance = quadratic_distance_rennaissance
     
     def num_dofs(self):
-        return 4
+        return 3
     
     def eval(self, x, y, z):
         pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
 
     def to_vtk(self, name, nx=20, ny=20, nz=20):
-        d1, d2, d3, rr = self.local_full_x
+        d1, d2, rr = self.local_full_x
         pad = 0.1
 
-        d = np.max([d1, d2, d3])
+        d = np.max([d1, d2])
         # domain extents
         x_min, x_max = -(d+rr + pad), (d + rr + pad)
         y_min, y_max = -(d+rr + pad), (d + rr + pad)
