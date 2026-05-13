@@ -1,6 +1,7 @@
 import simsoptpp as sopp
 from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt.geo import CurveXYZFourier
 from simsopt.objectives import forward_backward
 import numpy as np
 import jax.numpy as jnp
@@ -426,252 +427,426 @@ class VesselDistance(Optimizable):
     return_fn_map = {'J': J, 'dJ': dJ}
 
 
-import jax
-import jax.numpy as jnp
+def make_lattice(x0, t1, t2, r0, N=160):
+    x0 = x0.reshape((-1, 3))
+    t1 = t1.reshape((-1, 3))
+    t2 = t2.reshape((-1, 3))
+    r0 = r0.flatten()
+    
+    base_curves = []
+    for xyz0, T, B, r0 in zip(x0, t1, t2, r0):
+        curve = CurveXYZFourier(np.linspace(0, 1, 160, endpoint=False), N)
+        curve.set('xc(0)', xyz0[0])
+        curve.set('yc(0)', xyz0[1])
+        curve.set('zc(0)', xyz0[2])
+       
+        curve.set('xc(1)', r0*T[0])
+        curve.set('xs(1)', r0*B[0])
 
-
-import jax
-import jax.numpy as jnp
-
-
-def pill_pipe_curve_pure(dofs, quadpoints, s, phi, sign=1.0):
-    """
-    Notes
-    -----
-    - JAX-friendly and jittable for scalar inputs.
-    - Differentiable w.r.t. bx, by, r, rr almost everywhere.
-    - Nonsmooth at rounded-rectangle segment junctions, as expected.
-    """
-    curve_radius = dofs[0]
-    bx, by, r, rr = dofs[1:]
-
-    phi *= jnp.pi*2
-    w = bx - r
-    h = by - r
-    s0 = 4*(bx - r) + 3*(by - r) + 1.5*jnp.pi*r
-    lengths = jnp.array([
-        2.0 * w,
-        0.5 * jnp.pi * r,
-        2.0 * h,
-        0.5 * jnp.pi * r,
-        2.0 * w,
-        0.5 * jnp.pi * r,
-        2.0 * h,
-        0.5 * jnp.pi * r,
-    ], dtype=jnp.result_type(s, phi, bx, by, r, rr))
-
-    cum = jnp.cumsum(lengths)
-    L = cum[-1]
-    s *= L
-    s -= s0
-    s = s%L
-
-    starts = jnp.concatenate([jnp.array([0.0], dtype=s.dtype), cum[:-1]])
-    idx = jnp.searchsorted(cum, s, side="right")
-    u = s - starts[idx]
-
-    def seg0(u):
-        # top edge: (w, by) -> (-w, by)
-        x = w - u
-        y = by
-        nx = jnp.zeros_like(u)
-        ny = jnp.ones_like(u)
-        tx = -jnp.ones_like(u)
-        ty = jnp.zeros_like(u)
-        dnx = jnp.zeros_like(u)
-        dny = jnp.zeros_like(u)
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg1(u):
-        # top-left quarter circle
-        th = 0.5 * jnp.pi + u / r
-        x = -w + r * jnp.cos(th)
-        y =  h + r * jnp.sin(th)
-        nx = jnp.cos(th)
-        ny = jnp.sin(th)
-        tx = -jnp.sin(th)
-        ty =  jnp.cos(th)
-        dnx = tx / r
-        dny = ty / r
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg2(u):
-        # left edge: (-bx, h) -> (-bx, -h)
-        x = -bx
-        y = h - u
-        nx = -jnp.ones_like(u)
-        ny = jnp.zeros_like(u)
-        tx = jnp.zeros_like(u)
-        ty = -jnp.ones_like(u)
-        dnx = jnp.zeros_like(u)
-        dny = jnp.zeros_like(u)
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg3(u):
-        # bottom-left quarter circle
-        th = jnp.pi + u / r
-        x = -w + r * jnp.cos(th)
-        y = -h + r * jnp.sin(th)
-        nx = jnp.cos(th)
-        ny = jnp.sin(th)
-        tx = -jnp.sin(th)
-        ty =  jnp.cos(th)
-        dnx = tx / r
-        dny = ty / r
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg4(u):
-        # bottom edge: (-w, -by) -> (w, -by)
-        x = -w + u
-        y = -by
-        nx = jnp.zeros_like(u)
-        ny = -jnp.ones_like(u)
-        tx = jnp.ones_like(u)
-        ty = jnp.zeros_like(u)
-        dnx = jnp.zeros_like(u)
-        dny = jnp.zeros_like(u)
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg5(u):
-        # bottom-right quarter circle
-        th = 1.5 * jnp.pi + u / r
-        x =  w + r * jnp.cos(th)
-        y = -h + r * jnp.sin(th)
-        nx = jnp.cos(th)
-        ny = jnp.sin(th)
-        tx = -jnp.sin(th)
-        ty =  jnp.cos(th)
-        dnx = tx / r
-        dny = ty / r
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg6(u):
-        # right edge: (bx, -h) -> (bx, h)
-        x = bx
-        y = -h + u
-        nx = jnp.ones_like(u)
-        ny = jnp.zeros_like(u)
-        tx = jnp.zeros_like(u)
-        ty = jnp.ones_like(u)
-        dnx = jnp.zeros_like(u)
-        dny = jnp.zeros_like(u)
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    def seg7(u):
-        # top-right quarter circle
-        th = u / r
-        x =  w + r * jnp.cos(th)
-        y =  h + r * jnp.sin(th)
-        nx = jnp.cos(th)
-        ny = jnp.sin(th)
-        tx = -jnp.sin(th)
-        ty =  jnp.cos(th)
-        dnx = tx / r
-        dny = ty / r
-        return x, y, nx, ny, tx, ty, dnx, dny
-
-    x0, y0, nx2, ny2, tx2, ty2, dnx2, dny2 = jax.lax.switch(idx, (seg0, seg1, seg2, seg3, seg4, seg5, seg6, seg7), u)
-
-    c = jnp.cos(phi)
-    sp = jnp.sin(phi)
-
-    # Surface point
-    p = jnp.array([x0 + rr * c * nx2, y0 + rr * c * ny2, rr * sp])
-
-    # Outward normal
-    n = jnp.array([c * nx2, c * ny2, sp])
-    n = sign * n
-    n = n / jnp.linalg.norm(n)
-
-    # Tangent in s-direction: dp/ds
-    dp_ds = jnp.array([tx2 + rr * c * dnx2, ty2 + rr * c * dny2, 0.0])
-    t1 = dp_ds / jnp.linalg.norm(dp_ds)
-
-    # Tangent in phi-direction: dp/dphi
-    dp_dphi = jnp.array([-sp * nx2, -sp * ny2, c])
-    t2 = dp_dphi / jnp.linalg.norm(dp_dphi)
-   
-    gamma = p[None, :] + curve_radius * (jnp.cos(2*jnp.pi*quadpoints[:, None]) * t1[None, :] + jnp.sin(2*jnp.pi*quadpoints[:, None]) * t2[None, :])
-    return gamma
-# coil class, dofs are (bx, by, r, rr, coil radius)
-# to do:
-#       write my own vjp dGamma_d(vessel, radius)
-#                        dGammadash_d(vessel, radius)
-import numpy as np
-from jax import vjp, jacfwd, jvp
-import jax.numpy as jnp
-class PillCurve(sopp.Curve, Curve):
-    def __init__(self, vessel, s_coord, phi_coord, quadpoints, **kwargs):
-        self.vessel = vessel
-        self.s_coord = s_coord
-        self.phi_coord = phi_coord
-
-        if isinstance(quadpoints, int):
-            quadpoints = np.linspace(0, 1, quadpoints, endpoint=False)
-        sopp.Curve.__init__(self, quadpoints)
+        curve.set('yc(1)', r0*T[1])
+        curve.set('ys(1)', r0*B[1])
         
-        points = np.asarray(self.quadpoints)
-        ones = jnp.ones_like(points)
-        self.gamma_pure = lambda dofs, points: pill_pipe_curve_pure(dofs, points, s_coord, phi_coord)
-        self.gamma_jax = jit(lambda dofs: self.gamma_pure(dofs, points))
-        self.dgamma_by_dcoeff_jax = jit(jacfwd(self.gamma_jax))
-        self.dgamma_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gamma_jax, x)[1](v)[0])
+        curve.set('zc(1)', r0*T[2])
+        curve.set('zs(1)', r0*B[2])
 
-        self.gammadash_pure = lambda x, q: jvp(lambda p: self.gamma_pure(x, p), (q,), (ones,))[1]
-        self.gammadash_jax = jit(lambda x: self.gammadash_pure(x, points))
-        self.dgammadash_by_dcoeff_jax = jit(jacfwd(self.gammadash_jax))
-        self.dgammadash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadash_jax, x)[1](v)[0])
+        curve.fix_all()
+        base_curves.append(curve)
 
-        Curve.__init__(self, names=['radius'], depends_on=[vessel], x0=np.zeros((1,)), **kwargs)
+    return base_curves
+
+import jax
+import jax.numpy as jnp
 
 
-    def get_dofs(self):
-        return self.local_full_x
-
-    def num_dofs(self):
-        return self.vessel.num_dofs()+1
-
-    def gamma_impl(self, gamma, quadpoints):
-        dofs = np.concatenate([self.local_full_x, self.vessel.local_full_x])
-        gamma[:] = self.gamma_pure(dofs, quadpoints)
-
-    def gammadash_impl(self, gammadash):
-        dofs = np.concatenate([self.local_full_x, self.vessel.local_full_x])
-        gammadash[:] = self.gammadash_jax(dofs)
-
-#    def gammadashdash_impl(self, gammadashdash):
-#        r"""
-#        This function returns :math:`\Gamma''(\varphi)`, where :math:`\Gamma` are the x, y, z
-#        coordinates of the curve.
+# ---------------------------------------------------------------------------
+# Shared: arclength-uniform phi reparametrisation
 #
-#        """
+# For a tube surface  p(s, theta) = c(s) + rr*(cos_th*n(s) + sin_th*b(s))
+# the toroidal speed is  v(s, theta) = |dp/ds|.
+# We want s_i(theta) such that  integral_0^{s_i} v ds = i/nphi * L_surf(theta)
+# where  L_surf(theta) = integral_0^{L_total} v ds.
 #
-#        gammadashdash[:] = self.curve.gammadashdash() @ self.rotmat
-#
-#    def gammadashdashdash_impl(self, gammadashdashdash):
-#        r"""
-#        This function returns :math:`\Gamma'''(\varphi)`, where :math:`\Gamma` are the x, y, z
-#        coordinates of the curve.
-#
-#        """
-#
-#        gammadashdashdash[:] = self.curve.gammadashdashdash() @ self.rotmat
-#
-    def dgamma_by_dcoeff_impl(self, dgamma_by_dcoeff):
-        dofs = np.concatenate([self.local_full_x, self.vessel.local_full_x])
-        dgamma_by_dcoeff[:] = self.dgamma_by_dcoeff_jax(dofs)
+# Strategy:
+#   1. Analytically integrate v over each centreline segment (exact).
+#   2. Build cumulative arclength array over segments → fast bisection to
+#      find the right segment, then Newton to find u within the segment.
+# ---------------------------------------------------------------------------
 
-    def dgammadash_by_dcoeff_impl(self, dgammadash_by_dcoeff):
-        dofs = np.concatenate([self.local_full_x, self.vessel.local_full_x])
-        dgammadash_by_dcoeff[:] = self.dgammadash_by_dcoeff_jax(dofs)
+def _speed(u, seg_type, r, rr, cos_th):
+    """
+    Toroidal speed  |dp/ds|  at local offset u within a segment.
 
-    def dgamma_by_dcoeff_vjp(self, v):
-        dofs = np.concatenate([self.local_full_x, self.vessel.local_full_x])
-        res = self.dgamma_by_dcoeff_vjp_jax(dofs, v)
-        return Derivative({self: np.array([res[0]])}) + Derivative({self.vessel: np.array(res[1:])})
+    seg_type : 's' = straight  (dn/ds = 0  →  speed = 1)
+               'a' = arc       (dn/ds = tang/r  →  speed = |1 + rr*cos_th/r|)
+    cos_th   : scalar, cos(theta) for this toroidal angle
+    """
+    if seg_type == 's':
+        return 1.0
+    else:
+        return abs(1.0 + rr * cos_th / r)
 
-    def dgammadash_by_dcoeff_vjp(self, v):
-        dofs = np.concatenate([self.local_full_x, self.vessel.local_full_x])
-        res = self.dgammadash_by_dcoeff_vjp_jax(dofs, v)
-        return Derivative({self: np.array([res[0]])}) + Derivative({self.vessel: np.array(res[1:])})
 
+def _seg_arclength(seg_type, length, r, rr, cos_th):
+    """Exact integral of |dp/ds| over a full segment of given arc length."""
+    return length * _speed(0., seg_type, r, rr, cos_th)  # speed is constant per seg
+
+
+def _invert_arclength_phi(s_targets, seg_types, cum, seg_lens, r, rr, cos_th):
+    """
+    For a single theta value (cos_th fixed), invert the cumulative toroidal
+    arclength to find the centreline arclength s for each target in s_targets.
+
+    Parameters
+    ----------
+    s_targets  : (nphi,)  desired cumulative toroidal arclengths
+    seg_types  : list of 's'/'a' per segment
+    cum        : (nseg+1,) cumulative centreline arclengths (cum[0]=0)
+    seg_lens   : (nseg,)
+    r, rr      : pill-pipe parameters
+    cos_th     : cos(theta) for this theta value
+
+    Returns
+    -------
+    s_out : (nphi,) centreline arclength values
+    """
+    nseg = len(seg_lens)
+
+    # Cumulative *toroidal* arclength at each segment boundary
+    cum_surf = np.zeros(nseg + 1)
+    for k in range(nseg):
+        cum_surf[k+1] = cum_surf[k] + _seg_arclength(seg_types[k], seg_lens[k], r, rr, cos_th)
+    L_surf = cum_surf[-1]
+
+    s_out = np.empty(len(s_targets))
+    for i, tgt in enumerate(s_targets):
+        tgt = tgt % L_surf   # wrap
+        # find segment
+        k = np.searchsorted(cum_surf[1:], tgt, side='right')
+        k = min(k, nseg - 1)
+        # remaining toroidal arclength within segment
+        rem = tgt - cum_surf[k]
+        spd = _speed(0., seg_types[k], r, rr, cos_th)
+        # u = rem / speed  (speed is constant within each segment)
+        u = rem / spd if spd > 0. else 0.
+        s_out[i] = cum[k] + u
+    return s_out
+
+# ---------------------------------------------------------------------------
+# Shared: arclength-uniform phi reparametrisation
+#
+# For a tube surface  p(s, theta) = c(s) + rr*(cos_th*n(s) + sin_th*b(s))
+# the toroidal speed is  v(s, theta) = |dp/ds|.
+# We want s_i(theta) such that  integral_0^{s_i} v ds = i/nphi * L_surf(theta)
+# where  L_surf(theta) = integral_0^{L_total} v ds.
+#
+# Strategy:
+#   1. Analytically integrate v over each centreline segment (exact).
+#   2. Build cumulative arclength array over segments → fast bisection to
+#      find the right segment, then Newton to find u within the segment.
+# ---------------------------------------------------------------------------
+
+def _speed(u, seg_type, r, rr, cos_th):
+    """
+    Toroidal speed  |dp/ds|  at local offset u within a segment.
+
+    seg_type : 's' = straight  (dn/ds = 0  →  speed = 1)
+               'a' = arc       (dn/ds = tang/r  →  speed = |1 + rr*cos_th/r|)
+    cos_th   : scalar, cos(theta) for this toroidal angle
+    """
+    if seg_type == 's':
+        return 1.0
+    else:
+        return abs(1.0 + rr * cos_th / r)
+
+
+def _seg_arclength(seg_type, length, r, rr, cos_th):
+    """Exact integral of |dp/ds| over a full segment of given arc length."""
+    return length * _speed(0., seg_type, r, rr, cos_th)  # speed is constant per seg
+
+
+def _invert_arclength_phi(s_targets, seg_types, cum, seg_lens, r, rr, cos_th):
+    """
+    For a single theta value (cos_th fixed), invert the cumulative toroidal
+    arclength to find the centreline arclength s for each target in s_targets.
+
+    Parameters
+    ----------
+    s_targets  : (nphi,)  desired cumulative toroidal arclengths
+    seg_types  : list of 's'/'a' per segment
+    cum        : (nseg+1,) cumulative centreline arclengths (cum[0]=0)
+    seg_lens   : (nseg,)
+    r, rr      : pill-pipe parameters
+    cos_th     : cos(theta) for this theta value
+
+    Returns
+    -------
+    s_out : (nphi,) centreline arclength values
+    """
+    nseg = len(seg_lens)
+
+    # Cumulative *toroidal* arclength at each segment boundary
+    cum_surf = np.zeros(nseg + 1)
+    for k in range(nseg):
+        cum_surf[k+1] = cum_surf[k] + _seg_arclength(seg_types[k], seg_lens[k], r, rr, cos_th)
+    L_surf = cum_surf[-1]
+
+    s_out = np.empty(len(s_targets))
+    for i, tgt in enumerate(s_targets):
+        tgt = tgt % L_surf   # wrap
+        # find segment
+        k = np.searchsorted(cum_surf[1:], tgt, side='right')
+        k = min(k, nseg - 1)
+        # remaining toroidal arclength within segment
+        rem = tgt - cum_surf[k]
+        spd = _speed(0., seg_types[k], r, rr, cos_th)
+        # u = rem / speed  (speed is constant within each segment)
+        u = rem / spd if spd > 0. else 0.
+        s_out[i] = cum[k] + u
+    return s_out
+
+
+# ---------------------------------------------------------------------------
+# TorusSDF  –  analytic arclength reparametrisation
+#
+# Toroidal speed: |dp/dphi_angle| = R + r*cos_th  (phi_angle = 2pi * phi_norm)
+# This is constant in phi_angle for fixed theta, so arclength-uniform phi
+# just means uniform phi_angle — no reparametrisation needed per se, BUT
+# the total toroidal length depends on theta, so we still need to
+# re-scale. Since speed is constant in phi for each theta, uniform phi_angle
+# IS arclength-uniform for each theta independently.
+# ---------------------------------------------------------------------------
+
+def gamma(self, quadpoints_phi, quadpoints_theta):
+    r, R = self.local_full_x
+    phi_2pi   = np.asarray(quadpoints_phi)   * 2. * np.pi
+    theta_2pi = np.asarray(quadpoints_theta) * 2. * np.pi
+    nphi = len(phi_2pi)
+
+    c_phi, s_phi = np.cos(phi_2pi), np.sin(phi_2pi)
+    c_th,  s_th  = np.cos(theta_2pi), np.sin(theta_2pi)
+
+    e_r   = np.stack([ c_phi,  s_phi, np.zeros(nphi)], axis=-1)
+    e_phi = np.stack([-s_phi,  c_phi, np.zeros(nphi)], axis=-1)
+    e_z   = np.tile([0., 0., 1.], (nphi, 1))
+
+    XYZ = (R * e_r[:, None, :]
+           + r * (c_th[None, :, None] * e_r[:, None, :]
+                + s_th[None, :, None] * e_z[:, None, :]))
+
+    T = np.broadcast_to(e_phi[:, None, :], XYZ.shape).copy()
+
+    B = (-s_th[None, :, None] * e_r[:, None, :]
+        +  c_th[None, :, None] * e_z[:, None, :])
+
+    N = np.cross(T, B)
+    N = N / np.linalg.norm(N, axis=-1, keepdims=True)
+
+    return XYZ, T, B, N
+
+TorusSDF.gamma = gamma
+
+
+# ---------------------------------------------------------------------------
+# PillPipeSDF  –  arclength-uniform in phi for each theta
+# ---------------------------------------------------------------------------
+
+def gamma(self, quadpoints_phi, quadpoints_theta):
+    bx, by, r, rr = self.local_full_x
+    phi_norm  = np.asarray(quadpoints_phi)
+    theta_2pi = np.asarray(quadpoints_theta) * 2. * np.pi
+    nphi, ntheta = len(phi_norm), len(theta_2pi)
+
+    w, h = bx - r, by - r
+
+    seg_lens  = np.array([2*w, 0.5*np.pi*r, 2*h, 0.5*np.pi*r,
+                          2*w, 0.5*np.pi*r, 2*h, 0.5*np.pi*r])
+    seg_types = ['s','a','s','a','s','a','s','a']
+    L_total   = seg_lens.sum()
+    cum       = np.concatenate([[0.], np.cumsum(seg_lens)])
+
+    e_z = np.array([0., 0., 1.])
+    c_th = np.cos(theta_2pi)   # (ntheta,)
+    s_th = np.sin(theta_2pi)
+
+    XYZ = np.empty((nphi, ntheta, 3))
+    T   = np.empty((nphi, ntheta, 3))
+    B   = np.empty((nphi, ntheta, 3))
+    N   = np.empty((nphi, ntheta, 3))
+
+    for j, (cth, sth) in enumerate(zip(c_th, s_th)):
+        # Toroidal arclength of the full loop for this theta
+        L_surf = sum(_seg_arclength(st, sl, r, rr, cth)
+                     for st, sl in zip(seg_types, seg_lens))
+        # Phase shift so that (phi=0, theta=0) lands on the X-axis at (bx+rr, 0, 0).
+        # s0_surf = surface arclength from old start (top of seg 0) to midpoint of
+        # seg 6 (right side, y=0):  segs 0-5  +  half of seg 6 (length h).
+        # Arc segs (1,3,5) have speed (1 + rr*cth/r); straight segs have speed 1.
+        s0_surf = 4.*w + 3.*h + 3.*(np.pi * r / 2.) * (1. + rr * cth / r)
+        s_tgt = (phi_norm * L_surf + s0_surf) % L_surf
+        # Invert to centreline arclengths
+        s_cl = _invert_arclength_phi(s_tgt, seg_types, cum, seg_lens, r, rr, cth)
+
+        # Evaluate geometry at each centreline arclength
+        seg  = np.searchsorted(cum[1:], s_cl, side='right')
+        seg  = np.clip(seg, 0, 7)
+        u    = s_cl - cum[seg]
+
+        cx = np.empty(nphi); cy = np.empty(nphi)
+        tx = np.empty(nphi); ty = np.empty(nphi)
+        nx = np.empty(nphi); ny = np.empty(nphi)
+        dn_ds_x = np.empty(nphi); dn_ds_y = np.empty(nphi)
+
+        for i in range(nphi):
+            sg, ui = seg[i], u[i]
+            if sg == 0:
+                cx[i],cy[i]         =  w-ui,  by
+                tx[i],ty[i]         = -1.,  0.
+                nx[i],ny[i]         =  0.,  1.
+                dn_ds_x[i],dn_ds_y[i] =  0.,  0.
+            elif sg == 1:
+                th = 0.5*np.pi + ui/r
+                cx[i],cy[i]         = -w+r*np.cos(th),  h+r*np.sin(th)
+                tx[i],ty[i]         = -np.sin(th),  np.cos(th)
+                nx[i],ny[i]         =  np.cos(th),  np.sin(th)
+                dn_ds_x[i],dn_ds_y[i] = -np.sin(th)/r, np.cos(th)/r
+            elif sg == 2:
+                cx[i],cy[i]         = -bx,  h-ui
+                tx[i],ty[i]         =  0., -1.
+                nx[i],ny[i]         = -1.,  0.
+                dn_ds_x[i],dn_ds_y[i] =  0.,  0.
+            elif sg == 3:
+                th = np.pi + ui/r
+                cx[i],cy[i]         = -w+r*np.cos(th), -h+r*np.sin(th)
+                tx[i],ty[i]         = -np.sin(th),  np.cos(th)
+                nx[i],ny[i]         =  np.cos(th),  np.sin(th)
+                dn_ds_x[i],dn_ds_y[i] = -np.sin(th)/r, np.cos(th)/r
+            elif sg == 4:
+                cx[i],cy[i]         = -w+ui, -by
+                tx[i],ty[i]         =  1.,  0.
+                nx[i],ny[i]         =  0., -1.
+                dn_ds_x[i],dn_ds_y[i] =  0.,  0.
+            elif sg == 5:
+                th = 1.5*np.pi + ui/r
+                cx[i],cy[i]         =  w+r*np.cos(th), -h+r*np.sin(th)
+                tx[i],ty[i]         = -np.sin(th),  np.cos(th)
+                nx[i],ny[i]         =  np.cos(th),  np.sin(th)
+                dn_ds_x[i],dn_ds_y[i] = -np.sin(th)/r, np.cos(th)/r
+            elif sg == 6:
+                cx[i],cy[i]         =  bx, -h+ui
+                tx[i],ty[i]         =  0.,  1.
+                nx[i],ny[i]         =  1.,  0.
+                dn_ds_x[i],dn_ds_y[i] =  0.,  0.
+            else:
+                th = ui/r
+                cx[i],cy[i]         =  w+r*np.cos(th),  h+r*np.sin(th)
+                tx[i],ty[i]         = -np.sin(th),  np.cos(th)
+                nx[i],ny[i]         =  np.cos(th),  np.sin(th)
+                dn_ds_x[i],dn_ds_y[i] = -np.sin(th)/r, np.cos(th)/r
+
+        cline = np.stack([cx, cy, np.zeros(nphi)], axis=-1)
+        tang3 = np.stack([tx, ty, np.zeros(nphi)], axis=-1)
+        n3    = np.stack([nx, ny, np.zeros(nphi)], axis=-1)
+        dn3   = np.stack([dn_ds_x, dn_ds_y, np.zeros(nphi)], axis=-1)
+        b3    = np.tile(e_z, (nphi, 1))
+
+        XYZ[:, j, :] = cline + rr * (cth * n3 + sth * b3)
+
+        dpds = tang3 + rr * cth * dn3
+        T[:, j, :] = dpds / np.linalg.norm(dpds, axis=-1, keepdims=True)
+
+        Bj = -sth * n3 + cth * b3
+        B[:, j, :] = Bj   # already unit
+
+        N[:, j, :] = np.cross(T[:, j, :], B[:, j, :])
+        N[:, j, :] /= np.linalg.norm(N[:, j, :], axis=-1, keepdims=True)
+
+    return XYZ, T, B, N
+
+PillPipeSDF.gamma = gamma
+
+
+# ---------------------------------------------------------------------------
+# RennaissanceSDF  –  arclength-uniform in phi for each theta
+#
+# The bisector-plane transition from cylinder 1 to cylinder 2 happens at a
+# point shifted by rr*cos_theta from the polygon corner.  So the effective
+# arm lengths are 2*(d2+rr*cos_th) (vertical) and 2*(d1+rr*cos_th)
+# (horizontal) — theta-dependent, exactly as (R+r*cos_th) for the torus.
+#
+# L_surf(theta) = 4*(d1+d2) + 8*rr*cos_theta
+#
+# The four arms and their transitions are continuous:
+#   ARM 0 right  (d1+rr*cth, y,            rr*sth), y: -(d2+rr*cth) → +(d2+rr*cth)
+#   ARM 1 top    (x,          d2+rr*cth,   rr*sth), x: +(d1+rr*cth) → -(d1+rr*cth)
+#   ARM 2 left  -(d1+rr*cth), y,            rr*sth), y: +(d2+rr*cth) → -(d2+rr*cth)
+#   ARM 3 bottom (x,         -(d2+rr*cth), rr*sth), x: -(d1+rr*cth) → +(d1+rr*cth)
+# ---------------------------------------------------------------------------
+
+def gamma(self, quadpoints_phi, quadpoints_theta):
+    d1, d2, rr = self.local_full_x
+    phi_norm  = np.asarray(quadpoints_phi)
+    theta_2pi = np.asarray(quadpoints_theta) * 2. * np.pi
+    nphi, ntheta = len(phi_norm), len(theta_2pi)
+
+    e_z = np.array([0., 0., 1.])
+
+    # Arm tangents and normals are theta-independent
+    arm_tangs = np.array([[ 0., 1., 0.],   # right: going +y
+                           [-1., 0., 0.],   # top:   going -x
+                           [ 0.,-1., 0.],   # left:  going -y
+                           [ 1., 0., 0.]])  # bottom: going +x
+    arm_norms = np.array([[ 1., 0., 0.],   # outward +x
+                           [ 0., 1., 0.],   # outward +y
+                           [-1., 0., 0.],   # outward -x
+                           [ 0.,-1., 0.]]) # outward -y
+
+    c_th = np.cos(theta_2pi)   # (ntheta,)
+    s_th = np.sin(theta_2pi)
+
+    XYZ = np.empty((nphi, ntheta, 3))
+    T   = np.empty((nphi, ntheta, 3))
+    B   = np.empty((nphi, ntheta, 3))
+    N   = np.empty((nphi, ntheta, 3))
+
+    for j, (cth, sth) in enumerate(zip(c_th, s_th)):
+        # Arm lengths depend on theta (bisector transition shifts by rr*cth)
+        len_v  = 2. * (d2 + rr * cth)   # vertical   arms (right, left)
+        len_h  = 2. * (d1 + rr * cth)   # horizontal arms (top, bottom)
+        L_surf = 2. * (len_v + len_h)   # = 4*(d1+d2) + 8*rr*cth
+        cum = np.array([0., len_v, len_v + len_h, 2.*len_v + len_h, L_surf])
+
+        # Centreline arm starts are also theta-dependent
+        arm_starts = np.array([
+            [ d1,            -(d2 + rr*cth), 0.],  # ARM 0
+            [ d1 + rr*cth,    d2,            0.],  # ARM 1
+            [-d1,             d2 + rr*cth,   0.],  # ARM 2
+            [-(d1 + rr*cth), -d2,            0.],  # ARM 3
+        ])
+
+        s_req = phi_norm * L_surf
+        # Phase shift so that (phi=0, theta=0) lands on the X-axis at (d1+rr, 0, 0).
+        # s0_surf = surface arclength from old start (bottom of ARM 0) to midpoint
+        # of ARM 0 (y=0), which is exactly half the vertical arm length.
+        s0_surf = d2 + rr * cth
+        s_req = (s_req + s0_surf) % L_surf
+        arm   = np.searchsorted(cum[1:], s_req, side='right')
+        arm   = np.clip(arm, 0, 3)
+        u     = s_req - cum[arm]
+
+        cline = arm_starts[arm] + u[:, None] * arm_tangs[arm]   # (nphi, 3)
+        n3    = arm_norms[arm]                                   # (nphi, 3)
+
+        XYZ[:, j, :] = cline + rr * (cth * n3 + sth * e_z[None, :])
+
+        # dp/ds = tang  (dn/ds = 0 on all straight arms)
+        T[:, j, :] = arm_tangs[arm]
+
+        # dp/dtheta = rr*(-sth*n + cth*e_z);  |dp/dtheta| = rr  (uniform)
+        B[:, j, :] = -sth * n3 + cth * e_z[None, :]
+
+        Nj = np.cross(T[:, j, :], B[:, j, :])
+        N[:, j, :] = Nj / np.linalg.norm(Nj, axis=-1, keepdims=True)
+
+    return XYZ, T, B, N
+
+RennaissanceSDF.gamma = gamma
