@@ -108,6 +108,71 @@ class PillPipeSDF(Optimizable):
         )
 
 
+def sdf_torus(pts, params, sign):
+    r, R = params
+    col1 = jnp.sqrt(pts[:, 0]**2 + pts[:, 1]**2)-R
+    col2 = pts[:, 2]
+    val = jnp.concatenate([col1[:, None], col2[:, None]], axis=1)
+    return sign*(jnp.linalg.norm(val, axis=-1)-r)
+
+def quadratic_threshold_torus(pts, params, sign, threshold):
+    sls = sdf_torus(pts, params, sign)
+    d1, d2, rr = params
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2)
+
+def quadratic_distance_torus(pts, params, sign, threshold):
+    sls = sdf_torus(pts, params, sign)
+    mean_value = jnp.mean(sls)
+    dvalue = jnp.abs(sls-mean_value)
+    return jnp.mean(jnp.maximum(dvalue-threshold, 0)**2)
+
+class TorusSDF(Optimizable):
+    def __init__(self, r, R, **kwargs):
+        super().__init__(depends_on=[], x0=np.array([r, R]), names=['r', 'R'], **kwargs)
+        self.r, self.R = r, R
+
+        self.pure = sdf_torus
+        self.quadratic_threshold = quadratic_threshold_torus
+        self.quadratic_distance = quadratic_distance_torus
+    
+    def num_dofs(self):
+        return 2
+    
+    def eval(self, x, y, z):
+        pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
+        return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
+
+    def to_vtk(self, name, nx=20, ny=20, nz=20):
+        r, R = self.local_full_x
+        pad = 0.1
+
+        d = R+r
+        # domain extents
+        x_min, x_max = -(d + pad), (d + pad)
+        y_min, y_max = -(d + pad), (d + pad)
+        z_min, z_max = -(r + pad), (r + pad)
+        
+        xs = np.linspace(x_min, x_max, nx).astype(np.float32)
+        ys = np.linspace(y_min, y_max, ny).astype(np.float32)
+        zs = np.linspace(z_min, z_max, nz).astype(np.float32)
+
+        # meshgrid in ij indexing (nx,ny,nz)
+        X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+        
+        pts = np.concatenate((X.flatten()[:, None], Y.flatten()[:, None], Z.flatten()[:, None]), axis=-1)
+        D = np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape((nx, ny, nz)))
+        
+        # write to .vts file
+        gridToVTK(
+            name,
+            x=xs, y=ys, z=zs,
+            cellData=None,
+            pointData={"sdf": D},
+        )
+
+
+
+
 def cyl_sdf(P, P0, u, rad):
     v = P - P0
     proj = jnp.sum(v * u, axis=-1, keepdims=True) * u
