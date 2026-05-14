@@ -852,7 +852,20 @@ def gamma(self, quadpoints_phi, quadpoints_theta):
 RennaissanceSDF.gamma = gamma
 
 
-def centerline_gamma(self, quadpoints_phi):
+def _torus_centerline_gamma(self, quadpoints_phi):
+    r, R = self.local_full_x
+    phi_2pi = np.asarray(quadpoints_phi) * 2. * np.pi
+    nphi    = len(phi_2pi)
+    c_phi, s_phi = np.cos(phi_2pi), np.sin(phi_2pi)
+
+    XYZ = R * np.stack([ c_phi,  s_phi, np.zeros(nphi)], axis=-1)
+    T   =     np.stack([-s_phi,  c_phi, np.zeros(nphi)], axis=-1)  # e_phi
+    N   =     np.stack([ c_phi,  s_phi, np.zeros(nphi)], axis=-1)  # e_r (outward)
+    B   = np.tile([0., 0., 1.], (nphi, 1))                          # e_z
+    return XYZ, T, N, B
+
+
+def _pill_pipe_centerline_gamma(self, quadpoints_phi):
     bx, by, r, rr = self.local_full_x
     phi_norm = np.asarray(quadpoints_phi)
     nphi     = len(phi_norm)
@@ -863,8 +876,8 @@ def centerline_gamma(self, quadpoints_phi):
     L_cline = seg_lens.sum()
     cum     = np.concatenate([[0.], np.cumsum(seg_lens)])
 
-    # phi=0 at midpoint of right segment (bx, 0, 0) — same reference as gamma
-    s0 = 4.*w + 3.*h + 3.*np.pi*r / 2.
+    # phi=0 at midpoint of right segment (bx, 0, 0)
+    s0  = 4.*w + 3.*h + 3.*np.pi*r / 2.
     s   = (phi_norm * L_cline + s0) % L_cline
     seg = np.searchsorted(cum[1:], s, side='right')
     seg = np.clip(seg, 0, 7)
@@ -907,97 +920,8 @@ def centerline_gamma(self, quadpoints_phi):
     B   = np.tile([0., 0., 1.], (nphi, 1))
     return XYZ, T, N, B
 
-PillPipeSDF.centerline_gamma = centerline_gamma
 
-
-# ---------------------------------------------------------------------------
-# RennaissanceSDF  –  arclength-uniform in phi for each theta
-#
-# The bisector-plane transition from cylinder 1 to cylinder 2 happens at a
-# point shifted by rr*cos_theta from the polygon corner.  So the effective
-# arm lengths are 2*(d2+rr*cos_th) (vertical) and 2*(d1+rr*cos_th)
-# (horizontal) — theta-dependent, exactly as (R+r*cos_th) for the torus.
-#
-# L_surf(theta) = 4*(d1+d2) + 8*rr*cos_theta
-#
-# The four arms and their transitions are continuous:
-#   ARM 0 right  (d1+rr*cth, y,            rr*sth), y: -(d2+rr*cth) → +(d2+rr*cth)
-#   ARM 1 top    (x,          d2+rr*cth,   rr*sth), x: +(d1+rr*cth) → -(d1+rr*cth)
-#   ARM 2 left  -(d1+rr*cth), y,            rr*sth), y: +(d2+rr*cth) → -(d2+rr*cth)
-#   ARM 3 bottom (x,         -(d2+rr*cth), rr*sth), x: -(d1+rr*cth) → +(d1+rr*cth)
-# ---------------------------------------------------------------------------
-
-def gamma(self, quadpoints_phi, quadpoints_theta):
-    d1, d2, rr = self.local_full_x
-    phi_norm  = np.asarray(quadpoints_phi)
-    theta_2pi = np.asarray(quadpoints_theta) * 2. * np.pi
-    nphi, ntheta = len(phi_norm), len(theta_2pi)
-
-    e_z = np.array([0., 0., 1.])
-
-    # Arm tangents and normals are theta-independent
-    arm_tangs = np.array([[ 0., 1., 0.],   # right: going +y
-                           [-1., 0., 0.],   # top:   going -x
-                           [ 0.,-1., 0.],   # left:  going -y
-                           [ 1., 0., 0.]])  # bottom: going +x
-    arm_norms = np.array([[ 1., 0., 0.],   # outward +x
-                           [ 0., 1., 0.],   # outward +y
-                           [-1., 0., 0.],   # outward -x
-                           [ 0.,-1., 0.]]) # outward -y
-
-    c_th = np.cos(theta_2pi)   # (ntheta,)
-    s_th = np.sin(theta_2pi)
-
-    XYZ = np.empty((nphi, ntheta, 3))
-    T   = np.empty((nphi, ntheta, 3))
-    B   = np.empty((nphi, ntheta, 3))
-    N   = np.empty((nphi, ntheta, 3))
-
-    for j, (cth, sth) in enumerate(zip(c_th, s_th)):
-        # Arm lengths depend on theta (bisector transition shifts by rr*cth)
-        len_v  = 2. * (d2 + rr * cth)   # vertical   arms (right, left)
-        len_h  = 2. * (d1 + rr * cth)   # horizontal arms (top, bottom)
-        L_surf = 2. * (len_v + len_h)   # = 4*(d1+d2) + 8*rr*cth
-        cum = np.array([0., len_v, len_v + len_h, 2.*len_v + len_h, L_surf])
-
-        # Centreline arm starts are also theta-dependent
-        arm_starts = np.array([
-            [ d1,            -(d2 + rr*cth), 0.],  # ARM 0
-            [ d1 + rr*cth,    d2,            0.],  # ARM 1
-            [-d1,             d2 + rr*cth,   0.],  # ARM 2
-            [-(d1 + rr*cth), -d2,            0.],  # ARM 3
-        ])
-
-        s_req = phi_norm * L_surf
-        # Phase shift so that (phi=0, theta=0) lands on the X-axis at (d1+rr, 0, 0).
-        # s0_surf = surface arclength from old start (bottom of ARM 0) to midpoint
-        # of ARM 0 (y=0), which is exactly half the vertical arm length.
-        s0_surf = d2 + rr * cth
-        s_req = (s_req + s0_surf) % L_surf
-        arm   = np.searchsorted(cum[1:], s_req, side='right')
-        arm   = np.clip(arm, 0, 3)
-        u     = s_req - cum[arm]
-
-        cline = arm_starts[arm] + u[:, None] * arm_tangs[arm]   # (nphi, 3)
-        n3    = arm_norms[arm]                                   # (nphi, 3)
-
-        XYZ[:, j, :] = cline + rr * (cth * n3 + sth * e_z[None, :])
-
-        # dp/ds = tang  (dn/ds = 0 on all straight arms)
-        T[:, j, :] = arm_tangs[arm]
-
-        # dp/dtheta = rr*(-sth*n + cth*e_z);  |dp/dtheta| = rr  (uniform)
-        B[:, j, :] = -sth * n3 + cth * e_z[None, :]
-
-        Nj = np.cross(T[:, j, :], B[:, j, :])
-        N[:, j, :] = Nj / np.linalg.norm(Nj, axis=-1, keepdims=True)
-
-    return XYZ, T, B, N
-
-RennaissanceSDF.gamma = gamma
-
-
-def centerline_gamma(self, quadpoints_phi):
+def _rennaissance_centerline_gamma(self, quadpoints_phi):
     d1, d2, rr = self.local_full_x
     phi_norm   = np.asarray(quadpoints_phi)
     nphi       = len(phi_norm)
@@ -1007,15 +931,15 @@ def centerline_gamma(self, quadpoints_phi):
                            [ 0.,-1., 0.], [ 1., 0., 0.]])
     arm_norms  = np.array([[ 1., 0., 0.], [ 0., 1., 0.],
                            [-1., 0., 0.], [ 0.,-1., 0.]])
-    arm_starts = np.array([[ d1, -d2, 0.],   # ARM 0 right
-                           [ d1,  d2, 0.],   # ARM 1 top
-                           [-d1,  d2, 0.],   # ARM 2 left
-                           [-d1, -d2, 0.]])  # ARM 3 bottom
+    arm_starts = np.array([[ d1, -d2, 0.],
+                           [ d1,  d2, 0.],
+                           [-d1,  d2, 0.],
+                           [-d1, -d2, 0.]])
 
     L_cline = arm_lens.sum()   # 4*(d1 + d2)
     cum     = np.concatenate([[0.], np.cumsum(arm_lens)])
 
-    # phi=0 at midpoint of right arm (d1, 0, 0) — same reference as gamma
+    # phi=0 at midpoint of right arm (d1, 0, 0)
     s0  = d2
     s   = (phi_norm * L_cline + s0) % L_cline
     arm = np.searchsorted(cum[1:], s, side='right')
@@ -1028,4 +952,7 @@ def centerline_gamma(self, quadpoints_phi):
     B   = np.tile([0., 0., 1.], (nphi, 1))
     return XYZ, T, N, B
 
-RennaissanceSDF.centerline_gamma = centerline_gamma
+
+TorusSDF.centerline_gamma      = _torus_centerline_gamma
+PillPipeSDF.centerline_gamma   = _pill_pipe_centerline_gamma
+RennaissanceSDF.centerline_gamma = _rennaissance_centerline_gamma
