@@ -268,32 +268,6 @@ def eigenvalues_pure(B, gradB, L, gamma, D):
     eigs2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
     return eigs1, eigs2
 
-# gotten from chatGPT
-def gradB_pol_pure(B, gradB, L, gamma, D):
-    T = D @ gamma; T = T / jnp.linalg.norm(T, axis=1, keepdims=True)
-    N = D @ T;     N = N / jnp.linalg.norm(N, axis=1, keepdims=True)
-    B = jnp.cross(T, N); B = B / jnp.linalg.norm(B, axis=1, keepdims=True)
-    NB = jnp.stack((N, B), axis=-1)
-    return jnp.swapaxes(NB, -1, -2) @ gradB @ NB
- 
-def angle_pure(B, gradB, L, gamma, D):
-    R = monodromy_pure(B, gradB, L, gamma, D)
-    Rf = R[-1]
-    a = Rf[0, 0]
-    b = Rf[0, 1]
-    c = Rf[1, 0]
-    d = Rf[1, 1]
-    
-    eig1 = ((a+d) + jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
-    eig2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
-    v1 = jnp.array([-b, a-eig1])
-    v2 = jnp.array([-b, a-eig2])
-    v1 /= jnp.linalg.norm(v1)
-    v2 /= jnp.linalg.norm(v2)
-    theta1 = jnp.arccos(jnp.dot(v1, v2))
-    theta2 = jnp.pi - theta1
-    return jnp.min(jnp.array([theta1, theta2]))
-    
 def elongation_pure(B, gradB, L, gamma, D):
     R = monodromy_pure(B, gradB, L, gamma, D)
     # get an eigenvector, then make S
@@ -317,16 +291,6 @@ def elongation_pure(B, gradB, L, gamma, D):
     eig2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
     elong = jnp.abs(eig1/eig2)
     return jnp.max(jnp.array([elong, 1/elong]))
-
-#print("theta is", theta[-1])
-#theta = jnp.atan2(eigs.imag, eigs.real)/np.pi
-def winding_pure(B, gradB, L, gamma, D, wh, nfp):
-    eigs1, eigs2 = eigenvalues_pure(B, gradB, L, gamma, D)
-    #eigs_normalized = eigs/jnp.abs(eigs)
-    #winding = nfp*jnp.sum(wh*(D@eigs_normalized)/eigs_normalized)/(2*jnp.pi*1j)
-    #return winding.real
-    winding = nfp*jnp.atan2(eigs1[-1].imag, eigs1[-1].real)/(2*np.pi)
-    return winding
 
 class TangentMap(Optimizable):
     def __init__(self, axis, biotsavart, threshold, mtype='identity'):
@@ -369,13 +333,43 @@ class TangentMap(Optimizable):
     @property
     def jet2(self):
         if self._jet2 is None:
-            self.compute()
+            axis = self.axis
+            curve = self.curve
+            biotsavart = self.biotsavart
+            
+            if axis.need_to_run_code:
+                res = axis.res
+                axis.run_code(res['length'])
+
+            biotsavart.set_points(curve.gamma())
+            B = biotsavart.B()
+            gradB = biotsavart.dB_by_dX()
+            gradgradB = biotsavart.d2B_by_dXdX()
+            L = axis.res['length']
+            gamma = curve.gamma()
+            self._jet2 = self.quadratic_jet_matrix(B, gradB, gradgradB, L, gamma)
+            self._matrix = self.monodromy_matrix(B, gradB, L, gamma)
         return self._jet2
     
     @property
     def matrix(self):
         if self._matrix is None:
-            self.compute()
+            axis = self.axis
+            curve = self.curve
+            biotsavart = self.biotsavart
+            
+            if axis.need_to_run_code:
+                res = axis.res
+                axis.run_code(res['length'])
+
+            biotsavart.set_points(curve.gamma())
+            B = biotsavart.B()
+            gradB = biotsavart.dB_by_dX()
+            gradgradB = biotsavart.d2B_by_dXdX()
+            L = axis.res['length']
+            gamma = curve.gamma()
+            self._jet2 = self.quadratic_jet_matrix(B, gradB, gradgradB, L, gamma)
+            self._matrix = self.monodromy_matrix(B, gradB, L, gamma)
         return self._matrix
     
     @property
@@ -427,219 +421,67 @@ class TangentMap(Optimizable):
         dmonodromy_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
         self._dmonodromy_dcoils = dmonodromy_dcoils
         
-        self._matrix = self.monodromy_matrix(B, gradB, L, gamma)
-        self._jet2 = self.quadratic_jet_matrix(B, gradB, gradgradB, L, gamma)
 
-    def snowflake_angles_from_jet2(self, ntheta=4096):
-        K = self.jet2
-        th = np.linspace(0, 2*np.pi, ntheta, endpoint=False)
-        vals = []
-        for t in th:
+    def snowflake_angles_from_jet2(self, ntheta=512, xtol=1e-12, tangent_tol=1e-6):
+        """
+        Roots of f(θ) = v × K(v,v) with v = (cos θ, sin θ) — snowflake leg directions.
+    
+        Refines each bracketed sign change with brentq (machine-precision roots),
+        and also detects tangent (double) zeros that lie at sign-preserving local
+        minima of |f|, which the sign-change method misses near bifurcations.
+    
+        Returns
+        -------
+        np.ndarray of root angles in [0, 2π), sorted ascending.
+        """
+        from scipy.optimize import brentq, minimize_scalar
+    
+        K = np.asarray(self.jet2)
+    
+        def f(t):
             v = np.array([np.cos(t), np.sin(t)])
-            q = np.einsum('iab,a,b->i', np.asarray(K), v, v)
-            vals.append(v[0]*q[1] - v[1]*q[0])
-        vals = np.asarray(vals)
-        sign_changes = np.where(np.sign(vals[:-1]) != np.sign(vals[1:]))
-        return th[sign_changes]
-
-class XTangentMap(Optimizable):
-    def __init__(self, axis, biotsavart):
-        """
-        Evaluate the the tangent map on a fieldline
-
-        Args:
-        """
-        super().__init__(depends_on=[axis])
-        self.biotsavart = biotsavart
-        
-        nfp = axis.curve.nfp
-        #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
-        # Example usage:
-        N = 5*axis.curve.order+1  # Number of intervals (N+1 grid points)
-        D, xh, wh = cheb(N, 0, 1./nfp)
-        self.D = D
-        self.xh = xh
-        self.wh = wh
-        
-        self.angle_jax       = jit(lambda B, gradB, L, gamma: angle_pure(B, gradB, L, gamma, self.D))
-        self.angle_dB        = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=0)(B, gradB, L, gamma))
-        self.angle_dgradB    = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=1)(B, gradB, L, gamma))
-        self.angle_dL        = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=2)(B, gradB, L, gamma))
-        self.angle_dgamma    = jit(lambda B, gradB, L, gamma: grad(self.angle_jax, argnums=3)(B, gradB, L, gamma))
-        
-        self.axis = axis
-        curve = axis.curve
-        self.curve = CurveXYZFourierSymmetries(self.xh, curve.order, curve.nfp, curve.stellsym, ntor=curve.ntor, dofs=curve.dofs)
+            q = np.einsum('iab,a,b->i', K, v, v)
+            return v[0]*q[1] - v[1]*q[0]
     
-    def recompute_bell(self, parent=None):
-        self._angle = None
-        self._dangle_dcoils = None
+        th = np.linspace(0.0, 2*np.pi, ntheta, endpoint=False)
+        vals = np.array([f(t) for t in th])
+        scale = float(np.max(np.abs(vals))) + 1e-300
     
-    @property
-    def angle(self):
-        if self._angle is None:
-            self.compute()
-        return self._angle
+        roots = []
     
-    @property
-    def dangle_dcoils(self):
-        if self._dangle_dcoils is None:
-            self.compute()
-        return self._dangle_dcoils
-
-    def compute(self):
-        axis = self.axis
-        curve = self.curve
-        biotsavart = self.biotsavart
-        
-        if axis.need_to_run_code:
-            res = axis.res
-            axis.run_code(res['length'])
-
-        biotsavart.set_points(curve.gamma())
-        B = biotsavart.B()
-        gradB = biotsavart.dB_by_dX()
-        gradgradB = biotsavart.d2B_by_dXdX()
-        L = axis.res['length']
-        gamma = curve.gamma()
-        self._angle = self.angle_jax(B, gradB, L, gamma)
-
-        dangle_dB = self.angle_dB(B, gradB, L, gamma)
-        dangle_dgradB = self.angle_dgradB(B, gradB, L, gamma)
-        dangle_dL = self.angle_dL(B, gradB, L, gamma)
-        dangle_dgamma_partial = self.angle_dgamma(B, gradB, L, gamma)
-
-        Pc, Lc, Uc = axis.res['PLU']
-        dangle_dcoils = sum(biotsavart.B_and_dB_vjp(dangle_dB, dangle_dgradB))
-        
-        dgamma_da = curve.dgamma_by_dcoeff()
-        dB_da = np.einsum('ikl,ikm->ilm', gradB, dgamma_da, optimize=True)
-        dgradB_da = np.einsum('ijkl,ikm->ijlm', gradgradB, dgamma_da, optimize=True)
-        dangle_dgamma = np.einsum('ij,ijm->m', dangle_dB, dB_da, optimize=True) + \
-                       np.einsum('ijk,ijkm->m', dangle_dgradB, dgradB_da, optimize=True) + \
-                       np.einsum('ik,ikm->m', dangle_dgamma_partial, dgamma_da)
-        dJ_ds = np.concatenate([dangle_dgamma, [dangle_dL]])
-        
-        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
-        dangle_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
-        self._dangle_dcoils = dangle_dcoils
-
-class OTangentMap(Optimizable):
-    def __init__(self, axis, biotsavart, phi=0.):
-        """
-        Evaluate the the tangent map on a fieldline
-
-        Args:
-        """
-        super().__init__(depends_on=[axis])
-        self.biotsavart = biotsavart
-        
-        nfp = axis.curve.nfp
-        #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
-        # Example usage:
-        N = 5*axis.curve.order+1  # Number of intervals (N+1 grid points)
-        D, xh, wh = cheb(N, phi, phi+1./nfp)
-        self.D = D
-        self.xh = xh
-        self.wh = wh
-        
-        self.winding_jax       = jit(lambda B, gradB, L, gamma: winding_pure(B, gradB, L, gamma, self.D, self.wh, nfp))
-        self.winding_dB        = jit(lambda B, gradB, L, gamma: grad(self.winding_jax, argnums=0)(B, gradB, L, gamma))
-        self.winding_dgradB    = jit(lambda B, gradB, L, gamma: grad(self.winding_jax, argnums=1)(B, gradB, L, gamma))
-        self.winding_dL        = jit(lambda B, gradB, L, gamma: grad(self.winding_jax, argnums=2)(B, gradB, L, gamma))
-        self.winding_dgamma    = jit(lambda B, gradB, L, gamma: grad(self.winding_jax, argnums=3)(B, gradB, L, gamma))
-        self.elongation_jax    = jit(lambda B, gradB, L, gamma: elongation_pure(B, gradB, L, gamma, self.D))
-        self.elongation_dB     = jit(lambda B, gradB, L, gamma: grad(self.elongation_jax, argnums=0)(B, gradB, L, gamma))
-        self.elongation_dgradB = jit(lambda B, gradB, L, gamma: grad(self.elongation_jax, argnums=1)(B, gradB, L, gamma))
-        self.elongation_dL     = jit(lambda B, gradB, L, gamma: grad(self.elongation_jax, argnums=2)(B, gradB, L, gamma))
-        self.elongation_dgamma = jit(lambda B, gradB, L, gamma: grad(self.elongation_jax, argnums=3)(B, gradB, L, gamma))
-
-        self.axis = axis
-        curve = axis.curve
-        self.curve = CurveXYZFourierSymmetries(self.xh, curve.order, curve.nfp, curve.stellsym, ntor=curve.ntor, dofs=curve.dofs)
+        def _add(r):
+            r = r % (2*np.pi)
+            for rr in roots:
+                d = abs(r - rr)
+                if min(d, 2*np.pi - d) < 1e-6:
+                    return
+            roots.append(r)
     
-    def recompute_bell(self, parent=None):
-        self._elongation = None
-        self._iota = None
-        self._diota_dcoils = None
-        self._delongation_dcoils = None
+        # --- sign-change roots: refine with brentq on each bracket ---
+        for i in range(ntheta):
+            j = (i + 1) % ntheta
+            a = th[i]
+            b = th[j] if j != 0 else 2*np.pi
+            if vals[i] == 0.0:
+                _add(a)
+                continue
+            if vals[i] * vals[j] < 0.0:
+                _add(brentq(f, a, b, xtol=xtol, rtol=1e-14))
     
-    @property
-    def elongation(self):
-        if self._elongation is None:
-            self.compute()
-        return self._elongation
-
-    @property
-    def iota(self):
-        if self._iota is None:
-            self.compute()
-        return self._iota
+        # --- tangent roots: local minima of |f| that are essentially zero ---
+        av = np.abs(vals)
+        for i in range(ntheta):
+            im, ip = (i - 1) % ntheta, (i + 1) % ntheta
+            if av[i] < av[im] and av[i] < av[ip] and av[i] / scale < 1e-2:
+                a = th[im] if im < i else th[im] - 2*np.pi
+                c = th[ip] if ip > i else th[ip] + 2*np.pi
+                res = minimize_scalar(lambda t: abs(f(t)), bounds=(a, c),
+                                      method='bounded',
+                                      options={'xatol': xtol})
+                if abs(f(res.x)) / scale < tangent_tol:
+                    _add(res.x)
     
-    @property
-    def delongation_dcoils(self):
-        if self._delongation_dcoils is None:
-            self.compute()
-        return self._delongation_dcoils
-    
-    @property
-    def diota_dcoils(self):
-        if self._diota_dcoils is None:
-            self.compute()
-        return self._diota_dcoils
-
-    def compute(self):
-        axis = self.axis
-        curve = self.curve
-        biotsavart = self.biotsavart
-        
-        if axis.need_to_run_code:
-            res = axis.res
-            axis.run_code(res['length'])
-
-        biotsavart.set_points(curve.gamma())
-        B = biotsavart.B()
-        gradB = biotsavart.dB_by_dX()
-        gradgradB = biotsavart.d2B_by_dXdX()
-        L = axis.res['length']
-        gamma = curve.gamma()
-        self._iota = self.winding_jax(B, gradB, L, gamma)
-        self._elongation = self.elongation_jax(B, gradB, L, gamma)
-
-        diota_dB = self.winding_dB(B, gradB, L, gamma)
-        diota_dgradB = self.winding_dgradB(B, gradB, L, gamma)
-        diota_dL = self.winding_dL(B, gradB, L, gamma)
-        diota_dgamma_partial = self.winding_dgamma(B, gradB, L, gamma)
-
-        delongation_dB = self.elongation_dB(B, gradB, L, gamma)
-        delongation_dgradB = self.elongation_dgradB(B, gradB, L, gamma)
-        delongation_dL = self.elongation_dL(B, gradB, L, gamma)
-        delongation_dgamma_partial = self.elongation_dgamma(B, gradB, L, gamma)
-
-        Pc, Lc, Uc = axis.res['PLU']
-        diota_dcoils = sum(biotsavart.B_and_dB_vjp(diota_dB, diota_dgradB))
-        
-        dgamma_da = curve.dgamma_by_dcoeff()
-        dB_da = np.einsum('ikl,ikm->ilm', gradB, dgamma_da, optimize=True)
-        dgradB_da = np.einsum('ijkl,ikm->ijlm', gradgradB, dgamma_da, optimize=True)
-        diota_dgamma = np.einsum('ij,ijm->m', diota_dB, dB_da, optimize=True) + \
-                       np.einsum('ijk,ijkm->m', diota_dgradB, dgradB_da, optimize=True) + \
-                       np.einsum('ik,ikm->m', diota_dgamma_partial, dgamma_da)
-        dJ_ds = np.concatenate([diota_dgamma, [diota_dL]])
-        
-        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
-        diota_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
-        self._diota_dcoils = diota_dcoils
-
-        delongation_dcoils = sum(biotsavart.B_and_dB_vjp(delongation_dB, delongation_dgradB))
-        
-        delongation_dgamma = np.einsum('ij,ijm->m', delongation_dB, dB_da, optimize=True) + \
-                             np.einsum('ijk,ijkm->m', delongation_dgradB, dgradB_da, optimize=True) + \
-                             np.einsum('ik,ikm->m', delongation_dgamma_partial, dgamma_da)
-        dJ_ds = np.concatenate([delongation_dgamma, [delongation_dL]])
-        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
-        delongation_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
-        self._delongation_dcoils = delongation_dcoils
+        return np.sort(np.asarray(roots))
 
 class Monodromy(Optimizable):
     def __init__(self, tangent_map):
@@ -652,18 +494,6 @@ class Monodromy(Optimizable):
     @derivative_dec
     def dJ(self):
         return self.tangent_map.dmonodromy_dcoils
-
-class Xangle(Optimizable):
-    def __init__(self, tangent_map):
-        super().__init__(depends_on=[tangent_map])
-        self.tangent_map = tangent_map
-
-    def J(self):
-        return self.tangent_map.angle
-    
-    @derivative_dec
-    def dJ(self):
-        return self.tangent_map.dangle_dcoils
 
 class AxisElongation(Optimizable):
     def __init__(self, tangent_map):
