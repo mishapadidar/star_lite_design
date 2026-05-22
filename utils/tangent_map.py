@@ -239,7 +239,7 @@ def monodromy_eps_pure(B, gradB, L, gamma, D, eps, mtype):
     if mtype == 'identity':
         diff = jnp.abs(Rf-jnp.eye(2))
     elif mtype == 'jordan':
-        diff = jnp.abs(Rf[0, 0] + R[1, 1] - 2.)
+        diff = jnp.abs(Rf[0, 0] + Rf[1, 1] - 2.)
     else:
         raise Exception('mtype not implemented')
     return jnp.mean(jnp.maximum(diff-eps, 0)**2)
