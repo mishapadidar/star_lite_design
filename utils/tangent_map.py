@@ -231,6 +231,19 @@ def monodromy_pure(B, gradB, L, gamma, D):
     R = jnp.matmul(NB_t, jnp.matmul(M, NB[0]))
     return R
 
+
+def monodromy_eps_pure(B, gradB, L, gamma, D, eps, mtype):
+    R = monodromy_pure(B, gradB, L, gamma, D)
+    Rf=R[-1]
+
+    if mtype == 'identity':
+        diff = jnp.abs(Rf-jnp.eye(2))
+    elif mtype == 'jordan':
+        diff = jnp.abs(Rf[0, 0] + R[1, 1] - 2.)
+    else:
+        raise Exception('mtype not implemented')
+    return jnp.mean(jnp.maximum(diff-eps, 0)**2)
+
 def monodromy_identity_pure(B, gradB, L, gamma, D):
     R = monodromy_pure(B, gradB, L, gamma, D)
     Rf=R[-1]
@@ -316,7 +329,7 @@ def winding_pure(B, gradB, L, gamma, D, wh, nfp):
     return winding
 
 class TangentMap(Optimizable):
-    def __init__(self, axis, biotsavart):
+    def __init__(self, axis, biotsavart, threshold, mtype='identity'):
         """
         Evaluate the the tangent map on a fieldline
 
@@ -335,7 +348,7 @@ class TangentMap(Optimizable):
         self.wh = wh
 
         self.monodromy_matrix      = lambda B, gradB, L, gamma: monodromy_matrix_pure(B, gradB, L, gamma, self.D)
-        self.monodromy_jax       = lambda B, gradB, L, gamma: monodromy_identity_pure(B, gradB, L, gamma, self.D)
+        self.monodromy_jax       = lambda B, gradB, L, gamma: monodromy_identity_eps_pure(B, gradB, L, gamma, self.D, threshold, mtype)
         self.monodromy_dB        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=0)(B, gradB, L, gamma)
         self.monodromy_dgradB    = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=1)(B, gradB, L, gamma)
         self.monodromy_dL        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=2)(B, gradB, L, gamma)
