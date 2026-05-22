@@ -312,7 +312,7 @@ class TangentMap(Optimizable):
         self.wh = wh
 
         self.monodromy_matrix      = lambda B, gradB, L, gamma: monodromy_matrix_pure(B, gradB, L, gamma, self.D)
-        self.monodromy_jax       = lambda B, gradB, L, gamma: monodromy_identity_eps_pure(B, gradB, L, gamma, self.D, threshold, mtype)
+        self.monodromy_jax       = lambda B, gradB, L, gamma: monodromy_eps_pure(B, gradB, L, gamma, self.D, threshold, mtype)
         self.monodromy_dB        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=0)(B, gradB, L, gamma)
         self.monodromy_dgradB    = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=1)(B, gradB, L, gamma)
         self.monodromy_dL        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=2)(B, gradB, L, gamma)
