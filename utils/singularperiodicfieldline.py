@@ -378,7 +378,8 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
 
 
 class SingularPeriodicFieldLine(Optimizable):
-    def __init__(self, biotsavart, curve, options=None, stellsym_aux=True):
+    def __init__(self, biotsavart, curve, options=None, stellsym_aux=True,
+                 monodromy_matrix=None, mu=None, length=None):
         super().__init__(depends_on=[biotsavart])
         self.biotsavart = biotsavart
         self.curve = curve
@@ -398,6 +399,12 @@ class SingularPeriodicFieldLine(Optimizable):
             options['monodromy_constraint'] = 'identity'
         self.options = options
         self.stellsym_aux = stellsym_aux
+        # Solve results we want to survive save/load. They appear as __init__
+        # kwargs so simsopt's as_dict/from_dict round-trips them automatically
+        # (mu carries the aux radii = mu[N:2N] and height Z = mu[-1]).
+        self.monodromy_matrix = np.asarray(monodromy_matrix) if monodromy_matrix is not None else None
+        self.mu = np.asarray(mu) if mu is not None else None
+        self.length = length
 
         nfp = curve.nfp  # ADDED: match the tangent-map toroidal period.
         N = 6 * curve.order + 1  # ADDED: use the same Chebyshev resolution as TangentMap.
@@ -419,6 +426,15 @@ class SingularPeriodicFieldLine(Optimizable):
             'dL': self.monodromy_matrix_dL,
             'dgamma': self.monodromy_matrix_dgamma,
         }
+
+        # Reconstructed from a saved file with results present: expose them via
+        # self.res and don't re-solve. We deliberately do NOT set 'success' —
+        # the saved fieldline's convergence status is not recorded, so callers
+        # must not assume it solved correctly.
+        if self.monodromy_matrix is not None and self.mu is not None:
+            self.res = {'monodromy_matrix': self.monodromy_matrix, 'mu': self.mu,
+                        'length': self.length}
+            self.need_to_run_code = False
 
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
@@ -587,6 +603,10 @@ class SingularPeriodicFieldLine(Optimizable):
             print(f"  mu: {self._format_mu(res['mu'], col_mask)}", flush=True)
 
         self.res = res
+        # Mirror the converged results into the serialized attributes.
+        self.monodromy_matrix = np.asarray(M)
+        self.mu = np.asarray(mu)
+        self.length = length
         self.need_to_run_code = False
         return res
 
