@@ -33,7 +33,18 @@ from simsopt.field import compute_fieldlines_xyz
 # ============================================================
 # Configuration
 # ============================================================
-DATA_FILE = sys.argv[1] if len(sys.argv) > 1 else None
+import argparse
+
+_parser = argparse.ArgumentParser(description="interactive fieldline tracer (pyqtgraph)")
+_parser.add_argument("data_file", help="path to the design/singular json")
+_parser.add_argument("--parabolic-tol", type=float, default=0.1,
+                     help="parabolic classification tolerance, RELATIVE in percent: a "
+                          "fixed point is parabolic if ||tr M| - 2| / 2 <= tol/100 "
+                          "(default 0.1 = 0.1%%)")
+_args = _parser.parse_args()
+DATA_FILE = _args.data_file
+# Convert the relative-percent tolerance to the absolute window on |tr M| - 2.
+CLASSIFY_TOL = 2.0 * _args.parabolic_tol / 100.0
 
 TOL = 1e-10
 POINT_SIZE = 3
@@ -434,16 +445,17 @@ class FieldlineGUI(QtWidgets.QWidget):
         self.phis = self.phis_normalized * 2 * np.pi
 
         # Console summary of both fixed points.
-        print_fixed_point_info("X-point", self.curve, self.bs, self.nfp)
-        print_fixed_point_info("O-point (magnetic axis)", self.axis_curve, self.bs, self.nfp)
+        print_fixed_point_info("X-point", self.curve, self.bs, self.nfp, tol=CLASSIFY_TOL)
+        print_fixed_point_info("O-point (magnetic axis)", self.axis_curve, self.bs, self.nfp,
+                               tol=CLASSIFY_TOL)
 
         try:
-            self.invariant_dirs = invariant_directions(self.curve, self.bs, self.nfp)
+            self.invariant_dirs = invariant_directions(self.curve, self.bs, self.nfp, tol=CLASSIFY_TOL)
         except Exception as e:
             proc0_print(f"invariant_directions failed: {e}")
             self.invariant_dirs = None
         try:
-            self.axis_ellipse = elliptic_ellipse(self.axis_curve, self.bs, self.nfp)
+            self.axis_ellipse = elliptic_ellipse(self.axis_curve, self.bs, self.nfp, tol=CLASSIFY_TOL)
         except Exception as e:
             proc0_print(f"elliptic_ellipse failed: {e}")
             self.axis_ellipse = None
@@ -730,9 +742,6 @@ class FieldlineGUI(QtWidgets.QWidget):
 
 
 def main():
-    if DATA_FILE is None:
-        print("Usage: python fieldline_gui_qt.py <data_file>", file=sys.stderr)
-        sys.exit(2)
     app = pg.mkQApp("Fieldline tracer")
     gui = FieldlineGUI()
     gui.show()
