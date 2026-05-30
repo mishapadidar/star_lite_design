@@ -39,9 +39,11 @@ def _scatter_file(ax, path, dot_size):
     ax.scatter(R, Z, s=dot_size, color=_cat_colors(d[:, 0]), rasterized=True)
 
 
-def draw_panel(ax, i, dot_size=0.1):
+def draw_panel(ax, i, dot_size=0.1, leg_alpha=0.3, leg_lw=0.5, leg_zorder=0):
     """Draw all overlays (manifolds, interior, vessel, surface, fixed points,
-    invariant lines) for phi index i onto ax."""
+    invariant lines) for phi index i onto ax. The invariant-line style
+    (leg_alpha/leg_lw/leg_zorder) is faint+behind by default; the zoom inset
+    passes a prominent style so the lines aren't buried under the leg dots."""
     # manifolds (both naming conventions)
     for f in sorted(glob.glob(str(p.parent / f"poincare{i}_*.txt"))
                     + glob.glob(str(p.parent / f"poincare_*_{i}_*.txt"))):
@@ -87,7 +89,7 @@ def draw_panel(ax, i, dot_size=0.1):
                         continue
                     seen.add(ang)
                     ax.axline((R_xp, Z_xp), (R_xp + vR, Z_xp + vZ),
-                              color='k', lw=0.5, alpha=0.3, zorder=0)
+                              color='k', lw=leg_lw, alpha=leg_alpha, zorder=leg_zorder)
 
 
 for i, ax in enumerate(axes.flat):
@@ -102,20 +104,24 @@ axes[0, 0].set_ylim([-0.5, 0.5])
 for ax in axes[-1, :]: ax.set_xlabel('R')
 for ax in axes[:, 0]:  ax.set_ylabel('Z')
 
-# Zoom inset on the top X-point at phi=0 to reveal the fixed-point structure.
-ZOOM_HALF = 0.05
-f_fp0 = p.parent / "fixed_points_0.txt"
-if os.path.exists(f_fp0):
-    fp0 = np.atleast_2d(np.loadtxt(f_fp0, delimiter=',', skiprows=1))
-    if fp0.shape[0] > 1:
-        R_xp, Z_xp = fp0[1, 0], fp0[1, 1]
-        axins = axes[0, 0].inset_axes([0.66, 0.66, 0.32, 0.32])
-        draw_panel(axins, 0, dot_size=2.0)
-        axins.set_xlim(R_xp - ZOOM_HALF, R_xp + ZOOM_HALF)
-        axins.set_ylim(Z_xp - ZOOM_HALF, Z_xp + ZOOM_HALF)
-        axins.set_aspect('equal')
-        axins.set_xticks([]); axins.set_yticks([])
-        axes[0, 0].indicate_inset_zoom(axins, edgecolor='0.4', lw=0.8)
+# Zoom inset on the X-point in every phi panel to reveal the fixed-point structure.
+ZOOM_HALF = 0.01
+for i, ax in enumerate(axes.flat):
+    f_fp = p.parent / f"fixed_points_{i}.txt"
+    if not os.path.exists(f_fp):
+        continue
+    fp = np.atleast_2d(np.loadtxt(f_fp, delimiter=',', skiprows=1))
+    if fp.shape[0] < 2:
+        continue
+    R_xp, Z_xp = fp[1, 0], fp[1, 1]
+    axins = ax.inset_axes([0.66, 0.66, 0.32, 0.32])
+    # In the zoom, draw the invariant lines prominently and on top of the dots.
+    draw_panel(axins, i, dot_size=1.0, leg_alpha=0.8, leg_lw=1.0, leg_zorder=5)
+    axins.set_xlim(R_xp - ZOOM_HALF, R_xp + ZOOM_HALF)
+    axins.set_ylim(Z_xp - ZOOM_HALF, Z_xp + ZOOM_HALF)
+    axins.set_aspect('equal')
+    axins.set_xticks([]); axins.set_yticks([])
+    ax.indicate_inset_zoom(axins, edgecolor='0.4', lw=0.8)
 
 h, l = [], []
 for a in axes.flat:

@@ -561,7 +561,7 @@ def trace_fieldlines(bfield, g0, legs):
             tt = sign * (1.0 if xp == 'top' else -1.0)
             phis = np.linspace(0, 0.25, 9)*2*np.pi
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
-                tt*sign*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-10, comm=comm_world,
+                tt*sign*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
                 phis=phis, stopping_criteria=[IterationStoppingCriterion(int(1e5))])
             proc0_print(f"  {time.time()-t1:.1f}s, hits/seed: " +' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 
@@ -590,7 +590,7 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=1e5):
 
     phis = np.linspace(0, 0.25, 9) * 2 * np.pi
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
-        bfield, R0, Z0, tmax=tmax_fl, tol=1e-10, comm=comm_world,
+        bfield, R0, Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
         phis=phis, stopping_criteria=[IterationStoppingCriterion(int(1e5))])
     proc0_print(f"  interior {time.time()-t1:.1f}s, hits/seed: " +
                 ' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
