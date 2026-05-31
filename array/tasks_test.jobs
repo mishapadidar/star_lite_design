@@ -1,0 +1,6 @@
+bash ./prefix.sh 0.06 OFF 0 0 0 0 0 0 0 DN
+bash ./prefix.sh 0.06 OFF 0 0 0 0 0 1 0 DN
+bash ./prefix.sh 0.06 OFF 0 0 0 0 0 2 0 DN
+bash ./prefix.sh 0.06 OFF 0 0 0 0 0 0 0 SN
+bash ./prefix.sh 0.06 OFF 0 0 0 0 0 1 0 SN
+bash ./prefix.sh 0.06 OFF 0 0 0 0 0 2 0 SN

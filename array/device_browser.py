@@ -84,7 +84,7 @@ def device_id(name: str) -> int:
 
 PARAM_ORDER = [
     "margin", "well", "Z", "onvessel",
-    "distance", "configID", "vesselID", "mono", "num_aux", "attempt",
+    "distance", "configID", "vesselID", "mono", "null", "num_aux", "attempt",
 ]
 
 MONO_LEGEND = {
@@ -114,6 +114,7 @@ PARAM_HELP = {
     "Z":        "X-point has a constant Z coordinate.",
     "onvessel": "The coils lie on the vessel.",
     "distance": "X-point is a constant distance from the vessel.",
+    "null":     "DN = double-null (stellsym); SN = single-null (bottom X-point pushed to the lower wall).",
 }
 
 DEFAULT_MAX_REL_ERR = 0.10   # percent  (i.e. 0.001 in fraction)
@@ -173,6 +174,8 @@ def parse_folder_params(name: str) -> dict[str, str]:
     # default attempt=0 for any folder missing that token.
     out.setdefault("num_aux", "0")
     out.setdefault("attempt", "0")
+    # Devices predating the DN/SN split have no null token; treat them as DN.
+    out.setdefault("null", "DN")
     return out
 
 

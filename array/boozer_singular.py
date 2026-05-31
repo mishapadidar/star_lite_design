@@ -131,11 +131,15 @@ for idx, (xpoint, boozer_surface, (iota, G), ax) in enumerate(
     mu0 = np.concatenate([np.zeros(num_aux), radii, [max_Z + 0.15]])
     fixed_mu_arg = ('z',)
 
-    # (1) Polish the xpoint.
+    # (1) Polish the xpoint. The auxiliary-coil symmetry follows the device:
+    # DN (stellsym surface) uses the stellsym mirror aux coils (current at +Z and
+    # -Z tied); SN (non-stellsym surface) keeps only the top aux coils
+    # (stellsym_aux=False).
     xpoint_fl = SingularPeriodicFieldLine(
         BiotSavart(boozer_surface.biotsavart.coils), xpoint.curve,
         options={'newton_tol': 1e-9, 'newton_maxiter': 20, 'verbose': True,
                  'use_lstsq': True, 'monodromy_constraint': monodromy_constraint},
+        stellsym_aux=boozer_surface.surface.stellsym,
     )
     xpoint_fl.need_to_run_code = True
     res = xpoint_fl.run_code(CurveLength(xpoint.curve).J(),

@@ -4,7 +4,7 @@ set -uo pipefail
 # Merged initial-optimization + polish workflow.
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                    <vessel_id> <mono> <attempt>
+#                    <vessel_id> <mono> <attempt> <null(DN|SN)>
 #
 # 1. boozer_all.py produces the unpolished device (num_aux=0); its base modular
 #    coils are perturbed (seeded by the device ID) for this attempt.
@@ -24,6 +24,7 @@ config="$6"
 vessel_id="$7"
 mono="$8"
 attempt="$9"
+null="${10}"
 
 # Maximum number of auxiliary planar coils to try when polishing (mono=1,2).
 NUM_AUX_MAX=7
@@ -40,7 +41,7 @@ HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 # Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the
 # device IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_num_aux=${1}_attempt=${attempt}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}"
 }
 
 INIT_NAME="$(task_name 0)"
@@ -144,7 +145,8 @@ source /mnt/home/agiuliani/ceph/STAR_LITE/venv/bin/activate
   --vessel-id "$vessel_id" \
   --mono "$mono" \
   --num-aux 0 \
-  --attempt "$attempt"
+  --attempt "$attempt" \
+  --null "$null"
 
 if [ ! -f "$INIT_JSON" ]; then
   echo "ERROR: $INIT_JSON not produced — boozer_all.py failed"

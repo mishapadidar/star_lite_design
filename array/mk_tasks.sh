@@ -16,6 +16,9 @@ binary_values=(0 1)
 mono_values=(0 1 2)
 configs=(0 1 2 3)
 vessel_values=(0 1 2)
+# Null type: DN = double-null (stellsym, current behavior); SN = single-null
+# (drop stellsym, push the bottom X-point to the lower wall).
+null_values=(DN SN)
 ATTEMPTS=4
 
 mkdir -p logs
@@ -29,8 +32,10 @@ for margin in "${margins[@]}"; do
           for vessel_id in "${vessel_values[@]}"; do
             for config in "${configs[@]}"; do
               for mono in "${mono_values[@]}"; do
-                for ((attempt=0; attempt<ATTEMPTS; attempt++)); do
-                  echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${attempt}" >> tasks.jobs
+                for null in "${null_values[@]}"; do
+                  for ((attempt=0; attempt<ATTEMPTS; attempt++)); do
+                    echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${attempt} ${null}" >> tasks.jobs
+                  done
                 done
               done
             done

@@ -35,6 +35,8 @@ from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 
+import sn_setup
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--margin", type=float)
@@ -51,6 +53,10 @@ parser.add_argument("--mono", type=int)
 # it (via the folder name) sets the perturbation seed.
 parser.add_argument("--num-aux", type=int, default=0)
 parser.add_argument("--attempt", type=int, default=0)
+# Null type: DN = double-null (current stellsym behavior); SN = single-null
+# (drop stellsym, rebuild as nfp=2/stellsym=False, push the bottom X-point to
+# the lower wall).
+parser.add_argument("--null", type=str, default='DN', choices=['DN', 'SN'])
 
 args = parser.parse_args()
 
@@ -70,6 +76,7 @@ vessel_id = args.vessel_id
 mono = args.mono
 num_aux = args.num_aux
 attempt = args.attempt
+null_type = args.null
 
 
 
@@ -84,7 +91,7 @@ else:
 # same ID from the folder name (it uses the identical zlib.crc32 convention).
 TASK_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_vessel}"
              f"_distance={distance_weight}_configID={config_id}_vesselID={vessel_id}"
-             f"_mono={mono}_num_aux={num_aux}_attempt={attempt}")
+             f"_mono={mono}_null={null_type}_num_aux={num_aux}_attempt={attempt}")
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
 print(f"Task: {TASK_NAME}")
@@ -108,6 +115,19 @@ iota_Gs = data[1][config_id:config_id+1] # (iota, G) pairs
 axes = data[2][config_id:config_id+1] # magnetic axis CurveRZFouriers
 xpoints = data[3][config_id:config_id+1] # X-point CurveRZFouriers
 
+# Single-null setup (SN): drop stellarator symmetry. Rebuild the coils from the
+# 3 independent (Y>0) bases as nfp=2/stellsym=False, convert the surface, axis
+# and top X-point to non-stellsym on the rebuilt coils, and build the bottom
+# X-point as its own solved field line (initially the stellsym mirror of the
+# top). Everything is wired to the objectives below exactly as in DN; the freed
+# dofs let the optimizer build the single-null asymmetry. bottom_xpoints stays
+# None for DN.
+bottom_xpoints = None
+if null_type == 'SN':
+    (boozer_surfaces, axes, xpoints, bottom_xpoints,
+     _sn_coils, _sn_base_curves, _sn_base_currents) = sn_setup.setup_single_null(
+        boozer_surfaces, iota_Gs, axes, xpoints)
+
 #boozer_surfaces = [boozer_surfaces[1]]
 #axes = [axes[1]]
 #xpoints = [xpoints[1]]
@@ -115,7 +135,7 @@ xpoints = data[3][config_id:config_id+1] # X-point CurveRZFouriers
 for ii, (boozer_surface, axis, xpoint) in enumerate(zip(boozer_surfaces, axes, xpoints)):
     axis.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
     xpoint.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
-    boozer_surface.options = {'newton_tol':1e-16, 'newton_maxiter':20, 'verbose':True}
+    boozer_surface.options = {'newton_tol':1e-16 if null_type == 'DN' else 1e-14, 'newton_maxiter':20, 'verbose':True}
     axis.run_code(CurveLength(axis.curve).J())
     xpoint.run_code(CurveLength(xpoint.curve).J())
     boozer_surface.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
@@ -124,7 +144,10 @@ for ii, (boozer_surface, axis, xpoint) in enumerate(zip(boozer_surfaces, axes, x
 biotsavart = boozer_surfaces[0].biotsavart
 coils = biotsavart.coils
 curves = [c.curve for c in coils]
-base_curve_idx = [0, 4]
+# DN: 2 independent base coils (stellsym expansion gives [0,4]). SN: the rebuilt
+# coils_via_symmetries(3 bases, nfp=2, stellsym=False) set has the 3 independent
+# base coils at indices [0,1,2] (rotated copies at 3,4,5).
+base_curve_idx = [0, 1, 2] if null_type == 'SN' else [0, 4]
 base_curves = [curves[i] for i in base_curve_idx]
 
 if vessel_id == 0:
@@ -290,6 +313,22 @@ tmos = [TangentMap(xp, BiotSavart(boozer_surface.biotsavart.coils), MONODROMY_TH
 MONODROMY_LIST = [Monodromy(tmo) for tmo in tmos]
 J_monodromy = sum(MONODROMY_LIST) # target rotational transform is that computed on the initial surface
 
+# Bottom X-point band (SN only): keep each bottom X-point field line between
+# BOTTOM_XPOINT_MIN (1 cm) and BOTTOM_XPOINT_MAX (5 cm) inside the vessel. The
+# top X-point's "stay inside" constraint is already in J_plasma_to_vessel_margin.
+J_bottom_xpoint = None
+if null_type == 'SN':
+    config['BOTTOM_XPOINT_MIN'] = 0.01
+    config['BOTTOM_XPOINT_MAX'] = 0.05
+    config['BOTTOM_XPOINT_WEIGHT'] = 1e-1
+    BOTTOM_XPOINT_MIN = config['BOTTOM_XPOINT_MIN']
+    BOTTOM_XPOINT_MAX = config['BOTTOM_XPOINT_MAX']
+    BOTTOM_XPOINT_WEIGHT = Weight(config['BOTTOM_XPOINT_WEIGHT'])
+    J_bottom_xpoint = sn_setup.bottom_xpoint_vessel_penalty(
+        sdf, bottom_xpoints, BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX)
+else:
+    BOTTOM_XPOINT_WEIGHT = Weight(0.0)
+
 # sum the objectives together
 JF = (J_nonQSRatio 
     + MONODROMY_WEIGHT * J_monodromy 
@@ -311,6 +350,10 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     )
 
+# Bottom X-point band term (SN only).
+if J_bottom_xpoint is not None:
+    JF = JF + BOTTOM_XPOINT_WEIGHT * J_bottom_xpoint
+
 
 penalties = {'nonQS': J_nonQSRatio,
         'monodromy' : MONODROMY_WEIGHT * J_monodromy,
@@ -331,6 +374,8 @@ penalties = {'nonQS': J_nonQSRatio,
         'fieldline mean dist':FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance,
         'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
         }
+if J_bottom_xpoint is not None:
+    penalties['bottom xpoint'] = BOTTOM_XPOINT_WEIGHT * J_bottom_xpoint
 
 states = {
         'iotas': IOTAS_LIST,
@@ -348,14 +393,17 @@ for bbsurf in boozer_surfaces:
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
 
-# make sure coils are stellarator symmetric
-for ii in [base_curve_idx[-1]]:
-    c = boozer_surfaces[0].biotsavart.coils[ii].curve
-    if isinstance(c, RotatedCurve):
-        c = c.curve
-    for df in c.local_dof_names:
-        if ('xs' in df) or ('yc' in df) or ('zc' in df):
-            c.fix(df)
+# make sure coils are stellarator symmetric (DN only). For SN we deliberately
+# keep the base coils general (the device is no longer stellsym), so we do NOT
+# fix the stellsym-violating dofs.
+if null_type == 'DN':
+    for ii in [base_curve_idx[-1]]:
+        c = boozer_surfaces[0].biotsavart.coils[ii].curve
+        if isinstance(c, RotatedCurve):
+            c = c.curve
+        for df in c.local_dof_names:
+            if ('xs' in df) or ('yc' in df) or ('zc' in df):
+                c.fix(df)
 
 # ---- per-attempt perturbation of the two base modular coils -------------
 # Jitter the order-0, 1 and 2 Fourier coefficients of each base modular coil
@@ -778,7 +826,21 @@ for j in range(10):
     if monodromy_err > 0.001 and MONODROMY_WEIGHT.value != 0.:
         MONODROMY_WEIGHT*=10
         print("MONODROMY ERROR", monodromy_err)
- 
+
+    # SN bottom X-point band: inward depth of every bottom field-line point must
+    # lie in [BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX]. Relative violation vs the
+    # respective bound; escalate the weight until satisfied to 0.1%.
+    bottom_err = 0.
+    if null_type == 'SN':
+        for bx in bottom_xpoints:
+            inward = -np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0))
+            lo = max(BOTTOM_XPOINT_MIN - inward.min(), 0.) / BOTTOM_XPOINT_MIN
+            hi = max(inward.max() - BOTTOM_XPOINT_MAX, 0.) / BOTTOM_XPOINT_MAX
+            bottom_err = max(bottom_err, lo, hi)
+        if bottom_err > 0.001 and BOTTOM_XPOINT_WEIGHT.value != 0.:
+            BOTTOM_XPOINT_WEIGHT *= 10
+            print("BOTTOM XPOINT ERROR", bottom_err)
+
     sdf.to_vtk(OUT_DIR + f'vessel_opt_{j}', nx=40, ny=40, nz=40)
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")
@@ -805,6 +867,8 @@ for j in range(10):
     config['FIELDLINE_MEANZ_WEIGHT'] = FIELDLINE_MEANZ_WEIGHT.value
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
     config['MONODROMY_WEIGHT'] = MONODROMY_WEIGHT.value
+    if null_type == 'SN':
+        config['BOTTOM_XPOINT_WEIGHT'] = BOTTOM_XPOINT_WEIGHT.value
 
     # Save to YAML
     with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
@@ -854,6 +918,18 @@ for ti, d in enumerate(tmos):
     for a in range(2):
         for b in range(2):
             final_metrics[f'monodromy_M{a}{b}_idx{ti}'] = (float(Mm[a, b]), None, None)
+
+# bottom X-point band (SN only): achieved inward-depth range and the relative
+# band violation against [BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX].
+if null_type == 'SN':
+    inw_min = min(float((-np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0))).min())
+                  for bx in bottom_xpoints)
+    inw_max = max(float((-np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0))).max())
+                  for bx in bottom_xpoints)
+    final_metrics['bottom_xpoint_inward_min'] = (
+        inw_min, BOTTOM_XPOINT_MIN, max(BOTTOM_XPOINT_MIN - inw_min, 0.) / BOTTOM_XPOINT_MIN)
+    final_metrics['bottom_xpoint_inward_max'] = (
+        inw_max, BOTTOM_XPOINT_MAX, max(inw_max - BOTTOM_XPOINT_MAX, 0.) / BOTTOM_XPOINT_MAX)
 
 # write a human-readable summary
 with open(OUT_DIR + 'summary.txt', 'w') as f:
