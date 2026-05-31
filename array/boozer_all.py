@@ -581,7 +581,9 @@ def callback(dofs):
     table2 = Table(expand=False, show_header=False) 
     for k in states.keys():
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
-    table2.add_row('xpoint(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
+    table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
+    if bottom_xpoints is not None:
+        table2.add_row('xpoint_bottom(0)', ' '.join([f'{np.array2string(bx.curve.gamma()[0])}' for bx in bottom_xpoints]))
     table2.add_row('monodromys', ' '.join([f'{np.array2string(d.matrix)}' for d in tmos]))
     table2.add_row('trace(monodromys)', ' '.join([f'{float(np.trace(d.matrix)):.4e}' for d in tmos]))
     table2.add_row('well', ' '.join([f'{w.well().max():.3e}' for w in magnetic_wells]))
@@ -591,6 +593,11 @@ def callback(dofs):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     table2.add_row('minimum X-point-to-vessel distance', f'{min_xpoint_to_vessel:.3e}')
     table2.add_row('minimum Boozer surface-to-vessel distance', f'{min_boozer_surface_to_vessel:.3e}')
+    # bottom X-point inward depth [min, max] per xpoint (target band [BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX]).
+    if bottom_xpoints is not None:
+        _bot_inw = [-np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0)) for bx in bottom_xpoints]
+        table2.add_row('bottom X-point inward dist [min,max]',
+                       ' '.join([f'[{a.min():.3e}, {a.max():.3e}]' for a in _bot_inw]))
     
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     min_coil_clearance_distance, _, _ = J_coil_clearance.shortest_distance()
