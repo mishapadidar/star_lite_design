@@ -468,6 +468,12 @@ dat = load(p)
 xpoint=xpoints[0]
 boozer_surface = boozer_surfaces[0]
 
+# For SN (non-stellsym surface) up-down symmetry is lost, so the stellsym
+# half-period phi/2pi in [0, 0.25] is no longer representative: trace/plot over
+# the full nfp=2 field period [0, 0.5]. DN keeps the half-period [0, 0.25].
+PHI_MAX = 0.25 if boozer_surface.surface.stellsym else 0.5
+NPHI = 9
+
 # convert to RZFourier
 order=16
 quadpoints=np.linspace(0, 0.5, 2*order+1, endpoint=False)
@@ -496,6 +502,9 @@ nfp = xpoint.curve.nfp
 
 if comm_world is None or comm_world.rank == 0:
     np.savetxt(OUT_DIR + 'xpoint.txt', g0[None, :])
+    # Single source of truth for the panel phi grid (plot_manifolds.py reads this
+    # so DN half-period [0,0.25] vs SN full-period [0,0.5] always agree).
+    np.savetxt(OUT_DIR + 'phis.txt', np.linspace(0, PHI_MAX, NPHI))
     with open(OUT_DIR + 'legs.txt', 'w') as fh:
         fh.write('# k, theta, vR, vZ, kind, sign, vK(vv)\n')
         
@@ -559,7 +568,7 @@ def trace_fieldlines(bfield, g0, legs):
 
         for xp in ['top', 'bot']:
             tt = sign * (1.0 if xp == 'top' else -1.0)
-            phis = np.linspace(0, 0.25, 9)*2*np.pi
+            phis = np.linspace(0, PHI_MAX, NPHI)*2*np.pi
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
                 tt*sign*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
                 phis=phis, stopping_criteria=[IterationStoppingCriterion(int(2e5))])
@@ -588,7 +597,7 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
     R0 = R_axis + s * (R_xp - R_axis)
     Z0 = Z_axis + s * (Z_xp - Z_axis)
 
-    phis = np.linspace(0, 0.25, 9) * 2 * np.pi
+    phis = np.linspace(0, PHI_MAX, NPHI) * 2 * np.pi
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         bfield, R0, Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
         phis=phis, stopping_criteria=[IterationStoppingCriterion(int(2e5))])
@@ -610,7 +619,7 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
 def surface_cross_sections(surface):
     """Optimization-surface (R, Z) cross sections at the manifold phi values.
     surface.cross_section takes the normalized angle phi/(2*pi)."""
-    phis = np.linspace(0, 0.25, 9)
+    phis = np.linspace(0, PHI_MAX, NPHI)
     for ii, phi in enumerate(phis):
         XYZ = surface.cross_section(phi, thetas=100)
         R, Z = np.hypot(XYZ[:, 0], XYZ[:, 1]), XYZ[:, 2]
@@ -620,7 +629,7 @@ def surface_cross_sections(surface):
 
 def extract_vessel_cross_sections(sdf, nR=200, nZ=200):
     """Vessel SDF zero-level (R, Z) contours at the manifold phi values."""
-    phis = np.linspace(0, 0.25, 9) * 2 * np.pi
+    phis = np.linspace(0, PHI_MAX, NPHI) * 2 * np.pi
     Rg = np.linspace(0.0, 1.5, nR)
     Zg = np.linspace(-1.0, 1.0, nZ)
     Rm, Zm = np.meshgrid(Rg, Zg, indexing='xy')
@@ -660,7 +669,7 @@ def save_fixed_points(axis_curve, xp_curve):
 
     A phi's file is written only when the axis + top evaluate_at_phi succeed; the
     bottom row is appended only when its evaluate_at_phi also succeeds."""
-    phis = np.linspace(0, 0.25, 9)
+    phis = np.linspace(0, PHI_MAX, NPHI)
     for ii, phi in enumerate(phis):
         a_xyz, a_ok = evaluate_at_phi(axis_curve, phi)
         x_xyz, x_ok = evaluate_at_phi(xp_curve, phi)

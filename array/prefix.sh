@@ -72,6 +72,7 @@ sync_back_filtered() {
       --include='xs_*.png' \
       --include='poincare*.txt' \
       --include='xpoint.txt' \
+      --include='phis.txt' \
       --include='legs.txt' \
       --include='vessel_cross_*.txt' \
       --include='surface_cross_*.txt' \

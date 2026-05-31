@@ -15,7 +15,14 @@ _CAT_CMAP = plt.get_cmap('tab20')
 def _cat_colors(labels):
     return _CAT_CMAP(np.asarray(labels).astype(int) % _CAT_CMAP.N)
 
-phis  = np.linspace(0, 0.25, 9)
+# Panel phi grid: single source of truth is phis.txt written by mk_manifolds
+# (DN half-period [0,0.25] vs SN full-period [0,0.5]). Fall back to folder-name
+# detection for older outputs that predate phis.txt.
+_phis_file = p.parent / 'phis.txt'
+if _phis_file.exists():
+    phis = np.atleast_1d(np.loadtxt(_phis_file))
+else:
+    phis = np.linspace(0, 0.5 if 'null=SN' in p.parent.name else 0.25, 9)
 nphi  = len(phis)
 
 fig, axes = plt.subplots(3, 3, figsize=(8.25, 10), sharex=True, sharey=True, gridspec_kw={"wspace": 0, "hspace": 0})
