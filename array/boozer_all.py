@@ -535,6 +535,11 @@ for idx, boozer_surface in enumerate(boozer_surfaces):
 res_list = [{'sdofs': boozer_surface.surface.x.copy() , 'iota': boozer_surface.res['iota'], 'G': boozer_surface.res['G']} for boozer_surface in boozer_surfaces]
 axes_res_list = [{'adofs': axis.curve.x.copy() , 'length': axis.res['length']} for axis in axes]
 xpoints_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['length']} for xpoint in xpoints]
+# The bottom X-points (SN) are re-solved each evaluation but their curve dofs are
+# NOT optimization variables, so they must be snapshotted/restored explicitly
+# like the axis/top-xpoint; otherwise a corrupted bottom field line poisons every
+# later gradient (modB->0). Empty for DN (bottom_xpoints is None).
+bottom_res_list = [{'xdofs': bx.curve.x.copy(), 'length': bx.res['length']} for bx in (bottom_xpoints or [])]
 dat_dict = {'iter':0, 'J': JF.J(), 'dJ': JF.dJ().copy(), 'x': JF.x.copy()}
 
 def callback(dofs):
@@ -548,6 +553,9 @@ def callback(dofs):
     for res, axis in zip(xpoints_res_list, xpoints):
         res['xdofs'] = axis.curve.x.copy()
         res['length'] =  axis.res['length']
+    for res, bx in zip(bottom_res_list, bottom_xpoints or []):
+        res['xdofs'] = bx.curve.x.copy()
+        res['length'] = bx.res['length']
     
     dist = np.linalg.norm(dofs - dat_dict['x'])
 
@@ -623,6 +631,12 @@ def _restore_state():
     for res, xp in zip(xpoints_res_list, xpoints):
         xp.curve.x = res['xdofs']
         xp.res['length'] = res['length']
+    # Restore the bottom X-point curves too (SN) so a corrupted bottom field line
+    # does not poison the next gradient; force a re-solve from the good guess.
+    for res, bx in zip(bottom_res_list, bottom_xpoints or []):
+        bx.curve.x = res['xdofs']
+        bx.res['length'] = res['length']
+        bx.need_to_run_code = True
     JF.x = dat_dict['x']
 
 
