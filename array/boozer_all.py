@@ -639,8 +639,12 @@ def fun(dofs):
     for i, bs in enumerate(boozer_surfaces):
         if not bs.res['success']:
             fail_reasons.append(f'boozer_surface[{i}] Newton solve did not converge')
-        if bs.surface.is_self_intersecting():
-            fail_reasons.append(f'boozer_surface[{i}] surface is self-intersecting')
+        # is_self_intersecting() can itself raise; treat a raise as self-intersecting.
+        try:
+            if bs.surface.is_self_intersecting():
+                fail_reasons.append(f'boozer_surface[{i}] surface is self-intersecting')
+        except Exception as e:
+            fail_reasons.append(f'boozer_surface[{i}] is_self_intersecting() raised: {e!r} (assumed self-intersecting)')
     for i, fl in enumerate(axes):
         if not fl.res['success']:
             fail_reasons.append(f'axis[{i}] Newton solve did not converge')
