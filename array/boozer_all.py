@@ -418,7 +418,7 @@ if null_type == 'DN':
 # fresh perturbation is drawn, repeating until all three converge to a
 # non-self-intersecting state. A generous cap turns a pathological case into a
 # task failure rather than an indefinite hang.
-PERTURB_STD = 0.005 if null_type == 'SN' else 0.01   # metres (SN: 0.5 cm, DN: 1 cm)
+PERTURB_STD = 0.001 if null_type == 'SN' else 0.01   # metres (SN: 1 mm, DN: 1 cm)
 PERTURB_ORDERS = (0, 1, 2)   # Fourier harmonics to perturb
 MAX_PERTURB_TRIES = 100
 pert_rng = np.random.default_rng(DEVICE_ID)
