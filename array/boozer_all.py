@@ -629,21 +629,27 @@ def _restore_state():
 def fun(dofs):
     JF.x = dofs
 
-    eval_failed = False
+    fail_reasons = []
     try:
         J = JF.J()
         grad = JF.dJ()
-    except Exception:
-        eval_failed = True
+    except Exception as e:
+        fail_reasons.append(f'JF.J()/dJ() raised: {e!r}')
 
-    surfaces_ok = all(
-        bs.res['success'] and not bs.surface.is_self_intersecting()
-        for bs in boozer_surfaces
-    )
-    fieldlines_ok = all(fl.res['success'] for fl in axes + xpoints)
+    for i, bs in enumerate(boozer_surfaces):
+        if not bs.res['success']:
+            fail_reasons.append(f'boozer_surface[{i}] Newton solve did not converge')
+        if bs.surface.is_self_intersecting():
+            fail_reasons.append(f'boozer_surface[{i}] surface is self-intersecting')
+    for i, fl in enumerate(axes):
+        if not fl.res['success']:
+            fail_reasons.append(f'axis[{i}] Newton solve did not converge')
+    for i, fl in enumerate(xpoints):
+        if not fl.res['success']:
+            fail_reasons.append(f'xpoint[{i}] Newton solve did not converge')
 
-    if eval_failed or not surfaces_ok or not fieldlines_ok:
-        print('failed — rolling back to last good state')
+    if fail_reasons:
+        print('failed — rolling back to last good state: ' + '; '.join(fail_reasons))
         _restore_state()
         # Return the previous J and the negated previous gradient so BFGS's
         # line search shrinks the step back toward the last good point.
