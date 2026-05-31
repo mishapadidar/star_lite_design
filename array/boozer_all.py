@@ -616,7 +616,7 @@ def callback(dofs):
     if dat_dict["iter"] % 10 == 0:
         sdf.to_vtk(OUT_DIR + 'vessel_tmp')
         curves_to_vtk(curves, OUT_DIR + "curves_tmp")
-        curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_tmp")
+        curves_to_vtk([xpoint.curve for xpoint in xpoints] + [bx.curve for bx in (bottom_xpoints or [])], OUT_DIR + f"xpoint_curves_tmp")
         curves_to_vtk([axis.curve for axis in axes], OUT_DIR + "ma_tmp")
         for idx, boozer_surface in enumerate(boozer_surfaces):
             boozer_surface.surface.to_vtk(OUT_DIR + f"surf_tmp_{idx}")
@@ -878,7 +878,7 @@ for j in range(10):
 
     sdf.to_vtk(OUT_DIR + f'vessel_opt_{j}', nx=40, ny=40, nz=40)
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
-    curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")
+    curves_to_vtk([xpoint.curve for xpoint in xpoints] + [bx.curve for bx in (bottom_xpoints or [])], OUT_DIR + f"xpoint_curves_opt_{j}")
     curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_{j}")
     for idx, boozer_surface in enumerate(boozer_surfaces):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_{j}")
@@ -911,7 +911,7 @@ for j in range(10):
 
 sdf.to_vtk(OUT_DIR + f'vessel_opt_final', nx=40, ny=40, nz=40)
 curves_to_vtk(curves, OUT_DIR + f"curves_opt_final")
-curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_final")
+curves_to_vtk([xpoint.curve for xpoint in xpoints] + [bx.curve for bx in (bottom_xpoints or [])], OUT_DIR + f"xpoint_curves_opt_final")
 curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_final")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_final")
