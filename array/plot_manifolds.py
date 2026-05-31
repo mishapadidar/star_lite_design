@@ -72,24 +72,34 @@ def draw_panel(ax, i, dot_size=0.1, leg_alpha=0.3, leg_lw=0.5, leg_zorder=0):
             if fp.shape[0] > 1:
                 ax.plot(fp[1, 0], fp[1, 1], marker='X', color='tab:red',
                         ms=3, ls='none', label='X-point')
+            # row2 = stellsym-partner (bottom) X-point, when present.
+            if fp.shape[0] > 2:
+                ax.plot(fp[2, 0], fp[2, 1], marker='X', color='tab:red',
+                        ms=3, ls='none')
 
-    # invariant-direction lines through the X-point, only at phi=0
+    # invariant-direction lines through the X-points, only at phi=0
     if i == 0:
         f_legs = p.parent / "legs.txt"
         f_fp0 = p.parent / "fixed_points_0.txt"
         if os.path.exists(f_legs) and os.path.exists(f_fp0):
             fp0 = np.atleast_2d(np.loadtxt(f_fp0, delimiter=',', skiprows=1))
-            if fp0.shape[0] > 1:
-                R_xp, Z_xp = fp0[1, 0], fp0[1, 1]
-                L = np.atleast_2d(np.loadtxt(f_legs, delimiter=',', usecols=(2, 3)))
+            L = np.atleast_2d(np.loadtxt(f_legs, delimiter=',', usecols=(2, 3)))
+
+            def _draw_legs(R0, Z0, flipZ):
                 seen = set()
                 for vR, vZ in L:
+                    vZ = -vZ if flipZ else vZ
                     ang = round(np.arctan2(vZ, vR) % np.pi, 6)   # dedupe +-v lines
                     if ang in seen:
                         continue
                     seen.add(ang)
-                    ax.axline((R_xp, Z_xp), (R_xp + vR, Z_xp + vZ),
+                    ax.axline((R0, Z0), (R0 + vR, Z0 + vZ),
                               color='k', lw=leg_lw, alpha=leg_alpha, zorder=leg_zorder)
+
+            if fp0.shape[0] > 1:            # top X-point: directions as-is
+                _draw_legs(fp0[1, 0], fp0[1, 1], flipZ=False)
+            if fp0.shape[0] > 2:            # bottom X-point: stellsym-reflected dirs
+                _draw_legs(fp0[2, 0], fp0[2, 1], flipZ=True)
 
 
 for i, ax in enumerate(axes.flat):
@@ -104,24 +114,30 @@ axes[0, 0].set_ylim([-0.5, 0.5])
 for ax in axes[-1, :]: ax.set_xlabel('R')
 for ax in axes[:, 0]:  ax.set_ylabel('Z')
 
-# Zoom inset on the X-point in every phi panel to reveal the fixed-point structure.
+# Zoom insets on the X-points in every phi panel to reveal the fixed-point
+# structure: top X-point box top-right, bottom (stellsym-partner) box bottom-right.
 ZOOM_HALF = 0.01
+
+def _add_zoom(ax, i, center, rect):
+    R0, Z0 = center
+    axins = ax.inset_axes(rect)
+    # In the zoom, draw the invariant lines prominently and on top of the dots.
+    draw_panel(axins, i, dot_size=1.0, leg_alpha=0.8, leg_lw=1.0, leg_zorder=5)
+    axins.set_xlim(R0 - ZOOM_HALF, R0 + ZOOM_HALF)
+    axins.set_ylim(Z0 - ZOOM_HALF, Z0 + ZOOM_HALF)
+    axins.set_aspect('equal')
+    axins.set_xticks([]); axins.set_yticks([])
+    ax.indicate_inset_zoom(axins, edgecolor='0.4', lw=0.8)
+
 for i, ax in enumerate(axes.flat):
     f_fp = p.parent / f"fixed_points_{i}.txt"
     if not os.path.exists(f_fp):
         continue
     fp = np.atleast_2d(np.loadtxt(f_fp, delimiter=',', skiprows=1))
-    if fp.shape[0] < 2:
-        continue
-    R_xp, Z_xp = fp[1, 0], fp[1, 1]
-    axins = ax.inset_axes([0.66, 0.66, 0.32, 0.32])
-    # In the zoom, draw the invariant lines prominently and on top of the dots.
-    draw_panel(axins, i, dot_size=1.0, leg_alpha=0.8, leg_lw=1.0, leg_zorder=5)
-    axins.set_xlim(R_xp - ZOOM_HALF, R_xp + ZOOM_HALF)
-    axins.set_ylim(Z_xp - ZOOM_HALF, Z_xp + ZOOM_HALF)
-    axins.set_aspect('equal')
-    axins.set_xticks([]); axins.set_yticks([])
-    ax.indicate_inset_zoom(axins, edgecolor='0.4', lw=0.8)
+    if fp.shape[0] > 1:                                              # top X-point
+        _add_zoom(ax, i, (fp[1, 0], fp[1, 1]), [0.66, 0.66, 0.32, 0.32])
+    if fp.shape[0] > 2:                                              # bottom X-point
+        _add_zoom(ax, i, (fp[2, 0], fp[2, 1]), [0.66, 0.02, 0.32, 0.32])
 
 h, l = [], []
 for a in axes.flat:

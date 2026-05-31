@@ -516,7 +516,7 @@ if comm_world is None or comm_world.rank == 0:
 
 print("running the integration now...")
 def trace_fieldlines(bfield, g0, legs):
-    tmax_fl = 1e5
+    tmax_fl = 2e5
     t1 = time.time()
 
     n_stable = sum(1 for leg in legs if leg['stable'])
@@ -562,7 +562,7 @@ def trace_fieldlines(bfield, g0, legs):
             phis = np.linspace(0, 0.25, 9)*2*np.pi
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
                 tt*sign*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
-                phis=phis, stopping_criteria=[IterationStoppingCriterion(int(1e5))])
+                phis=phis, stopping_criteria=[IterationStoppingCriterion(int(2e5))])
             proc0_print(f"  {time.time()-t1:.1f}s, hits/seed: " +' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 
             if comm_world is None or comm_world.rank == 0:
@@ -575,7 +575,7 @@ def trace_fieldlines(bfield, g0, legs):
                     np.savetxt(OUT_DIR+f'poincare_{xp}_{i}_{k}.txt', data_this_phi, comments='', delimiter=',')
 
 
-def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=1e5):
+def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
     """Seed field lines along the line from the magnetic axis to the X-point to
     fill the interior volume (nested flux surfaces inside the separatrix).
     Writes poincare_interior_{i}.txt, which plot_manifolds.py reads."""
@@ -591,7 +591,7 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=1e5):
     phis = np.linspace(0, 0.25, 9) * 2 * np.pi
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         bfield, R0, Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
-        phis=phis, stopping_criteria=[IterationStoppingCriterion(int(1e5))])
+        phis=phis, stopping_criteria=[IterationStoppingCriterion(int(2e5))])
     proc0_print(f"  interior {time.time()-t1:.1f}s, hits/seed: " +
                 ' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 
@@ -650,8 +650,16 @@ def extract_vessel_cross_sections(sdf, nR=200, nZ=200):
 
 
 def save_fixed_points(axis_curve, xp_curve):
-    """Magnetic-axis and X-point (R, Z) at each manifold phi (row0=axis, row1=xpoint).
-    A phi's file is written only when both evaluate_at_phi calls succeed."""
+    """Magnetic-axis and X-point (R, Z) at each manifold phi.
+    row0=axis, row1=xpoint (top), row2=stellsym partner (bottom) when computable.
+
+    The two X-points are a stellarator-symmetry pair: the field is invariant
+    under (R, phi, Z) -> (R, -phi, -Z), so the bottom X-point's crossing at +phi
+    equals the top X-point field line evaluated at -phi with Z negated. This is
+    exact at every phi (not just the symmetry planes phi/2pi = 0, 0.25).
+
+    A phi's file is written only when the axis + top evaluate_at_phi succeed; the
+    bottom row is appended only when its evaluate_at_phi also succeeds."""
     phis = np.linspace(0, 0.25, 9)
     for ii, phi in enumerate(phis):
         a_xyz, a_ok = evaluate_at_phi(axis_curve, phi)
@@ -659,10 +667,16 @@ def save_fixed_points(axis_curve, xp_curve):
         if not (a_ok and x_ok):
             proc0_print(f"  fixed_points: evaluate_at_phi failed at phi/2pi={phi:.4f}; skipping")
             continue
-        rows = np.array([[np.hypot(a_xyz[0], a_xyz[1]), a_xyz[2]],
-                         [np.hypot(x_xyz[0], x_xyz[1]), x_xyz[2]]])
-        np.savetxt(OUT_DIR + f'fixed_points_{ii}.txt', rows, delimiter=',',
-                   comments='', header='R,Z (row0=axis, row1=xpoint)')
+        rows = [[np.hypot(a_xyz[0], a_xyz[1]), a_xyz[2]],
+                [np.hypot(x_xyz[0], x_xyz[1]), x_xyz[2]]]
+        # bottom X-point = stellsym image: top curve at -phi, with Z negated.
+        b_xyz, b_ok = evaluate_at_phi(xp_curve, -phi)
+        if b_ok:
+            rows.append([np.hypot(b_xyz[0], b_xyz[1]), -b_xyz[2]])
+        else:
+            proc0_print(f"  fixed_points: bottom evaluate_at_phi failed at phi/2pi={phi:.4f}")
+        np.savetxt(OUT_DIR + f'fixed_points_{ii}.txt', np.array(rows), delimiter=',',
+                   comments='', header='R,Z (row0=axis, row1=xpoint top, row2=xpoint bottom)')
 
 
 if comm_world is None or comm_world.rank == 0:
