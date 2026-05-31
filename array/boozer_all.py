@@ -418,7 +418,7 @@ if null_type == 'DN':
 # fresh perturbation is drawn, repeating until all three converge to a
 # non-self-intersecting state. A generous cap turns a pathological case into a
 # task failure rather than an indefinite hang.
-PERTURB_STD = 0.01           # metres (1 cm)
+PERTURB_STD = 0.005 if null_type == 'SN' else 0.01   # metres (SN: 0.5 cm, DN: 1 cm)
 PERTURB_ORDERS = (0, 1, 2)   # Fourier harmonics to perturb
 MAX_PERTURB_TRIES = 100
 pert_rng = np.random.default_rng(DEVICE_ID)
@@ -507,7 +507,11 @@ for _ktry in range(MAX_PERTURB_TRIES):
         print(f"perturbation converged after {_ktry + 1} tr{'y' if _ktry == 0 else 'ies'}")
         _perturb_solved = True
         break
-    print(f"perturbation try {_ktry}: failed (non-convergence or self-intersection), resampling")
+    # Shrink the perturbation on failure so subsequent resamples are gentler and
+    # more likely to converge (_apply_perturbation reads PERTURB_STD each call).
+    PERTURB_STD = PERTURB_STD / 2.0
+    print(f"perturbation try {_ktry}: failed (non-convergence or self-intersection); "
+          f"halving std to {PERTURB_STD:.2e} and resampling")
 
 if not _perturb_solved:
     raise RuntimeError(
