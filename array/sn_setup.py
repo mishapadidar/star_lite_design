@@ -181,24 +181,25 @@ def make_bottom_xpoint(top_xpoint, new_coils, options=None):
     """Build the bottom X-point as its OWN field line.
 
     At initialization the device is stellsym, so the bottom X-point is the
-    stellarator-symmetric image of the top: bottom(phi) = [X,-Y,-Z] of top(-phi).
-    We realize this by transforming the top gamma with [X,-Y,-Z] and reversing
-    the sample order (the flip/roll): [X,-Y,-Z] (a rotation by pi about X)
-    reverses the toroidal sense, so reversing the samples restores a forward
-    parametrization whose gammadash aligns with B (verified: this gives a
-    field-line residual ~1e-14, matching the top; the un-reversed order gives
-    O(1) residual and the Newton solve diverges). A new
-    CurveXYZFourierSymmetries (stellsym=False) is least-squares fit to those
-    points, wrapped on the rebuilt coil field, and solved.
+    stellarator-symmetric image of the top: bottom(t) = [X,-Y,-Z] of top(-t).
+    [X,-Y,-Z] (a rotation by pi about X) flips the toroidal sense, so we
+    evaluate the top curve at the NEGATED parameter (period 1) and transform.
+    Evaluating continuously at -t (rather than reversing the samples) gives a
+    forward-oriented field line (gammadash // B, so the Newton solve converges;
+    verified residual ~1e-14) AND keeps g(0) on the y=0 plane -- because
+    top(0) is on y=0, so is [X,-Y,-Z]*top(0). That matches the stellsym=False
+    gauge (gamma[0,1]=0), so the solve does not have to roll the parametrization.
+    (Negating at period 1/nfp instead would give the wrong parametrization,
+    residual O(1).)
 
     The transform is applied ONLY here (initialization). The returned
     PeriodicFieldLine re-solves each evaluation, so once the optimizer breaks
     up-down symmetry it tracks the device's ACTUAL bottom X-point."""
     top = top_xpoint.curve
-    G = top.gamma()
-    target = G[::-1] * np.array([1.0, -1.0, -1.0])
+    qp = top.quadpoints
+    target = top.gamma_pure(top.x, (-qp) % 1.0) * np.array([1.0, -1.0, -1.0])
     new_curve = CurveXYZFourierSymmetries(
-        top.quadpoints, top.order, top.nfp, False, ntor=top.ntor)
+        qp, top.order, top.nfp, False, ntor=top.ntor)
     new_curve.least_squares_fit(target)
     pfl = PeriodicFieldLine(BiotSavart(new_coils), new_curve,
                             options=dict(options) if options else dict(_FL_OPTIONS))
