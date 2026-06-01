@@ -473,6 +473,9 @@ boozer_surface = boozer_surfaces[0]
 # the full nfp=2 field period [0, 0.5]. DN keeps the half-period [0, 0.25].
 PHI_MAX = 0.25 if boozer_surface.surface.stellsym else 0.5
 NPHI = 9
+# SN is non-stellsym, so the "bottom" X-point is NOT the Z-mirror of the top:
+# only trace/record the top X-point (the mirror-based bottom would be wrong).
+is_sn = not boozer_surface.surface.stellsym
 
 # convert to RZFourier
 order=16
@@ -533,6 +536,7 @@ def trace_fieldlines(bfield, g0, legs):
                 f"({len(legs) - n_stable} unstable, {n_stable} stable)")
 
     nmanif=10
+    nmanif_hyper=30   # more seeds for the hyperbolic fundamental domain (pyoculus uses ~30)
     #r_vals  = np.geomspace(1e-4, 5e-2, nmanif)   # multi-radius seeding
     for k, leg in enumerate(legs):
         rad = leg['c']
@@ -542,11 +546,12 @@ def trace_fieldlines(bfield, g0, legs):
         if lam is not None and np.isfinite(lam) and abs(lam) not in (0.0, 1.0):
             # Hyperbolic: the map r -> lambda r is a translation in u = log r, so
             # the invariant seeding is uniform in log r (geomspace) over one
-            # fundamental domain [r_max/|lambda|, r_max]. (det M = 1 => the
-            # backward-traced stable leg expands by 1/|lambda_s| = |lambda_u|.)
+            # fundamental domain [eps0/|lambda|, eps0]. Like pyoculus, anchor at
+            # eps0 = 1 mm near the X-point (instead of the old 5 cm). (det M = 1
+            # => the backward-traced stable leg expands by 1/|lambda_s| = |lambda_u|.)
             ratio = abs(lam) if abs(lam) > 1.0 else 1.0 / abs(lam)
-            r_min = max(r_max / ratio, 1e-4)
-            r_vals = np.geomspace(r_min, r_max, nmanif)
+            eps0 = 1e-3
+            r_vals = np.geomspace(eps0 / ratio, eps0, nmanif_hyper)
         elif np.isfinite(rad) and abs(rad) > 1e-30:
             # Snowflake/parabolic: quadratic drift r -> r + 1/2 c r^2. This map is
             # a translation in u = 1/r, so the invariant seeding is uniform in
@@ -566,7 +571,7 @@ def trace_fieldlines(bfield, g0, legs):
         R0 = np.sqrt(g0[0]**2 + g0[1]**2) + r_vals * v2[0]
         Z0 = g0[2] + r_vals * v2[1]
 
-        for xp in ['top', 'bot']:
+        for xp in (['top'] if is_sn else ['top', 'bot']):
             tt = sign * (1.0 if xp == 'top' else -1.0)
             phis = np.linspace(0, PHI_MAX, NPHI)*2*np.pi
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
@@ -662,13 +667,14 @@ def save_fixed_points(axis_curve, xp_curve):
     """Magnetic-axis and X-point (R, Z) at each manifold phi.
     row0=axis, row1=xpoint (top), row2=stellsym partner (bottom) when computable.
 
-    The two X-points are a stellarator-symmetry pair: the field is invariant
-    under (R, phi, Z) -> (R, -phi, -Z), so the bottom X-point's crossing at +phi
-    equals the top X-point field line evaluated at -phi with Z negated. This is
-    exact at every phi (not just the symmetry planes phi/2pi = 0, 0.25).
+    For DN the two X-points are a stellarator-symmetry pair: the field is
+    invariant under (R, phi, Z) -> (R, -phi, -Z), so the bottom X-point's crossing
+    at +phi equals the top X-point field line evaluated at -phi with Z negated.
+    For SN this no longer holds (not stellsym), so the bottom row is omitted and
+    only the top X-point is recorded.
 
     A phi's file is written only when the axis + top evaluate_at_phi succeed; the
-    bottom row is appended only when its evaluate_at_phi also succeeds."""
+    bottom row is appended (DN only) when its evaluate_at_phi also succeeds."""
     phis = np.linspace(0, PHI_MAX, NPHI)
     for ii, phi in enumerate(phis):
         a_xyz, a_ok = evaluate_at_phi(axis_curve, phi)
@@ -678,12 +684,13 @@ def save_fixed_points(axis_curve, xp_curve):
             continue
         rows = [[np.hypot(a_xyz[0], a_xyz[1]), a_xyz[2]],
                 [np.hypot(x_xyz[0], x_xyz[1]), x_xyz[2]]]
-        # bottom X-point = stellsym image: top curve at -phi, with Z negated.
-        b_xyz, b_ok = evaluate_at_phi(xp_curve, -phi)
-        if b_ok:
-            rows.append([np.hypot(b_xyz[0], b_xyz[1]), -b_xyz[2]])
-        else:
-            proc0_print(f"  fixed_points: bottom evaluate_at_phi failed at phi/2pi={phi:.4f}")
+        # bottom X-point = stellsym image (DN only): top curve at -phi, Z negated.
+        if not is_sn:
+            b_xyz, b_ok = evaluate_at_phi(xp_curve, -phi)
+            if b_ok:
+                rows.append([np.hypot(b_xyz[0], b_xyz[1]), -b_xyz[2]])
+            else:
+                proc0_print(f"  fixed_points: bottom evaluate_at_phi failed at phi/2pi={phi:.4f}")
         np.savetxt(OUT_DIR + f'fixed_points_{ii}.txt', np.array(rows), delimiter=',',
                    comments='', header='R,Z (row0=axis, row1=xpoint top, row2=xpoint bottom)')
 
