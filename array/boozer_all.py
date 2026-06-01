@@ -584,10 +584,15 @@ def callback(dofs):
     console.print(table1)
 
     console = Console(width=250)
-    table1 = Table(expand=False, show_header=False)
-    table1.add_row(*[f"{v}" for v in penalties.keys()])
-    table1.add_row(*[f"{v.J():.4e}" for v in penalties.values()])
-    console.print(table1)
+    # Split the penalties over two stacked tables so the many columns don't get
+    # truncated ("…") to fit the console width.
+    pen_items = list(penalties.items())
+    half = (len(pen_items) + 1) // 2
+    for chunk in (pen_items[:half], pen_items[half:]):
+        table1 = Table(expand=False, show_header=False)
+        table1.add_row(*[k for k, _ in chunk])
+        table1.add_row(*[f"{v.J():.4e}" for _, v in chunk])
+        console.print(table1)
     
     table2 = Table(expand=False, show_header=False) 
     for k in states.keys():
