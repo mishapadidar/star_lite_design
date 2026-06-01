@@ -37,6 +37,7 @@ from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, 
 
 import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
+from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
 
 
 parser = argparse.ArgumentParser()
@@ -330,6 +331,21 @@ if null_type == 'SN':
 else:
     BOTTOM_XPOINT_SURFACE_WEIGHT = Weight(0.0)
 
+# Coil-clearance inequality constraint (SN only): the BOTTOM X-point must stay
+# at least BOTTOM_XPOINT_COIL_THRESHOLD (6 cm) away from the coils.
+J_bot_coil = None
+bot_coil_penalties = []
+if null_type == 'SN':
+    config['BOTTOM_XPOINT_COIL_THRESHOLD'] = 0.06
+    config['BOTTOM_XPOINT_COIL_WEIGHT'] = 1e3
+    BOTTOM_XPOINT_COIL_THRESHOLD = config['BOTTOM_XPOINT_COIL_THRESHOLD']
+    BOTTOM_XPOINT_COIL_WEIGHT = Weight(config['BOTTOM_XPOINT_COIL_WEIGHT'])
+    bot_coil_penalties = [CurvesPeriodicFieldlineDistance(curves, bx, BOTTOM_XPOINT_COIL_THRESHOLD)
+                          for bx in bottom_xpoints]
+    J_bot_coil = sum(bot_coil_penalties)
+else:
+    BOTTOM_XPOINT_COIL_WEIGHT = Weight(0.0)
+
 # sum the objectives together
 JF = (J_nonQSRatio 
     + MONODROMY_WEIGHT * J_monodromy 
@@ -351,9 +367,11 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     )
 
-# X-point-to-surface term (SN only).
+# X-point-to-surface and X-point-to-coil terms (SN only).
 if J_bot_surf is not None:
     JF = JF + BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
+if J_bot_coil is not None:
+    JF = JF + BOTTOM_XPOINT_COIL_WEIGHT * J_bot_coil
 
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -377,6 +395,8 @@ penalties = {'nonQS': J_nonQSRatio,
         }
 if J_bot_surf is not None:
     penalties['bottom xpoint-surface'] = BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
+if J_bot_coil is not None:
+    penalties['bottom xpoint-coil'] = BOTTOM_XPOINT_COIL_WEIGHT * J_bot_coil
 
 states = {
         'iotas': IOTAS_LIST,
@@ -608,11 +628,14 @@ def callback(dofs):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     table2.add_row('minimum X-point-to-vessel distance', f'{min_xpoint_to_vessel:.3e}')
     table2.add_row('minimum Boozer surface-to-vessel distance', f'{min_boozer_surface_to_vessel:.3e}')
-    # X-point-to-surface distance (SN): bottom must stay beyond threshold
-    # (min dist / closest approach).
+    # X-point-to-surface and X-point-to-coil distances (SN): bottom must stay
+    # beyond each threshold (closest approach).
     if bot_surf_penalties:
         table2.add_row('bottom X-point-surface min dist',
                        ' '.join([f'{p.min_distance():.3e}' for p in bot_surf_penalties]))
+    if bot_coil_penalties:
+        table2.add_row('bottom X-point-coil min dist',
+                       ' '.join([f'{p.shortest_distance():.3e}' for p in bot_coil_penalties]))
     
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     min_coil_clearance_distance, _, _ = J_coil_clearance.shortest_distance()
@@ -881,12 +904,18 @@ for j in range(10):
     # (its closest approach > threshold). Relative violation vs the threshold;
     # escalate the weight until satisfied to 0.1%.
     bot_surf_err = 0.
+    bot_coil_err = 0.
     if null_type == 'SN':
         bot_surf_err = max(max(XPOINT_SURFACE_THRESHOLD - p.min_distance(), 0.) / XPOINT_SURFACE_THRESHOLD
                            for p in bot_surf_penalties)
         if bot_surf_err > 0.001 and BOTTOM_XPOINT_SURFACE_WEIGHT.value != 0.:
             BOTTOM_XPOINT_SURFACE_WEIGHT *= 10
             print("BOTTOM XPOINT-SURFACE ERROR", bot_surf_err)
+        bot_coil_err = max(max(BOTTOM_XPOINT_COIL_THRESHOLD - p.shortest_distance(), 0.) / BOTTOM_XPOINT_COIL_THRESHOLD
+                           for p in bot_coil_penalties)
+        if bot_coil_err > 0.001 and BOTTOM_XPOINT_COIL_WEIGHT.value != 0.:
+            BOTTOM_XPOINT_COIL_WEIGHT *= 10
+            print("BOTTOM XPOINT-COIL ERROR", bot_coil_err)
 
     sdf.to_vtk(OUT_DIR + f'vessel_opt_{j}', nx=40, ny=40, nz=40)
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
