@@ -314,29 +314,20 @@ tmos = [TangentMap(xp, BiotSavart(boozer_surface.biotsavart.coils), MONODROMY_TH
 MONODROMY_LIST = [Monodromy(tmo) for tmo in tmos]
 J_monodromy = sum(MONODROMY_LIST) # target rotational transform is that computed on the initial surface
 
-# X-point-to-surface inequality constraints (SN only): the TOP X-point must stay
-# WITHIN XPOINT_SURFACE_THRESHOLD (10 cm) of its Boozer surface (kind='max'),
-# while the BOTTOM X-point must stay FURTHER than XPOINT_SURFACE_THRESHOLD away
-# from the surface (kind='min'). One penalty per configuration.
-J_top_surf = None
+# X-point-to-surface inequality constraint (SN only): the BOTTOM X-point must
+# stay at least XPOINT_SURFACE_THRESHOLD (10 cm) AWAY from its Boozer surface
+# (kind='min'). One penalty per configuration.
 J_bot_surf = None
-top_surf_penalties = []
 bot_surf_penalties = []
 if null_type == 'SN':
     config['XPOINT_SURFACE_THRESHOLD'] = 0.10
-    config['TOP_XPOINT_SURFACE_WEIGHT'] = 1e-1
     config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = 1e-1
     XPOINT_SURFACE_THRESHOLD = config['XPOINT_SURFACE_THRESHOLD']
-    TOP_XPOINT_SURFACE_WEIGHT = Weight(config['TOP_XPOINT_SURFACE_WEIGHT'])
     BOTTOM_XPOINT_SURFACE_WEIGHT = Weight(config['BOTTOM_XPOINT_SURFACE_WEIGHT'])
-    top_surf_penalties = [XpointSurfaceDistance(xp, bsurf, XPOINT_SURFACE_THRESHOLD, kind='max')
-                          for xp, bsurf in zip(xpoints, boozer_surfaces)]
     bot_surf_penalties = [XpointSurfaceDistance(bx, bsurf, XPOINT_SURFACE_THRESHOLD, kind='min')
                           for bx, bsurf in zip(bottom_xpoints, boozer_surfaces)]
-    J_top_surf = sum(top_surf_penalties)
     J_bot_surf = sum(bot_surf_penalties)
 else:
-    TOP_XPOINT_SURFACE_WEIGHT = Weight(0.0)
     BOTTOM_XPOINT_SURFACE_WEIGHT = Weight(0.0)
 
 # sum the objectives together
@@ -360,9 +351,9 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     )
 
-# X-point-to-surface terms (SN only).
-if J_top_surf is not None:
-    JF = JF + TOP_XPOINT_SURFACE_WEIGHT * J_top_surf + BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
+# X-point-to-surface term (SN only).
+if J_bot_surf is not None:
+    JF = JF + BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
 
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -384,8 +375,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'fieldline mean dist':FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance,
         'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
         }
-if J_top_surf is not None:
-    penalties['top xpoint-surface'] = TOP_XPOINT_SURFACE_WEIGHT * J_top_surf
+if J_bot_surf is not None:
     penalties['bottom xpoint-surface'] = BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
 
 states = {
@@ -609,11 +599,9 @@ def callback(dofs):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     table2.add_row('minimum X-point-to-vessel distance', f'{min_xpoint_to_vessel:.3e}')
     table2.add_row('minimum Boozer surface-to-vessel distance', f'{min_boozer_surface_to_vessel:.3e}')
-    # X-point-to-surface distances (SN): top must be within threshold (max dist),
-    # bottom must be beyond threshold (min dist / closest approach).
-    if top_surf_penalties:
-        table2.add_row('top X-point-surface max dist',
-                       ' '.join([f'{p.max_distance():.3e}' for p in top_surf_penalties]))
+    # X-point-to-surface distance (SN): bottom must stay beyond threshold
+    # (min dist / closest approach).
+    if bot_surf_penalties:
         table2.add_row('bottom X-point-surface min dist',
                        ' '.join([f'{p.min_distance():.3e}' for p in bot_surf_penalties]))
     
@@ -880,20 +868,13 @@ for j in range(10):
         MONODROMY_WEIGHT*=10
         print("MONODROMY ERROR", monodromy_err)
 
-    # SN X-point-to-surface constraints: top must stay WITHIN threshold (its max
-    # nearest-surface distance < threshold), bottom must stay BEYOND threshold
+    # SN X-point-to-surface constraint: the bottom must stay BEYOND threshold
     # (its closest approach > threshold). Relative violation vs the threshold;
-    # escalate each weight until satisfied to 0.1%.
-    top_surf_err = 0.
+    # escalate the weight until satisfied to 0.1%.
     bot_surf_err = 0.
     if null_type == 'SN':
-        top_surf_err = max(max(p.max_distance() - XPOINT_SURFACE_THRESHOLD, 0.) / XPOINT_SURFACE_THRESHOLD
-                           for p in top_surf_penalties)
         bot_surf_err = max(max(XPOINT_SURFACE_THRESHOLD - p.min_distance(), 0.) / XPOINT_SURFACE_THRESHOLD
                            for p in bot_surf_penalties)
-        if top_surf_err > 0.001 and TOP_XPOINT_SURFACE_WEIGHT.value != 0.:
-            TOP_XPOINT_SURFACE_WEIGHT *= 10
-            print("TOP XPOINT-SURFACE ERROR", top_surf_err)
         if bot_surf_err > 0.001 and BOTTOM_XPOINT_SURFACE_WEIGHT.value != 0.:
             BOTTOM_XPOINT_SURFACE_WEIGHT *= 10
             print("BOTTOM XPOINT-SURFACE ERROR", bot_surf_err)
@@ -925,7 +906,6 @@ for j in range(10):
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
     config['MONODROMY_WEIGHT'] = MONODROMY_WEIGHT.value
     if null_type == 'SN':
-        config['TOP_XPOINT_SURFACE_WEIGHT'] = TOP_XPOINT_SURFACE_WEIGHT.value
         config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = BOTTOM_XPOINT_SURFACE_WEIGHT.value
 
     # Save to YAML
@@ -977,14 +957,10 @@ for ti, d in enumerate(tmos):
         for b in range(2):
             final_metrics[f'monodromy_M{a}{b}_idx{ti}'] = (float(Mm[a, b]), None, None)
 
-# X-point-to-surface distances (SN only): top within threshold (max distance),
-# bottom beyond threshold (closest approach), with relative violations.
+# X-point-to-surface distance (SN only): bottom beyond threshold (closest
+# approach), with relative violation.
 if null_type == 'SN':
-    top_max = max(p.max_distance() for p in top_surf_penalties)
     bot_min = min(p.min_distance() for p in bot_surf_penalties)
-    final_metrics['top_xpoint_surface_maxdist'] = (
-        top_max, XPOINT_SURFACE_THRESHOLD,
-        max(top_max - XPOINT_SURFACE_THRESHOLD, 0.) / XPOINT_SURFACE_THRESHOLD)
     final_metrics['bottom_xpoint_surface_mindist'] = (
         bot_min, XPOINT_SURFACE_THRESHOLD,
         max(XPOINT_SURFACE_THRESHOLD - bot_min, 0.) / XPOINT_SURFACE_THRESHOLD)
