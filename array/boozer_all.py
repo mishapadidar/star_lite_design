@@ -36,6 +36,7 @@ from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 
 import sn_setup
+from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
 
 
 parser = argparse.ArgumentParser()
@@ -313,21 +314,30 @@ tmos = [TangentMap(xp, BiotSavart(boozer_surface.biotsavart.coils), MONODROMY_TH
 MONODROMY_LIST = [Monodromy(tmo) for tmo in tmos]
 J_monodromy = sum(MONODROMY_LIST) # target rotational transform is that computed on the initial surface
 
-# Bottom X-point band (SN only): keep each bottom X-point field line between
-# BOTTOM_XPOINT_MIN (1 cm) and BOTTOM_XPOINT_MAX (5 cm) inside the vessel. The
-# top X-point's "stay inside" constraint is already in J_plasma_to_vessel_margin.
-J_bottom_xpoint = None
+# X-point-to-surface inequality constraints (SN only): the TOP X-point must stay
+# WITHIN XPOINT_SURFACE_THRESHOLD (10 cm) of its Boozer surface (kind='max'),
+# while the BOTTOM X-point must stay FURTHER than XPOINT_SURFACE_THRESHOLD away
+# from the surface (kind='min'). One penalty per configuration.
+J_top_surf = None
+J_bot_surf = None
+top_surf_penalties = []
+bot_surf_penalties = []
 if null_type == 'SN':
-    config['BOTTOM_XPOINT_MIN'] = 0.01
-    config['BOTTOM_XPOINT_MAX'] = 0.05
-    config['BOTTOM_XPOINT_WEIGHT'] = 1e-1
-    BOTTOM_XPOINT_MIN = config['BOTTOM_XPOINT_MIN']
-    BOTTOM_XPOINT_MAX = config['BOTTOM_XPOINT_MAX']
-    BOTTOM_XPOINT_WEIGHT = Weight(config['BOTTOM_XPOINT_WEIGHT'])
-    J_bottom_xpoint = sn_setup.bottom_xpoint_vessel_penalty(
-        sdf, bottom_xpoints, BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX)
+    config['XPOINT_SURFACE_THRESHOLD'] = 0.10
+    config['TOP_XPOINT_SURFACE_WEIGHT'] = 1e-1
+    config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = 1e-1
+    XPOINT_SURFACE_THRESHOLD = config['XPOINT_SURFACE_THRESHOLD']
+    TOP_XPOINT_SURFACE_WEIGHT = Weight(config['TOP_XPOINT_SURFACE_WEIGHT'])
+    BOTTOM_XPOINT_SURFACE_WEIGHT = Weight(config['BOTTOM_XPOINT_SURFACE_WEIGHT'])
+    top_surf_penalties = [XpointSurfaceDistance(xp, bsurf, XPOINT_SURFACE_THRESHOLD, kind='max')
+                          for xp, bsurf in zip(xpoints, boozer_surfaces)]
+    bot_surf_penalties = [XpointSurfaceDistance(bx, bsurf, XPOINT_SURFACE_THRESHOLD, kind='min')
+                          for bx, bsurf in zip(bottom_xpoints, boozer_surfaces)]
+    J_top_surf = sum(top_surf_penalties)
+    J_bot_surf = sum(bot_surf_penalties)
 else:
-    BOTTOM_XPOINT_WEIGHT = Weight(0.0)
+    TOP_XPOINT_SURFACE_WEIGHT = Weight(0.0)
+    BOTTOM_XPOINT_SURFACE_WEIGHT = Weight(0.0)
 
 # sum the objectives together
 JF = (J_nonQSRatio 
@@ -350,9 +360,9 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     )
 
-# Bottom X-point band term (SN only).
-if J_bottom_xpoint is not None:
-    JF = JF + BOTTOM_XPOINT_WEIGHT * J_bottom_xpoint
+# X-point-to-surface terms (SN only).
+if J_top_surf is not None:
+    JF = JF + TOP_XPOINT_SURFACE_WEIGHT * J_top_surf + BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
 
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -374,8 +384,9 @@ penalties = {'nonQS': J_nonQSRatio,
         'fieldline mean dist':FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance,
         'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
         }
-if J_bottom_xpoint is not None:
-    penalties['bottom xpoint'] = BOTTOM_XPOINT_WEIGHT * J_bottom_xpoint
+if J_top_surf is not None:
+    penalties['top xpoint-surface'] = TOP_XPOINT_SURFACE_WEIGHT * J_top_surf
+    penalties['bottom xpoint-surface'] = BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
 
 states = {
         'iotas': IOTAS_LIST,
@@ -593,11 +604,13 @@ def callback(dofs):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     table2.add_row('minimum X-point-to-vessel distance', f'{min_xpoint_to_vessel:.3e}')
     table2.add_row('minimum Boozer surface-to-vessel distance', f'{min_boozer_surface_to_vessel:.3e}')
-    # bottom X-point inward depth [min, max] per xpoint (target band [BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX]).
-    if bottom_xpoints is not None:
-        _bot_inw = [-np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0)) for bx in bottom_xpoints]
-        table2.add_row('bottom X-point inward dist [min,max]',
-                       ' '.join([f'[{a.min():.3e}, {a.max():.3e}]' for a in _bot_inw]))
+    # X-point-to-surface distances (SN): top must be within threshold (max dist),
+    # bottom must be beyond threshold (min dist / closest approach).
+    if top_surf_penalties:
+        table2.add_row('top X-point-surface max dist',
+                       ' '.join([f'{p.max_distance():.3e}' for p in top_surf_penalties]))
+        table2.add_row('bottom X-point-surface min dist',
+                       ' '.join([f'{p.min_distance():.3e}' for p in bot_surf_penalties]))
     
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     min_coil_clearance_distance, _, _ = J_coil_clearance.shortest_distance()
@@ -862,19 +875,23 @@ for j in range(10):
         MONODROMY_WEIGHT*=10
         print("MONODROMY ERROR", monodromy_err)
 
-    # SN bottom X-point band: inward depth of every bottom field-line point must
-    # lie in [BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX]. Relative violation vs the
-    # respective bound; escalate the weight until satisfied to 0.1%.
-    bottom_err = 0.
+    # SN X-point-to-surface constraints: top must stay WITHIN threshold (its max
+    # nearest-surface distance < threshold), bottom must stay BEYOND threshold
+    # (its closest approach > threshold). Relative violation vs the threshold;
+    # escalate each weight until satisfied to 0.1%.
+    top_surf_err = 0.
+    bot_surf_err = 0.
     if null_type == 'SN':
-        for bx in bottom_xpoints:
-            inward = -np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0))
-            lo = max(BOTTOM_XPOINT_MIN - inward.min(), 0.) / BOTTOM_XPOINT_MIN
-            hi = max(inward.max() - BOTTOM_XPOINT_MAX, 0.) / BOTTOM_XPOINT_MAX
-            bottom_err = max(bottom_err, lo, hi)
-        if bottom_err > 0.001 and BOTTOM_XPOINT_WEIGHT.value != 0.:
-            BOTTOM_XPOINT_WEIGHT *= 10
-            print("BOTTOM XPOINT ERROR", bottom_err)
+        top_surf_err = max(max(p.max_distance() - XPOINT_SURFACE_THRESHOLD, 0.) / XPOINT_SURFACE_THRESHOLD
+                           for p in top_surf_penalties)
+        bot_surf_err = max(max(XPOINT_SURFACE_THRESHOLD - p.min_distance(), 0.) / XPOINT_SURFACE_THRESHOLD
+                           for p in bot_surf_penalties)
+        if top_surf_err > 0.001 and TOP_XPOINT_SURFACE_WEIGHT.value != 0.:
+            TOP_XPOINT_SURFACE_WEIGHT *= 10
+            print("TOP XPOINT-SURFACE ERROR", top_surf_err)
+        if bot_surf_err > 0.001 and BOTTOM_XPOINT_SURFACE_WEIGHT.value != 0.:
+            BOTTOM_XPOINT_SURFACE_WEIGHT *= 10
+            print("BOTTOM XPOINT-SURFACE ERROR", bot_surf_err)
 
     sdf.to_vtk(OUT_DIR + f'vessel_opt_{j}', nx=40, ny=40, nz=40)
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
@@ -903,7 +920,8 @@ for j in range(10):
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
     config['MONODROMY_WEIGHT'] = MONODROMY_WEIGHT.value
     if null_type == 'SN':
-        config['BOTTOM_XPOINT_WEIGHT'] = BOTTOM_XPOINT_WEIGHT.value
+        config['TOP_XPOINT_SURFACE_WEIGHT'] = TOP_XPOINT_SURFACE_WEIGHT.value
+        config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = BOTTOM_XPOINT_SURFACE_WEIGHT.value
 
     # Save to YAML
     with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
@@ -954,17 +972,17 @@ for ti, d in enumerate(tmos):
         for b in range(2):
             final_metrics[f'monodromy_M{a}{b}_idx{ti}'] = (float(Mm[a, b]), None, None)
 
-# bottom X-point band (SN only): achieved inward-depth range and the relative
-# band violation against [BOTTOM_XPOINT_MIN, BOTTOM_XPOINT_MAX].
+# X-point-to-surface distances (SN only): top within threshold (max distance),
+# bottom beyond threshold (closest approach), with relative violations.
 if null_type == 'SN':
-    inw_min = min(float((-np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0))).min())
-                  for bx in bottom_xpoints)
-    inw_max = max(float((-np.asarray(sdf.pure(bx.curve.gamma(), sdf.local_full_x, 1.0))).max())
-                  for bx in bottom_xpoints)
-    final_metrics['bottom_xpoint_inward_min'] = (
-        inw_min, BOTTOM_XPOINT_MIN, max(BOTTOM_XPOINT_MIN - inw_min, 0.) / BOTTOM_XPOINT_MIN)
-    final_metrics['bottom_xpoint_inward_max'] = (
-        inw_max, BOTTOM_XPOINT_MAX, max(inw_max - BOTTOM_XPOINT_MAX, 0.) / BOTTOM_XPOINT_MAX)
+    top_max = max(p.max_distance() for p in top_surf_penalties)
+    bot_min = min(p.min_distance() for p in bot_surf_penalties)
+    final_metrics['top_xpoint_surface_maxdist'] = (
+        top_max, XPOINT_SURFACE_THRESHOLD,
+        max(top_max - XPOINT_SURFACE_THRESHOLD, 0.) / XPOINT_SURFACE_THRESHOLD)
+    final_metrics['bottom_xpoint_surface_mindist'] = (
+        bot_min, XPOINT_SURFACE_THRESHOLD,
+        max(XPOINT_SURFACE_THRESHOLD - bot_min, 0.) / XPOINT_SURFACE_THRESHOLD)
 
 # write a human-readable summary
 with open(OUT_DIR + 'summary.txt', 'w') as f:

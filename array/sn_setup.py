@@ -21,7 +21,6 @@ from simsopt.geo import (CurveXYZFourier, CurveXYZFourierSymmetries, CurveLength
                          RotatedCurve, SurfaceXYZTensorFourier, BoozerSurface, Volume)
 
 from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
-from star_lite_design.utils.pillpipevessel import VesselDistance
 
 # Newton options used when (re)solving converted field lines / surfaces,
 # matching the settings boozer_all.py applies to the axis/X-point/surface.
@@ -113,23 +112,6 @@ def to_nonstellsym_fieldline(fieldline, new_coils, options=None):
                             options=dict(options) if options else dict(_FL_OPTIONS))
     pfl.run_code(CurveLength(new_curve).J())
     return pfl
-
-
-def bottom_xpoint_vessel_penalty(sdf, bottom_xpoints, min_dist=0.01, max_dist=0.05):
-    """Soft band constraint keeping each bottom X-point field line between
-    min_dist (1 cm) and max_dist (5 cm) INSIDE the vessel, i.e. inward depth in
-    [min_dist, max_dist]. Returns a single Optimizable = J_lower + J_upper.
-
-    Conventions (verified): inside <=> sdf<0, inward depth = -sdf.
-      >= min_dist inside : sign=-1, threshold=+min_dist  penalizes inward<min_dist
-      <= max_dist inside : sign=+1, threshold=-max_dist  penalizes inward>max_dist
-    Both terms are means over the bottom field-line points (re-solved each
-    evaluation, so the band tracks the actual bottom X-point)."""
-    bx = list(bottom_xpoints)
-    n = len(bx)
-    J_lower = VesselDistance(sdf, bx, np.array([-1.0] * n), float(min_dist))
-    J_upper = VesselDistance(sdf, bx, np.array([+1.0] * n), -float(max_dist))
-    return J_lower + J_upper
 
 
 def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints):
