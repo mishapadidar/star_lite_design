@@ -367,11 +367,14 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     )
 
-# X-point-to-surface and X-point-to-coil terms (SN only).
-if J_bot_surf is not None:
-    JF = JF + BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf
-if J_bot_coil is not None:
-    JF = JF + BOTTOM_XPOINT_COIL_WEIGHT * J_bot_coil
+# JF_base excludes the SN bottom-X-point penalties. For SN the ACTIVE objective
+# JF adds the bottom X-point-to-surface and X-point-to-coil penalties, and BFGS
+# defaults to it; once the X-point-surface penalty reaches 0 we switch back to
+# JF_base and stop tracking the bottom X-point (see the optimization loop).
+JF_base = JF
+track_bottom = (null_type == 'SN')
+if track_bottom:
+    JF = JF_base + BOTTOM_XPOINT_SURFACE_WEIGHT * J_bot_surf + BOTTOM_XPOINT_COIL_WEIGHT * J_bot_coil
 
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -630,10 +633,10 @@ def callback(dofs):
     table2.add_row('minimum Boozer surface-to-vessel distance', f'{min_boozer_surface_to_vessel:.3e}')
     # X-point-to-surface and X-point-to-coil distances (SN): bottom must stay
     # beyond each threshold (closest approach).
-    if bot_surf_penalties:
+    if bottom_xpoints is not None and bot_surf_penalties:
         table2.add_row('bottom X-point-surface min dist',
                        ' '.join([f'{p.min_distance():.3e}' for p in bot_surf_penalties]))
-    if bot_coil_penalties:
+    if bottom_xpoints is not None and bot_coil_penalties:
         table2.add_row('bottom X-point-coil min dist',
                        ' '.join([f'{p.shortest_distance():.3e}' for p in bot_coil_penalties]))
     
@@ -662,6 +665,13 @@ def callback(dofs):
     
     dat_dict["iter"] += 1
 
+    # Once the bottom X-point-to-surface penalty has reached 0 at an ACCEPTED
+    # step, break out of BFGS (caught in the loop) so we can drop the bottom
+    # penalties and stop tracking the bottom X-point. dat_dict['x'] was just
+    # updated to this accepted point, so the restart is consistent.
+    if track_bottom and float(J_bot_surf.J()) <= 0.0:
+        raise _XpointSurfaceSatisfied()
+
 def _restore_state():
     """Roll boozer surfaces, axis, xpoint curves, and JF dofs back to the
     last successful callback. Called after a failed fun() evaluation so the
@@ -683,6 +693,13 @@ def _restore_state():
         bx.res['length'] = res['length']
         bx.need_to_run_code = True
     JF.x = dat_dict['x']
+
+
+class _XpointSurfaceSatisfied(Exception):
+    """Raised inside the BFGS objective when the bottom X-point-to-surface
+    penalty reaches 0, to break out of the solver so the caller can drop the
+    bottom-X-point penalties and stop tracking the bottom X-point."""
+    pass
 
 
 def fun(dofs):
@@ -791,6 +808,16 @@ for j in range(10):
         res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
         dofs = res.x.copy()
         msg = res.message
+    except _XpointSurfaceSatisfied:
+        # Bottom X-point-surface penalty hit 0: drop both bottom-X-point penalties,
+        # switch BFGS to the base objective, and stop tracking the bottom X-point.
+        JF = JF_base
+        bottom_xpoints = None
+        track_bottom = False
+        penalties.pop('bottom xpoint-surface', None)
+        penalties.pop('bottom xpoint-coil', None)
+        dofs = dat_dict['x'].copy()
+        msg = 'XpointSurfaceDistance reached 0: dropped bottom X-point penalties, switched to base objective'
     except Exception as e:
         dofs = dat_dict['x'].copy()
         msg = f'caught exception: {e}, restarting from last successful callback.'
@@ -905,7 +932,7 @@ for j in range(10):
     # escalate the weight until satisfied to 0.1%.
     bot_surf_err = 0.
     bot_coil_err = 0.
-    if null_type == 'SN':
+    if null_type == 'SN' and bottom_xpoints is not None:
         bot_surf_err = max(max(XPOINT_SURFACE_THRESHOLD - p.min_distance(), 0.) / XPOINT_SURFACE_THRESHOLD
                            for p in bot_surf_penalties)
         if bot_surf_err > 0.001 and BOTTOM_XPOINT_SURFACE_WEIGHT.value != 0.:
@@ -998,7 +1025,7 @@ for ti, d in enumerate(tmos):
 
 # X-point-to-surface distance (SN only): bottom beyond threshold (closest
 # approach), with relative violation.
-if null_type == 'SN':
+if null_type == 'SN' and bottom_xpoints is not None:
     bot_min = min(p.min_distance() for p in bot_surf_penalties)
     final_metrics['bottom_xpoint_surface_mindist'] = (
         bot_min, XPOINT_SURFACE_THRESHOLD,
