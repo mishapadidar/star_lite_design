@@ -945,6 +945,7 @@ for j in range(10):
     config['MONODROMY_WEIGHT'] = MONODROMY_WEIGHT.value
     if null_type == 'SN':
         config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = BOTTOM_XPOINT_SURFACE_WEIGHT.value
+        config['BOTTOM_XPOINT_COIL_WEIGHT'] = BOTTOM_XPOINT_COIL_WEIGHT.value
 
     # Save to YAML
     with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
@@ -1002,6 +1003,10 @@ if null_type == 'SN':
     final_metrics['bottom_xpoint_surface_mindist'] = (
         bot_min, XPOINT_SURFACE_THRESHOLD,
         max(XPOINT_SURFACE_THRESHOLD - bot_min, 0.) / XPOINT_SURFACE_THRESHOLD)
+    bot_coil_min = min(p.shortest_distance() for p in bot_coil_penalties)
+    final_metrics['bottom_xpoint_coil_mindist'] = (
+        bot_coil_min, BOTTOM_XPOINT_COIL_THRESHOLD,
+        max(BOTTOM_XPOINT_COIL_THRESHOLD - bot_coil_min, 0.) / BOTTOM_XPOINT_COIL_THRESHOLD)
 
 # write a human-readable summary
 with open(OUT_DIR + 'summary.txt', 'w') as f:
