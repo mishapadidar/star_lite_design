@@ -453,6 +453,7 @@ axes_ref = [(ax, ax.curve.x.copy()) for ax in axes]
 xpoints_ref = [(xp, xp.curve.x.copy()) for xp in xpoints]
 surf_ref = [(bs, bs.surface.x.copy(), bs.res['iota'], bs.res['G'])
             for bs in boozer_surfaces]
+bottom_ref = [(bx, bx.curve.x.copy()) for bx in (bottom_xpoints or [])]
 
 
 def _restore_unperturbed():
@@ -467,6 +468,9 @@ def _restore_unperturbed():
     for bs, sref, _iota, _G in surf_ref:
         bs.surface.x = sref
         bs.need_to_run_code = True
+    for bx, xref in bottom_ref:
+        bx.curve.x = xref
+        bx.need_to_run_code = True
 
 
 def _apply_perturbation():
@@ -478,19 +482,24 @@ def _apply_perturbation():
 
 
 def _resolve_perturbed():
-    """Re-solve axis, X-point and Boozer surface with the perturbed coils.
-    Returns True iff all three converge and no surface self-intersects."""
+    """Re-solve axis, X-point, bottom X-point (SN) and Boozer surface with the
+    perturbed coils. Returns True iff all converge and no surface
+    self-intersects."""
     for ax, _ in axes_ref:
         ax.need_to_run_code = True
         ax.run_code(CurveLength(ax.curve).J())
     for xp, _ in xpoints_ref:
         xp.need_to_run_code = True
         xp.run_code(CurveLength(xp.curve).J())
+    for bx, _ in bottom_ref:
+        bx.need_to_run_code = True
+        bx.run_code(CurveLength(bx.curve).J())
     for bs, _s, iota, G in surf_ref:
         bs.need_to_run_code = True
         bs.run_code(iota, G)
     return (all(ax.res['success'] for ax in axes)
             and all(xp.res['success'] for xp in xpoints)
+            and all(bx.res['success'] for bx in (bottom_xpoints or []))
             and all(bs.res['success'] for bs in boozer_surfaces)
             and not any(bs.surface.is_self_intersecting() for bs in boozer_surfaces))
 
