@@ -670,6 +670,19 @@ def callback(dofs):
     # penalties and stop tracking the bottom X-point. dat_dict['x'] was just
     # updated to this accepted point, so the restart is consistent.
     if track_bottom and float(J_bot_surf.J()) <= 0.0:
+        # Snapshot the full state at the moment the bottom X-point is dropped.
+        # Filenames carry the "xpoint_deletion" tag, and the bottom X-point is
+        # included (in the xpoint VTK and the saved xpoints list) so it is
+        # captured before it stops being tracked.
+        sdf.to_vtk(OUT_DIR + 'vessel_opt_xpoint_deletion', nx=40, ny=40, nz=40)
+        curves_to_vtk(curves, OUT_DIR + "curves_opt_xpoint_deletion")
+        curves_to_vtk([xp.curve for xp in xpoints] + [bx.curve for bx in (bottom_xpoints or [])],
+                      OUT_DIR + "xpoint_curves_opt_xpoint_deletion")
+        curves_to_vtk([ax.curve for ax in axes], OUT_DIR + "ma_opt_xpoint_deletion")
+        for idx, bsurf in enumerate(boozer_surfaces):
+            bsurf.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_xpoint_deletion")
+        save([boozer_surfaces, iota_Gs, axes, xpoints + (bottom_xpoints or []), sdf],
+             OUT_DIR + 'design_opt_xpoint_deletion.json')
         raise _XpointSurfaceSatisfied()
 
 def _restore_state():
@@ -950,8 +963,8 @@ for j in range(10):
     curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_{j}")
     for idx, boozer_surface in enumerate(boozer_surfaces):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_{j}")
-    save([boozer_surfaces, iota_Gs, axes, xpoints, sdf], OUT_DIR + f'design_opt_{j}.json')
-    
+    save([boozer_surfaces, iota_Gs, axes, xpoints + (bottom_xpoints or []), sdf], OUT_DIR + f'design_opt_{j}.json')
+
     # save the weights in a yaml file
     config['CURRENT_WEIGHT'] = CURRENT_WEIGHT.value
     config['COIL_TO_COIL_WEIGHT'] = COIL_TO_COIL_WEIGHT.value

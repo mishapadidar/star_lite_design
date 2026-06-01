@@ -84,6 +84,7 @@ sync_back_filtered() {
       --include='ma_opt_final.vtu' \
       --include='xpoint_curves_opt_final.vtu' \
       --include='vessel_opt_final.vtr' \
+      --include='*xpoint_deletion*' \
       --exclude='*' \
       "$RUN/output/" "$HOME_DIR/output/"
   fi
