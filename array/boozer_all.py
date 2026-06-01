@@ -321,7 +321,7 @@ J_bot_surf = None
 bot_surf_penalties = []
 if null_type == 'SN':
     config['XPOINT_SURFACE_THRESHOLD'] = 0.10
-    config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = 1e-1
+    config['BOTTOM_XPOINT_SURFACE_WEIGHT'] = 1e5
     XPOINT_SURFACE_THRESHOLD = config['XPOINT_SURFACE_THRESHOLD']
     BOTTOM_XPOINT_SURFACE_WEIGHT = Weight(config['BOTTOM_XPOINT_SURFACE_WEIGHT'])
     bot_surf_penalties = [XpointSurfaceDistance(bx, bsurf, XPOINT_SURFACE_THRESHOLD, kind='min')
