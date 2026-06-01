@@ -336,7 +336,7 @@ else:
 J_bot_coil = None
 bot_coil_penalties = []
 if null_type == 'SN':
-    config['BOTTOM_XPOINT_COIL_THRESHOLD'] = 0.06
+    config['BOTTOM_XPOINT_COIL_THRESHOLD'] = 0.10
     config['BOTTOM_XPOINT_COIL_WEIGHT'] = 1e3
     BOTTOM_XPOINT_COIL_THRESHOLD = config['BOTTOM_XPOINT_COIL_THRESHOLD']
     BOTTOM_XPOINT_COIL_WEIGHT = Weight(config['BOTTOM_XPOINT_COIL_WEIGHT'])
