@@ -11,8 +11,9 @@ from scipy.integrate import solve_ivp
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
 from star_lite_design.utils.tangent_map import TangentMap, Monodromy
-from simsopt.field import (InterpolatedField, particles_to_vtk,
-                           compute_fieldlines, IterationStoppingCriterion, plot_poincare_data)
+from simsopt.field import (InterpolatedField, particles_to_vtk, SurfaceClassifier,
+                           compute_fieldlines, IterationStoppingCriterion, LevelsetStoppingCriterion,
+                           ToroidalTransitStoppingCriterion, plot_poincare_data)
 import time
 from simsopt.util import in_github_actions, proc0_print, comm_world
 import os
@@ -477,6 +478,18 @@ NPHI = 9
 # only trace/record the top X-point (the mirror-based bottom would be wrong).
 is_sn = not boozer_surface.surface.stellsym
 
+# Surface classifier used as the field-line stopping criterion: a torus fit
+# around the magnetic axis (matches array_initial/mk_manifolds_DN.py). Field
+# lines are killed once they leave this level set, so traces can't wander off to
+# infinity. Built on its own quadpoint grid with the surface's symmetry.
+_sc_surface = SurfaceXYZTensorFourier(
+    mpol=boozer_surface.surface.mpol, ntor=boozer_surface.surface.ntor,
+    quadpoints_phi=np.linspace(0, 1, 32, endpoint=False),
+    quadpoints_theta=np.linspace(0, 1, 32, endpoint=False),
+    nfp=boozer_surface.surface.nfp, stellsym=boozer_surface.surface.stellsym)
+_sc_surface.fit_to_curve(axes[0].curve, 0.45, flip_theta=False)
+surface_classifier = SurfaceClassifier(_sc_surface, h=0.05, p=2)
+
 # convert to RZFourier
 order=16
 quadpoints=np.linspace(0, 0.5, 2*order+1, endpoint=False)
@@ -508,16 +521,23 @@ if comm_world is None or comm_world.rank == 0:
     # Single source of truth for the panel phi grid (plot_manifolds.py reads this
     # so DN half-period [0,0.25] vs SN full-period [0,0.5] always agree).
     np.savetxt(OUT_DIR + 'phis.txt', np.linspace(0, PHI_MAX, NPHI))
+    # X-point classification, so plot_manifolds.py can pick the zoom window
+    # (hyperbolic uses a wider zoom).
+    with open(OUT_DIR + 'xpoint_type.txt', 'w') as fh:
+        fh.write(f"{res['type']}\n")
     with open(OUT_DIR + 'legs.txt', 'w') as fh:
-        fh.write('# k, theta, vR, vZ, kind, sign, vK(vv)\n')
-        
+        # lam: eigenvalue of the line (hyperbolic only; nan otherwise).
+        # c  : second-order radial coefficient Q(v).v (snowflake/parabolic only;
+        #      nan for hyperbolic). Exactly one of lam/c is finite per leg.
+        fh.write('# k, theta, vR, vZ, kind, sign, lam, c\n')
         for k, leg in enumerate(legs):
             v2  = leg['direction']
             th = np.arctan2(v2[1], v2[0])
-            rad = leg['c']
+            lam = leg['lam'] if leg['lam'] is not None else float('nan')
+            c = leg['c']
             sign = +1.0 if not leg['stable'] else -1.0
             kind = 'stable' if leg['stable'] else 'unstable'
-            fh.write(f"{k}, {th:.6f}, {v2[0]:.6f}, {v2[1]:.6f}, {kind}, {sign:+.0f}, {rad:.6f}\n")
+            fh.write(f"{k}, {th:.6f}, {v2[0]:.6f}, {v2[1]:.6f}, {kind}, {sign:+.0f}, {lam:.6f}, {c:.6f}\n")
 
 if comm_world is None or comm_world.rank == 0:
     print_fixed_point_info("X-point", xpoint.curve, boozer_surface.biotsavart,
@@ -529,6 +549,8 @@ if comm_world is None or comm_world.rank == 0:
 print("running the integration now...")
 def trace_fieldlines(bfield, g0, legs):
     tmax_fl = 2e5
+    # Trace each manifold leg for this many full toroidal transits.
+    n_transits = 6
     t1 = time.time()
 
     n_stable = sum(1 for leg in legs if leg['stable'])
@@ -536,20 +558,31 @@ def trace_fieldlines(bfield, g0, legs):
                 f"({len(legs) - n_stable} unstable, {n_stable} stable)")
 
     nmanif=10
-    nmanif_hyper=30   # more seeds for the hyperbolic fundamental domain (pyoculus uses ~30)
+    nmanif_hyper=10   # more seeds for the hyperbolic fundamental domain (pyoculus uses ~30)
     #r_vals  = np.geomspace(1e-4, 5e-2, nmanif)   # multi-radius seeding
     for k, leg in enumerate(legs):
         rad = leg['c']
         lam = leg.get('lam')
         kind = 'stable' if leg['stable'] else 'unstable'
+        _ang = np.degrees(np.arctan2(leg['direction'][1], leg['direction'][0]))
+        proc0_print(f"  tracing leg idx={k} ({kind}, angle {_ang:+.2f} deg)")
+
         r_max = 0.05                         # outer seed radius (stay in linear regime)
         if lam is not None and np.isfinite(lam) and abs(lam) not in (0.0, 1.0):
-            # Hyperbolic: the map r -> lambda r is a translation in u = log r, so
-            # the invariant seeding is uniform in log r (geomspace) over one
-            # fundamental domain [eps0/|lambda|, eps0]. Like pyoculus, anchor at
-            # eps0 = 1 mm near the X-point (instead of the old 5 cm). (det M = 1
-            # => the backward-traced stable leg expands by 1/|lambda_s| = |lambda_u|.)
-            ratio = abs(lam) if abs(lam) > 1.0 else 1.0 / abs(lam)
+            # Hyperbolic: the map r -> ratio*r is a translation in u = log r, so the
+            # invariant seeding is uniform in log r (geomspace) over one fundamental
+            # domain [eps0/ratio, eps0]. Anchor at eps0 = 1 mm near the X-point.
+            #
+            # IMPORTANT: lam is the PER-FIELD-PERIOD eigenvalue (compute() integrates
+            # the monodromy M over 1/nfp of a torus). But compute_fieldlines records
+            # Poincare hits at a FIXED plane, which a field line returns to only once
+            # per FULL toroidal transit = nfp field periods. So the growth factor
+            # BETWEEN PLOTTED DOTS is the full-torus eigenvalue lam**nfp, and the tile
+            # that maps endpoint-to-endpoint (eps0/ratio -> eps0) under one such return
+            # must use ratio = |lam|**nfp. Using |lam| instead leaves a |lam|**(nfp-1)
+            # multiplicative gap between successive images (endpoints don't line up).
+            # (det M = 1 => the backward-traced stable leg expands by 1/|lam_s| = |lam_u|.)
+            ratio = (abs(lam) if abs(lam) > 1.0 else 1.0 / abs(lam)) ** nfp
             eps0 = 1e-3
             r_vals = np.geomspace(eps0 / ratio, eps0, nmanif_hyper)
         elif np.isfinite(rad) and abs(rad) > 1e-30:
@@ -570,13 +603,15 @@ def trace_fieldlines(bfield, g0, legs):
         # cylindrical coords (compute_fieldlines launches at phi=0).
         R0 = np.sqrt(g0[0]**2 + g0[1]**2) + r_vals * v2[0]
         Z0 = g0[2] + r_vals * v2[1]
-
+        
+        print(v2)
         for xp in (['top'] if is_sn else ['top', 'bot']):
             tt = sign * (1.0 if xp == 'top' else -1.0)
             phis = np.linspace(0, PHI_MAX, NPHI)*2*np.pi
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
-                tt*sign*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
-                phis=phis, stopping_criteria=[IterationStoppingCriterion(int(2e5))])
+                tt*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
+                phis=phis, stopping_criteria=[ToroidalTransitStoppingCriterion(n_transits, False),
+                                              LevelsetStoppingCriterion(surface_classifier.dist)])
             proc0_print(f"  {time.time()-t1:.1f}s, hits/seed: " +' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 
             if comm_world is None or comm_world.rank == 0:
@@ -605,7 +640,8 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
     phis = np.linspace(0, PHI_MAX, NPHI) * 2 * np.pi
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         bfield, R0, Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
-        phis=phis, stopping_criteria=[IterationStoppingCriterion(int(2e5))])
+        phis=phis, stopping_criteria=[ToroidalTransitStoppingCriterion(75, False),
+                                      LevelsetStoppingCriterion(surface_classifier.dist)])
     proc0_print(f"  interior {time.time()-t1:.1f}s, hits/seed: " +
                 ' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 

@@ -25,10 +25,23 @@ else:
     phis = np.linspace(0, 0.5 if 'null=SN' in p.parent.name else 0.25, 9)
 nphi  = len(phis)
 
+# X-point classification (from mk_manifolds) drives hyperbolic-only styling:
+# colour stable manifolds red and unstable manifolds blue.
+_type_file = p.parent / 'xpoint_type.txt'
+_xpoint_type = _type_file.read_text().strip() if _type_file.exists() else ''
+# Map leg index k -> is-stable? legs.txt: col0=k, col5=sign (-1 stable, +1 unstable).
+_leg_is_stable = {}
+_f_legs = p.parent / 'legs.txt'
+if _f_legs.exists():
+    _la = np.atleast_2d(np.loadtxt(_f_legs, delimiter=',', usecols=(0, 5)))
+    _leg_is_stable = {int(kk): (sgn < 0) for kk, sgn in _la}
+
 fig, axes = plt.subplots(3, 3, figsize=(8.25, 10), sharex=True, sharey=True, gridspec_kw={"wspace": 0, "hspace": 0})
 
-def _scatter_file(ax, path, dot_size):
-    """Plot a poincare file's dots (drop the first hit per fieldline id)."""
+def _scatter_file(ax, path, dot_size, color=None, label=None, alpha=None):
+    """Plot a poincare file's dots (drop the first hit per fieldline id). If
+    color is given, all dots use it (with an optional legend label); otherwise
+    they are coloured per fieldline id. alpha sets the dot transparency."""
     if not os.path.exists(path):
         return
     d = np.loadtxt(path, delimiter=",")
@@ -38,25 +51,66 @@ def _scatter_file(ax, path, dot_size):
         d = d[None, :]
     _, first_idx = np.unique(d[:, 0], return_index=True)
     mask = np.ones(d.shape[0], dtype=bool)
-    mask[first_idx] = False
+    #mask[first_idx] = False
     d = d[mask]
     if d.size == 0:
         return
     R, Z = np.hypot(d[:, 1], d[:, 2]), d[:, 3]
-    ax.scatter(R, Z, s=dot_size, color=_cat_colors(d[:, 0]), rasterized=True)
+    c = _cat_colors(d[:, 0]) if color is None else color
+    # edgecolors='none'/linewidths=0: no edge stroke, so the marker is a solid
+    # filled disc (otherwise tiny markers render as hollow/white-centred specks).
+    ax.scatter(R, Z, s=dot_size, color=c, rasterized=True, label=label, alpha=alpha,
+               edgecolors='none', linewidths=0)
 
 
-def draw_panel(ax, i, dot_size=0.1, leg_alpha=0.3, leg_lw=0.5, leg_zorder=0):
+def _line_file(ax, path, color=None, label=None, alpha=None, lw=0.6, leg_k=0, zorder=None):
+    """Plot one leg's poincare file as a continuous manifold LINE (not dots). The
+    file is stored seed-major (all of seed 0's hits, then seed 1's, ...); we
+    reorder it return-major so the line walks arc-by-arc along the manifold
+    instead of jumping back toward the X-point at each new seed. If color is None
+    the leg is coloured categorically by leg_k."""
+    if not os.path.exists(path):
+        return
+    d = np.loadtxt(path, delimiter=",")
+    if not d.size:
+        return
+    if d.ndim == 1:
+        d = d[None, :]
+    df = pd.DataFrame(d[:, :4], columns=['id', 'x', 'y', 'z'])
+    df['ret'] = df.groupby('id').cumcount()   # return index within each seed
+    df = df.sort_values(['ret', 'id'])        # return-major: walk arc-by-arc
+    R = np.hypot(df['x'].to_numpy(), df['y'].to_numpy())
+    Z = df['z'].to_numpy()
+    c = color if color is not None else _cat_colors([leg_k])[0]
+    ax.plot(R, Z, color=c, lw=lw, label=label, alpha=alpha, rasterized=True, zorder=zorder)
+
+
+def draw_panel(ax, i, interior_dot_size=0.5, leg_alpha=0.3, leg_lw=0.5, leg_zorder=0, dot_alpha=None, manif_lw=0.6):
     """Draw all overlays (manifolds, interior, vessel, surface, fixed points,
     invariant lines) for phi index i onto ax. The invariant-line style
     (leg_alpha/leg_lw/leg_zorder) is faint+behind by default; the zoom inset
-    passes a prominent style so the lines aren't buried under the leg dots."""
-    # manifolds (both naming conventions)
-    for f in sorted(glob.glob(str(p.parent / f"poincare{i}_*.txt"))
-                    + glob.glob(str(p.parent / f"poincare_*_{i}_*.txt"))):
-        _scatter_file(ax, f, dot_size)
-    _scatter_file(ax, p.parent / f"poincare_interior_{i}.txt", dot_size)
-    _scatter_file(ax, p.parent / f"poincare_inward_{i}.txt", dot_size)
+    passes a prominent style so the lines aren't buried under the leg dots.
+    dot_alpha sets the Poincaré-dot transparency (used to declutter the zoom)."""
+    # Interior / inward Poincaré dots first, so the manifolds draw ON TOP of them
+    # (matching plot_manifolds_DN.py's draw order). Always opaque (solid dots),
+    # even in the zoom inset where the manifold lines use dot_alpha.
+    _scatter_file(ax, p.parent / f"poincare_interior_{i}.txt", interior_dot_size, alpha=1.0)
+    # Stable/unstable manifolds (both naming conventions), drawn on top. For
+    # hyperbolic AND parabolic fixed points colour them like plot_manifolds_DN.py:
+    # stable manifold red, unstable manifold blue (leg index k is the trailing
+    # number in poincare_{top|bot}_{i}_{k}.txt).
+    for f in sorted(glob.glob(str(p.parent / f"poincare_*_{i}_*.txt"))):
+        col = lbl = None
+        m = re.search(r'_(\d+)\.txt$', os.path.basename(f))
+        leg_k = int(m.group(1)) if m is not None else 0
+        if _xpoint_type in ('hyperbolic', 'parabolic') and leg_k in _leg_is_stable:
+            stable = _leg_is_stable[leg_k]
+            col = 'red' if stable else 'blue'
+            lbl = 'stable manifold' if stable else 'unstable manifold'
+        # zorder just above the analytical direction lines (leg_zorder) so the
+        # red/blue manifold lines draw OVER the black invariant-direction lines.
+        _line_file(ax, f, color=col, label=lbl, alpha=dot_alpha, lw=manif_lw,
+                   leg_k=leg_k, zorder=leg_zorder + 1)
 
     f_v = p.parent / f"vessel_cross_{i}.txt"
     if os.path.exists(f_v):
@@ -93,13 +147,10 @@ def draw_panel(ax, i, dot_size=0.1, leg_alpha=0.3, leg_lw=0.5, leg_zorder=0):
             L = np.atleast_2d(np.loadtxt(f_legs, delimiter=',', usecols=(2, 3)))
 
             def _draw_legs(R0, Z0, flipZ):
-                seen = set()
                 for vR, vZ in L:
+                    # bottom X-point is the stellsym mirror of the top: the
+                    # invariant directions reflect in Z (slope flips sign).
                     vZ = -vZ if flipZ else vZ
-                    ang = round(np.arctan2(vZ, vR) % np.pi, 6)   # dedupe +-v lines
-                    if ang in seen:
-                        continue
-                    seen.add(ang)
                     ax.axline((R0, Z0), (R0 + vR, Z0 + vZ),
                               color='k', lw=leg_lw, alpha=leg_alpha, zorder=leg_zorder)
 
@@ -123,13 +174,17 @@ for ax in axes[:, 0]:  ax.set_ylabel('Z')
 
 # Zoom insets on the X-points in every phi panel to reveal the fixed-point
 # structure: top X-point box top-right, bottom (stellsym-partner) box bottom-right.
-ZOOM_HALF = 0.01
+# Hyperbolic X-points get a wider zoom window (zoomed out a bit) since their
+# manifold structure spreads further than the snowflake/parabolic case.
+ZOOM_HALF = 0.025 if _xpoint_type == 'hyperbolic' else 0.01
+print(f"X-point type: {_xpoint_type or '(unknown: xpoint_type.txt missing — rerun mk_manifolds.py)'}"
+      f"  ->  ZOOM_HALF = {ZOOM_HALF}")
 
 def _add_zoom(ax, i, center, rect):
     R0, Z0 = center
     axins = ax.inset_axes(rect)
-    # In the zoom, draw the invariant lines prominently and on top of the dots.
-    draw_panel(axins, i, dot_size=1.0, leg_alpha=0.8, leg_lw=1.0, leg_zorder=5)
+    # In the zoom, draw the invariant lines + manifolds prominently and on top.
+    draw_panel(axins, i, manif_lw=1.0, leg_alpha=0.8, leg_lw=1.0, leg_zorder=5, dot_alpha=0.5)
     axins.set_xlim(R0 - ZOOM_HALF, R0 + ZOOM_HALF)
     axins.set_ylim(Z0 - ZOOM_HALF, Z0 + ZOOM_HALF)
     axins.set_aspect('equal')
@@ -162,4 +217,4 @@ fig.legend(
 
 parent_name = p.parent.name
 grandparent_name = p.parent.parent.name
-plt.savefig(p.parent / f'xs_{grandparent_name}_{parent_name}.png', dpi=300)
+plt.savefig(p.parent / f'xs_{grandparent_name}_{parent_name}.png', dpi=600)
