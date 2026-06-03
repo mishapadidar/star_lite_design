@@ -36,6 +36,18 @@ if _f_legs.exists():
     _la = np.atleast_2d(np.loadtxt(_f_legs, delimiter=',', usecols=(0, 4), dtype=str, skiprows=1))
     _leg_is_stable = {int(kk): (kind.strip() == 'stable') for kk, kind in _la}
 
+# Parabolic local model (written by mk_manifolds for parabolic X-points): in the
+# frame xi = dx.v, eta = dx.u at the X-point, orbits follow level sets of
+#   H(xi, eta) = (sigma/2) eta^2 - (D/3) xi^3,
+# and H = 0 is the separatrix (a semicubical cusp tangent to v).
+_cusp = None
+_f_cusp = p.parent / 'parabolic_cusp.txt'
+if _f_cusp.exists():
+    _lam, _th, _sig, _D = np.loadtxt(_f_cusp, delimiter=',', skiprows=1)
+    if _lam > 0:        # the local model is derived for the +1 repeated eigenvalue
+        _cusp = (float(_th), float(_sig), float(_D))
+_CUSP_HALF = 0.02       # half-width of the (R, Z) window for the level-set overlay
+
 fig, axes = plt.subplots(3, 3, figsize=(8.25, 10), sharex=True, sharey=True, gridspec_kw={"wspace": 0, "hspace": 0})
 
 def _scatter_file(ax, path, dot_size, color=None, label=None, alpha=None):
@@ -181,6 +193,36 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
                 _draw_legs(fp0[1, 0], fp0[1, 1], flipZ=False)
             if fp0.shape[0] > 2:            # bottom X-point: stellsym-reflected dirs
                 _draw_legs(fp0[2, 0], fp0[2, 1], flipZ=True)
+
+            # Parabolic local model: level sets of H near the X-point, with the
+            # separatrix H = 0 (the semicubical cusp) drawn prominently. The
+            # bottom X-point uses the Z-mirrored frame, like the legs above.
+            if _cusp is not None:
+                th, sig, D = _cusp
+                v = np.array([np.cos(th), np.sin(th)])
+                u = np.array([-v[1], v[0]])
+                g = np.linspace(-_CUSP_HALF, _CUSP_HALF, 401)
+
+                def _draw_cusp(R0, Z0, flipZ):
+                    dR, dZ = np.meshgrid(g, g, indexing='xy')
+                    dZs = -dZ if flipZ else dZ
+                    xi = dR * v[0] + dZs * v[1]
+                    eta = dR * u[0] + dZs * u[1]
+                    H = 0.5 * sig * eta**2 - (D / 3.0) * xi**3
+                    Hs = float(np.abs(H).max())
+                    if Hs == 0.0:
+                        return
+                    ax.contour(R0 + g, Z0 + g, H, levels=[0.0], colors='m',
+                               linewidths=1.0, linestyles='--', zorder=leg_zorder + 2)
+                    ax.contour(R0 + g, Z0 + g, H,
+                               levels=Hs * np.array([-0.1, -0.03, -0.01, -1e-3, 1e-3, 0.01, 0.03, 0.1]),
+                               colors='0.5', linewidths=0.4, alpha=0.7, zorder=leg_zorder)
+
+                ax.plot([], [], 'm--', lw=1.0, label='parabolic separatrix (local model)')
+                if fp0.shape[0] > 1:
+                    _draw_cusp(fp0[1, 0], fp0[1, 1], flipZ=False)
+                if fp0.shape[0] > 2:
+                    _draw_cusp(fp0[2, 0], fp0[2, 1], flipZ=True)
 
 
 for i, ax in enumerate(axes.flat):

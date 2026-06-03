@@ -229,7 +229,8 @@ def compute(axis, magnetic_field, tol=1e-5):
     # Standardized classification output; only 'type' and 'legs' are consumed
     # downstream — the rest aid reuse/inspection.
     res = {'type': None, 'M': M, 'eigenvalues': np.linalg.eig(M)[0],
-           'iota': None, 'line_angles': None, 'directions': None, 'c': None, 'T': None}
+           'iota': None, 'line_angles': None, 'directions': None, 'c': None, 'T': None,
+           'sigma': None, 'D': None}
     
     # ---- Classify. ----
     if np.abs(M - np.eye(2)).max() < tol:
@@ -278,6 +279,18 @@ def compute(axis, magnetic_field, tol=1e-5):
         res['line_angles'] = np.array([np.arctan2(v[1], v[0])])
         res['directions'] = _rays_from_line_angles(res['line_angles'])
         res['T'] = _integrate_T(axis, magnetic_field, nfp)
+        # Jordan/cusp data. In the frame x = xi*v + eta*u (u = unit normal to v)
+        # the jet reads xi' = xi + sigma*eta + ..., eta' = eta + D*xi^2 + ...
+        # (det M = 1 => K^2 = 0, so Im K is along v and sigma = v.(K u) is the
+        # Jordan shear). The leading local model is the interpolating Hamiltonian
+        #   H(xi, eta) = (sigma/2) eta^2 - (D/3) xi^3,
+        # whose zero level set is the separatrix: the semicubical (cusp) curve
+        # eta = +-sqrt(2D/(3 sigma)) xi^(3/2) on the side sign(xi) = sign(sigma*D).
+        u_n = np.array([-v[1], v[0]])
+        res['sigma'] = float(v @ (K @ u_n))
+        Qvv = np.array([sum(res['T'][i, j, k] * v[j] * v[k]
+                            for j in range(2) for k in range(2)) for i in range(2)])
+        res['D'] = float(u_n @ Qvv)
 
     else:  # snowflake (M = +I): integrate the second-order return map.
         T = _integrate_T(axis, magnetic_field, nfp)
@@ -329,6 +342,14 @@ def print_fixed_point_info(name, res):
         ang = np.degrees(res['line_angles'][0])
         print(f"  type: PARABOLIC (repeated eigenvalue {lam:+.0f})")
         print(f"  invariant lines: 1   rays (legs): 2   angle {ang:+.2f} deg")
+        sig, D = res['sigma'], res['D']
+        print(f"  Jordan shear sigma = {sig:+.4e}   cusp coefficient D = {D:+.4e}")
+        if sig != 0.0 and D / sig > 0:
+            print(f"  separatrix eta = +-{np.sqrt(2 * D / (3 * sig)):.4e} * xi^(3/2)"
+                  f"   (cusp on the xi > 0 side)")
+        elif sig != 0.0:
+            print(f"  separatrix eta = +-{np.sqrt(-2 * D / (3 * sig)):.4e} * (-xi)^(3/2)"
+                  f"   (cusp on the xi < 0 side)")
     else:  # elliptic
         print(f"  type: ELLIPTIC")
         print(f"  rotational transform iota = {res['iota']:+.6f}")
@@ -424,6 +445,16 @@ if comm_world is None or comm_world.rank == 0:
                 stable = speed < 0
             kind = 'stable' if stable else 'unstable'
             fh.write(f"{k}, {th:.6f}, {v2[0]:.6f}, {v2[1]:.6f}, {kind}, {speed:.6f}\n")
+    if res['type'] == 'parabolic':
+        # Leading local model at the parabolic X-point, for plot_manifolds.py:
+        # in the frame xi = dx.v, eta = dx.u (v = invariant direction, u = unit
+        # normal), orbits follow level sets of
+        #   H(xi, eta) = (sigma/2) eta^2 - (D/3) xi^3,
+        # and H = 0 is the separatrix (semicubical cusp tangent to v).
+        with open(OUT_DIR + 'parabolic_cusp.txt', 'w') as fh:
+            fh.write('# lam, theta, sigma, D\n')
+            fh.write(f"{res['eigenvalues'][0]:.1f}, {res['line_angles'][0]:.8f}, "
+                     f"{res['sigma']:.8e}, {res['D']:.8e}\n")
 
 print("running the integration now...")
 
