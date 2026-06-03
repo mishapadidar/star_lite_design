@@ -578,22 +578,31 @@ def trace_fieldlines(bfield, g0, res):
             r_vals = np.geomspace(1e-3, 0.05, nmanif)
             t_seed = np.linspace(0.0, 1.0, r_vals.size)   # no model: order seeds only
 
-        # parabolic has no stable/unstable split (single eigendirection): always
-        # trace forward in time. Otherwise unstable -> forward, stable -> backward.
-        sign = +1.0 if (res['type'] == 'parabolic' or kind == 'unstable') else -1.0
+        # parabolic (tr M = 2, single eigendirection, NOT the snowflake M = I
+        # case) has no stable/unstable split, so trace each leg both forward AND
+        # backward in time to capture the manifold segments flowing out of and
+        # into the X-point; the backward trace is written under leg index
+        # k + len(dirs) so its files stay distinct. Otherwise a single sign:
+        # unstable -> forward, stable -> backward.
+        if res['type'] == 'parabolic':
+            sign_legs = [(+1.0, k), (-1.0, k + len(dirs))]
+        else:
+            sign_legs = [(+1.0 if kind == 'unstable' else -1.0, k)]
         R0 = R_xp + r_vals * v2[0]
         Z0 = g0[2] + r_vals * v2[1]
 
-        for xp in (['top'] if is_sn else ['top', 'bot']):
-            tt = sign * (1.0 if xp == 'top' else -1.0)
+        for sign, k_out in sign_legs:
+            for xp in (['top'] if is_sn else ['top', 'bot']):
+                tt = sign * (1.0 if xp == 'top' else -1.0)
 
-            Zseed = Z0 if xp == 'top' else -Z0
-            combined, L = grow_manifold(tt * bfield, R0, Zseed, t_seed)
-            proc0_print(f"  {time.time()-t1:.1f}s, leg {k} {xp}: arclength {L:.4f} m")
-            if comm_world is None or comm_world.rank == 0:
-                for i in range(NPHI):
-                    np.savetxt(OUT_DIR + f'poincare_{xp}_{i}_{k}.txt',
-                               combined[i], comments='', delimiter=',')
+                Zseed = Z0 if xp == 'top' else -Z0
+                combined, L = grow_manifold(tt * bfield, R0, Zseed, t_seed)
+                proc0_print(f"  {time.time()-t1:.1f}s, leg {k} "
+                            f"{'fwd' if sign > 0 else 'bwd'} {xp}: arclength {L:.4f} m")
+                if comm_world is None or comm_world.rank == 0:
+                    for i in range(NPHI):
+                        np.savetxt(OUT_DIR + f'poincare_{xp}_{i}_{k_out}.txt',
+                                   combined[i], comments='', delimiter=',')
 
 
 def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
