@@ -811,8 +811,28 @@ print("""
 # Number of iterations to perform:
 MAXITER=3000
 
+def _drop_bottom_penalties():
+    """Bottom X-point-surface penalty hit 0: drop both bottom-X-point penalties,
+    switch BFGS to the base objective, and stop tracking the bottom X-point."""
+    global JF, bottom_xpoints, track_bottom
+    JF = JF_base
+    bottom_xpoints = None
+    track_bottom = False
+    penalties.pop('bottom xpoint-surface', None)
+    penalties.pop('bottom xpoint-coil', None)
+
+
 dofs = JF.x.copy()
-callback(dofs)
+# The sentinel can fire on the very first callback if the bottom
+# X-point-surface constraint is ALREADY satisfied at initialization; handle it
+# the same way as inside the loop instead of crashing the whole task.
+try:
+    callback(dofs)
+except _XpointSurfaceSatisfied:
+    _drop_bottom_penalties()
+    dofs = dat_dict['x'].copy()
+    print('XpointSurfaceDistance already 0 at initialization: dropped bottom '
+          'X-point penalties, switched to base objective')
 
 for j in range(10):
     dat_dict["iter"] = 0
@@ -822,22 +842,25 @@ for j in range(10):
         dofs = res.x.copy()
         msg = res.message
     except _XpointSurfaceSatisfied:
-        # Bottom X-point-surface penalty hit 0: drop both bottom-X-point penalties,
-        # switch BFGS to the base objective, and stop tracking the bottom X-point.
-        JF = JF_base
-        bottom_xpoints = None
-        track_bottom = False
-        penalties.pop('bottom xpoint-surface', None)
-        penalties.pop('bottom xpoint-coil', None)
+        _drop_bottom_penalties()
         dofs = dat_dict['x'].copy()
         msg = 'XpointSurfaceDistance reached 0: dropped bottom X-point penalties, switched to base objective'
     except Exception as e:
         dofs = dat_dict['x'].copy()
         msg = f'caught exception: {e}, restarting from last successful callback.'
-    
+
     print(msg)
     J0, dJ0 = fun(dofs)
-    callback(dofs)
+    # Same hazard as the initial callback: the penalty can reach 0 exactly at
+    # the post-minimize state (e.g. BFGS stopped for its own reasons on an
+    # iterate that satisfies the constraint).
+    try:
+        callback(dofs)
+    except _XpointSurfaceSatisfied:
+        _drop_bottom_penalties()
+        dofs = dat_dict['x'].copy()
+        print('XpointSurfaceDistance reached 0 at post-minimize callback: dropped '
+              'bottom X-point penalties, switched to base objective')
     
     currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     curr_err = max([max([c-CURRENT_THRESHOLD, 0.])/CURRENT_THRESHOLD for c in currents_list])
