@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 from scipy.linalg import lu
 
@@ -8,7 +9,7 @@ __all__ = ['SingularPeriodicFieldLine']
 
 import jax
 import jax.numpy as jnp
-from jax import jacfwd
+from jax import jit
 from functools import partial
 
 # mu_0 / (4 pi)  in SI units (T·m/A)
@@ -229,33 +230,44 @@ def A_pure(B, gradB):
     return A
 
 
-def tangent_map_residual_pure(T, B, gradB, L, ic, D):
-    A = A_pure(B, gradB)
-    AT = jnp.einsum('ijk,ik->ij', A, T)
-    Tprime = jnp.matmul(D, T)
-    residual = Tprime / L - AT
-    ic0 = T[0] - ic
-    return jnp.concatenate((ic0[None, :], residual[1:]), axis=0)
-
-
 def tangent_map_pure(B, gradB, L, D):
+    """Solve the tangent-map collocation system on the Chebyshev grid.
+
+    The ODE  T'/L = A(x) T,  T(0) = ic  is LINEAR in T, so the collocation
+    matrix is assembled directly instead of via jacfwd of a residual:
+
+        M[3i+l, 3m+l'] = D[i,m]/L * delta_{l,l'} - delta_{i,m} A[i,l,l'],
+
+    with the first block-row replaced by the initial condition T[0] = ic.
+    All three unit initial conditions are solved with ONE factorization.
+    """
     N = B.shape[0]
-    T = jnp.zeros_like(B)
-    b1 = -tangent_map_residual_pure(T, B, gradB, L, jnp.array([1.0, 0.0, 0.0]), D).ravel()
-    b2 = -tangent_map_residual_pure(T, B, gradB, L, jnp.array([0.0, 1.0, 0.0]), D).ravel()
-    b3 = -tangent_map_residual_pure(T, B, gradB, L, jnp.array([0.0, 0.0, 1.0]), D).ravel()
-    A = jacfwd(tangent_map_residual_pure, argnums=0)(T, B, gradB, L, jnp.array([0.0, 0.0, 0.0]), D).reshape((3 * N, 3 * N))
-    T1 = jnp.linalg.solve(A, b1).reshape((N, 3))
-    T2 = jnp.linalg.solve(A, b2).reshape((N, 3))
-    T3 = jnp.linalg.solve(A, b3).reshape((N, 3))
-    return jnp.concatenate((T1[:, :, None], T2[:, :, None], T3[:, :, None]), axis=-1)
+    A = A_pure(B, gradB)                                   # (N,3,3): A[i,l,k] = d(B_l/|B|)/dx_k
+    I3 = jnp.eye(3)
+    M = (jnp.kron(jnp.asarray(D), I3) / L).reshape(N, 3, N, 3)
+    idx = jnp.arange(N)
+    M = M.at[idx, :, idx, :].add(-A)                       # subtract the block diagonal
+    M = M.reshape(3 * N, 3 * N)
+    M = M.at[0:3, :].set(0.0).at[0:3, 0:3].set(I3)         # initial-condition rows
+    rhs = jnp.zeros((3 * N, 3)).at[0:3, 0:3].set(I3)       # the three unit ICs side by side
+    T = jnp.linalg.solve(M, rhs)                           # one factorization, 3 RHS
+    return T.reshape(N, 3, 3)                              # [node, component, which-IC]
 
 
-def monodromy_pure(B, gradB, L, gamma, D):
-    tangent = jnp.matmul(D, gamma)
-    fT = tangent / jnp.linalg.norm(tangent, axis=-1)[:, None]
-    normal = jnp.matmul(D, fT)
-    fN = normal / jnp.linalg.norm(normal, axis=-1)[:, None]
+def monodromy_pure(B, gradB, L, gammadash, gammadashdash, D):
+    """Project the tangent map onto the (normal, binormal) frame.
+
+    The frame is built from the curve's EXACT Fourier derivatives g', g''
+    (not by applying the Chebyshev D to gamma: differentiating the sampled
+    curve twice amplifies round-off by ~cond(D)^2 ~ N^4, which floored the
+    Newton residual at ~1e-9):
+
+        fT = g'/|g'|,   fT' = (g'' - fT (fT.g''))/|g'|,   fN = fT'/|fT'|.
+    """
+    ngd = jnp.linalg.norm(gammadash, axis=-1)[:, None]
+    fT = gammadash / ngd
+    tp = (gammadashdash - fT * jnp.sum(fT * gammadashdash, axis=-1)[:, None]) / ngd
+    fN = tp / jnp.linalg.norm(tp, axis=-1)[:, None]
     binormal = jnp.cross(fT, fN)
     fB = binormal / jnp.linalg.norm(binormal, axis=-1)[:, None]
     NB = jnp.concatenate((fN[:, :, None], fB[:, :, None]), axis=-1)
@@ -264,8 +276,8 @@ def monodromy_pure(B, gradB, L, gamma, D):
     return jnp.matmul(NB_t, jnp.matmul(M, NB[0]))
 
 
-def monodromy_matrix_pure(B, gradB, L, gamma, D):
-    return monodromy_pure(B, gradB, L, gamma, D)[-1]
+def monodromy_matrix_pure(B, gradB, L, gammadash, gammadashdash, D):
+    return monodromy_pure(B, gradB, L, gammadash, gammadashdash, D)[-1]
 
 def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_fns,
                                  stellsym=True, monodromy_constraint='identity'):
@@ -277,18 +289,18 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     
     Bcoils = field.B()
     dBcoils_by_dX = field.dB_by_dX()
-    d2Bcoils_by_dXdX = field.d2B_by_dXdX()
-    
+    #d2Bcoils_by_dXdX = field.d2B_by_dXdX()  # unused in the field-line block; skip the expensive Hessian
+
     B_aux = _B_aux(pts, mu, stellsym=stellsym)
     dB_aux_by_dX = _dB_aux_by_dX(pts, mu, stellsym=stellsym)
-    d2B_aux_by_dXdX = _d2B_aux_by_dXdX(pts, mu, stellsym=stellsym)
+    #d2B_aux_by_dXdX = _d2B_aux_by_dXdX(pts, mu, stellsym=stellsym)
 
     dB_aux_by_dmu = _dB_aux_by_dmu(pts, mu, stellsym=stellsym)
-    dgradB_aux_by_dmu = _dgradB_aux_by_dmu(pts, mu, stellsym=stellsym)
+    #dgradB_aux_by_dmu = _dgradB_aux_by_dmu(pts, mu, stellsym=stellsym)
 
     B = Bcoils + B_aux
     dB_by_dX = dBcoils_by_dX + dB_aux_by_dX
-    d2B_by_dXdX = d2Bcoils_by_dXdX + d2B_aux_by_dXdX
+    #d2B_by_dXdX = d2Bcoils_by_dXdX + d2B_aux_by_dXdX
 
     modB = np.linalg.norm(B, axis=1) 
     res = curve.gammadash() / length - B / modB[:, None]
@@ -305,7 +317,7 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     dres2_dB = -B[:, None, :] * B[:, :, None] / modB[:, None, None] ** 3 + diag  # ADDED: derivative of B/|B| for the total field.
 
     dB_dcurve  = np.einsum('ikl,ikm->ilm', dB_by_dX,  dpts_dcurve, optimize=True)
-    dgradB_dcurve  = np.einsum('ijkl,ikm->ijlm', d2B_by_dXdX, dpts_dcurve, optimize=True)
+    #dgradB_dcurve  = np.einsum('ijkl,ikm->ijlm', d2B_by_dXdX, dpts_dcurve, optimize=True)
     
     dres2_dcoeff = np.einsum('ikl,ikm->ilm', dres2_dB, dB_dcurve, optimize=True)
 
@@ -323,6 +335,11 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
 
     pts = curve_tm.gamma()
     dpts_dcurve = curve_tm.dgamma_by_dcoeff()
+    # exact Fourier derivatives of the curve for the monodromy frame
+    gd = curve_tm.gammadash()
+    gdd = curve_tm.gammadashdash()
+    dgd_dcurve = curve_tm.dgammadash_by_dcoeff()
+    dgdd_dcurve = curve_tm.dgammadashdash_by_dcoeff()
     
     field.set_points(pts.reshape((-1, 3)))
     
@@ -345,16 +362,20 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     dgradB_dcurve  = np.einsum('ijkl,ikm->ijlm', d2B_by_dXdX, dpts_dcurve, optimize=True)
 
 
-    M = monodromy_fns['jax'](B, dB_by_dX, length, pts)
-
-    dM_dB = monodromy_fns['dB'](B, dB_by_dX, length, pts).reshape((4,) + B.shape)
-    dM_dgradB = monodromy_fns['dgradB'](B, dB_by_dX, length, pts).reshape((4,) + dB_by_dX.shape)
-    dM_dL = monodromy_fns['dL'](B, dB_by_dX, length, pts).reshape(4, 1)
-    dM_dgamma_partial = monodromy_fns['dgamma'](B, dB_by_dX, length, pts).reshape((4,) + pts.shape)
+    # Fused path: one primal tangent-map solve + one (vmapped) vjp pullback
+    # yields M and all five derivative tensors together.
+    M, dM_dB, dM_dgradB, dM_dL, dM_dgd, dM_dgdd = monodromy_fns['all'](B, dB_by_dX, length, gd, gdd)
+    M = np.asarray(M)
+    dM_dB = np.asarray(dM_dB).reshape((4,) + B.shape)
+    dM_dgradB = np.asarray(dM_dgradB).reshape((4,) + dB_by_dX.shape)
+    dM_dL = np.asarray(dM_dL).reshape(4, 1)
+    dM_dgd = np.asarray(dM_dgd).reshape((4,) + gd.shape)
+    dM_dgdd = np.asarray(dM_dgdd).reshape((4,) + gdd.shape)
 
     dM_dcurve = np.einsum('aij,ijm->am', dM_dB, dB_dcurve, optimize=True)
     dM_dcurve += np.einsum('aijk,ijkm->am', dM_dgradB, dgradB_dcurve, optimize=True)
-    dM_dcurve += np.einsum('aik,ikm->am', dM_dgamma_partial, dpts_dcurve, optimize=True)
+    dM_dcurve += np.einsum('aik,ikm->am', dM_dgd, dgd_dcurve, optimize=True)
+    dM_dcurve += np.einsum('aik,ikm->am', dM_dgdd, dgdd_dcurve, optimize=True)
 
     dM_dmu = np.einsum('aij,ijm->am', dM_dB, dB_aux_by_dmu, optimize=True)
     dM_dmu += np.einsum('aijk,ijkm->am', dM_dgradB, dgradB_aux_by_dmu, optimize=True)
@@ -414,17 +435,26 @@ class SingularPeriodicFieldLine(Optimizable):
         self.wh = wh  # ADDED: keep the quadrature weights for consistency with TangentMap.
         self.curve_tm = CurveXYZFourierSymmetries(self.xh, curve.order, curve.nfp, curve.stellsym, ntor=curve.ntor, dofs=curve.dofs)  # ADDED: monodromy is evaluated on a Chebyshev-grid copy of the curve.
 
-        self.monodromy_matrix_jax = lambda B, gradB, L, gamma: monodromy_matrix_pure(B, gradB, L, gamma, self.D)
-        self.monodromy_matrix_dB = lambda B, gradB, L, gamma: jacfwd(self.monodromy_matrix_jax, argnums=0)(B, gradB, L, gamma)
-        self.monodromy_matrix_dgradB = lambda B, gradB, L, gamma: jacfwd(self.monodromy_matrix_jax, argnums=1)(B, gradB, L, gamma)
-        self.monodromy_matrix_dL = lambda B, gradB, L, gamma: jacfwd(self.monodromy_matrix_jax, argnums=2)(B, gradB, L, gamma)
-        self.monodromy_matrix_dgamma = lambda B, gradB, L, gamma: jacfwd(self.monodromy_matrix_jax, argnums=3)(B, gradB, L, gamma)
+        # Build the AD transforms ONCE and jit them: the lambda closes over the
+        # (constant) Chebyshev matrix D and shapes are fixed per object, so each
+        # function compiles on its first call and runs as XLA afterwards.
+        _mono = lambda B, gradB, L, gd, gdd: monodromy_matrix_pure(B, gradB, L, gd, gdd, self.D)
+        self.monodromy_matrix_jax = jit(_mono)   # primal only (used by residual_norm_no_aux)
+
+        # Fused evaluation: M is 2x2 (4 outputs) while B/gradB/gd/gdd have
+        # ~3N/9N/3N/3N inputs, so reverse mode is the right AD direction.  ONE
+        # vjp pullback, vmapped over the 4 unit cotangents of M, returns the
+        # cotangents of ALL five inputs at once (dM/dB, dM/dgradB, dM/dL,
+        # dM/dgammadash, dM/dgammadashdash), sharing the primal tangent-map solve.
+        def _mono_all(B, gradB, L, gd, gdd):
+            M, pullback = jax.vjp(_mono, B, gradB, L, gd, gdd)
+            dB, dgradB, dL, dgd, dgdd = jax.vmap(pullback)(jnp.eye(4).reshape((4, 2, 2)))
+            return M, dB, dgradB, dL, dgd, dgdd
+        self.monodromy_matrix_all = jit(_mono_all)
+
         self.monodromy_fns = {
             'jax': self.monodromy_matrix_jax,
-            'dB': self.monodromy_matrix_dB,
-            'dgradB': self.monodromy_matrix_dgradB,
-            'dL': self.monodromy_matrix_dL,
-            'dgamma': self.monodromy_matrix_dgamma,
+            'all': self.monodromy_matrix_all,
         }
 
         # Reconstructed from a saved file with results present: expose them via
@@ -463,7 +493,12 @@ class SingularPeriodicFieldLine(Optimizable):
     def _format_mu(self, mu, col_mask):
         """Pretty-print mu: bold names, '(fix)' suffix when masked out.
         Currents are scaled by _CURRENT_SCALE so values shown are in physical Amperes."""
-        BOLD, RST = '\033[1m', '\033[0m'
+        # Only emit ANSI bold codes for an interactive terminal; otherwise (e.g.
+        # piped through tee into a log file) they show up as raw ^[[1m bytes.
+        if sys.stdout.isatty():
+            BOLD, RST = '\033[1m', '\033[0m'
+        else:
+            BOLD, RST = '', ''
         nmu = len(mu)
         N = (nmu - 1) // 2
         names = [f'I{k+1}' for k in range(N)] + [f'r{k+1}' for k in range(N)] + ['z']
@@ -485,7 +520,7 @@ class SingularPeriodicFieldLine(Optimizable):
         if self.options['monodromy_constraint'] == 'trace':
             extra = f'  tr(M)={float(M[0,0] + M[1,1]):+.6f}'
         print(f'iter {i:3d}  ||r||={np.linalg.norm(b):.3e}  cond(J)={np.linalg.cond(Jm):.3e}  M={M_str}{extra}')
-        print(f'  mu: {self._format_mu(mu, col_mask)}')
+        #print(f'  mu: {self._format_mu(mu, col_mask)}')
 
     def residual_norm_no_aux(self, biotsavart, length=None):
         """Evaluate the periodic field-line + monodromy residual at self.curve
@@ -510,7 +545,8 @@ class SingularPeriodicFieldLine(Optimizable):
         biotsavart.set_points(pts_tm.reshape((-1, 3)))
         B_tm = biotsavart.B()
         dB_tm = biotsavart.dB_by_dX()
-        M = np.asarray(self.monodromy_matrix_jax(B_tm, dB_tm, length, pts_tm))
+        M = np.asarray(self.monodromy_matrix_jax(B_tm, dB_tm, length,
+                                                 curve_tm.gammadash(), curve_tm.gammadashdash()))
 
         mon_constraint = self.options.get('monodromy_constraint', 'identity')
         if mon_constraint == 'trace':
@@ -554,7 +590,7 @@ class SingularPeriodicFieldLine(Optimizable):
             for k in ([fixed_mu] if isinstance(fixed_mu, str) else fixed_mu):
                 col_mask[_mu_mask_idx[k]] = False
         r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint)
-        
+
         b = r[row_mask]
         Jm = J[row_mask][:, col_mask]
         if verbose:
@@ -562,7 +598,7 @@ class SingularPeriodicFieldLine(Optimizable):
 
         norm = 1e6
         while i < maxiter:
-            norm = np.linalg.norm(b)
+            norm = np.linalg.norm(b, ord=np.inf)
             if norm <= tol:
                 break
             if self.options['use_lstsq']:
@@ -578,7 +614,8 @@ class SingularPeriodicFieldLine(Optimizable):
             r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint)
             b = r[row_mask]
             Jm = J[row_mask][:, col_mask]
-            self._print_iter(i, b, Jm, M, mu, col_mask)
+            if verbose:
+                self._print_iter(i, b, Jm, M, mu, col_mask)
 
         #P, L, U = lu(Jm)
         res = {
@@ -592,14 +629,11 @@ class SingularPeriodicFieldLine(Optimizable):
             'mask': col_mask,
             'monodromy_matrix': M,  
         }
-
+        
         if verbose:
-            extra = ''
-            if mon_constraint == 'trace':
-                extra = f"  tr(M)={float(M[0,0] + M[1,1]):+.6f}"
-            print(f"NEWTON solve  success={res['success']}  iter={res['iter']}  length={res['length']:.8f}  "
-                  f"||r||_inf={np.linalg.norm(res['residual'], ord=np.inf):.3e}  cond(J)={np.linalg.cond(Jm):.3e}{extra}",
-                  flush=True)
+            print(f"NEWTON solve - {res['success']}  iter={res['iter']}, length={res['length']:.8f}, "
+                  f"||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}, "
+                  f"cond(J) = {np.linalg.cond(Jm):.3e} singular", flush=True)
             print(f"  mu: {self._format_mu(res['mu'], col_mask)}", flush=True)
 
         self.res = res
