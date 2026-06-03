@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from simsopt._core import load
-from simsopt.field import BiotSavart, coils_via_symmetries
-from simsopt.geo import CurveLength, CurveXYZFourierSymmetries, SurfaceXYZTensorFourier, CurveRZFourier
-from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
-from star_lite_design.utils.boozer_surface_utils import BoozerResidual, CurveBoozerSurfaceDistance
+import os
+import time
+import argparse
+from pathlib import Path
 from scipy.optimize import root_scalar
 from scipy.integrate import solve_ivp
-from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
-from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
-from star_lite_design.utils.tangent_map import TangentMap, Monodromy
-from simsopt.field import (InterpolatedField, particles_to_vtk, SurfaceClassifier,
-                           compute_fieldlines, IterationStoppingCriterion, LevelsetStoppingCriterion,
-                           ToroidalTransitStoppingCriterion, plot_poincare_data)
-import time
-from simsopt.util import in_github_actions, proc0_print, comm_world
-import os
-from pathlib import Path
-import sys
-import argparse
+from simsopt._core import load
+from simsopt.geo import SurfaceXYZTensorFourier, CurveRZFourier
+from simsopt.field import (SurfaceClassifier, compute_fieldlines,
+                           LevelsetStoppingCriterion, ToroidalTransitStoppingCriterion)
+from simsopt.util import proc0_print, comm_world
 
 
 def evaluate_at_phi(curve, phi, tol=1e-10):
@@ -193,7 +186,35 @@ def _rays_from_line_angles(line_angles):
     return np.array(directions)
 
 
-def compute(axis, magnetic_field, tol=1e-7, id_tol=1e-6):
+def _integrate_monodromy(curve, field, nfp):
+    """Integrate the (2,2) tangent (monodromy) map over one field period."""
+    def rhs(t, y):
+        _, A, _ = _on_axis_field_data(curve, field, t, need_hessian=False)
+        return (2 * np.pi * (A @ y.reshape((2, 2)))).flatten()
+    sol = solve_ivp(rhs, [0.0, 1.0 / nfp], np.eye(2).flatten(),
+                    rtol=1e-12, atol=1e-12, method='RK45')
+    return sol.y[:, -1].reshape((2, 2))
+
+
+def _integrate_T(curve, field, nfp):
+    """Second-order return-map tensor T(2,2,2) over one field period."""
+    def rhs_full(t, y):
+        _, A, Hg = _on_axis_field_data(curve, field, t, need_hessian=True)
+        Mt = y[:4].reshape((2, 2))
+        dM = 2 * np.pi * (A @ Mt)
+        Minv = np.linalg.inv(Mt)
+        dT = np.zeros((2, 2, 2))
+        for pp in range(2):
+            inner = Mt.T @ Hg[pp] @ Mt
+            for ii in range(2):
+                dT[ii] += np.pi * Minv[ii, pp] * inner
+        return np.concatenate([dM.flatten(), dT.flatten()])
+    y0 = np.concatenate([np.eye(2).flatten(), np.zeros(8)])
+    sol2 = solve_ivp(rhs_full, [0.0, 1.0 / nfp], y0, rtol=1e-12, atol=1e-12, method='RK45')
+    return sol2.y[4:, -1].reshape((2, 2, 2))
+
+
+def compute(axis, magnetic_field, tol=1e-5):
     """
     Classify the on-axis tangent (monodromy) map of a magnetic axis over one field period
     and return the corresponding invariant data. Copied from
@@ -201,59 +222,19 @@ def compute(axis, magnetic_field, tol=1e-7, id_tol=1e-6):
     """
     assert type(axis) is CurveRZFourier
     nfp = axis.nfp
-    L = 1.0 / nfp
 
-    # ---- Pass 1: integrate the tangent (monodromy) map over one field period. ----
-    def rhs_M(t, y):
-        _, A, _ = _on_axis_field_data(axis, magnetic_field, t, need_hessian=False)
-        M = y.reshape((2, 2))
-        return (2 * np.pi * (A @ M)).flatten()
-
-    sol = solve_ivp(rhs_M, [0.0, L], np.eye(2).flatten(),
-                    rtol=1e-12, atol=1e-12, method='RK45')
-    M = sol.y[:, -1].reshape((2, 2))
+    M = _integrate_monodromy(axis, magnetic_field, nfp)
     tr = M[0, 0] + M[1, 1]
 
-    # Standardized output across all cases. Merged fields:
-    #   eigenvalues : (2,) eigenvalues of M (subsumes the old scalar 'eigenvalue'
-    #                 and the unstable/stable eigenvalues)
-    #   directions  : (2*n_lines, 2) invariant unit rays (subsumes the old
-    #                 'invariant_direction' / 'unstable_direction' / 'stable_direction')
-    #   line_angles : invariant-line angles those rays come from
-    #   iota        : elliptic only;  T : snowflake only
-    res = {
-        'type': None,
-        'M': M,
-        'eigenvalues': np.linalg.eig(M)[0],
-        'iota': None,
-        'line_angles': None,
-        'directions': None,
-        'legs': None,          # per-ray {'direction', 'c', 'stable'}
-        'T': None,
-    }
-
-    def _integrate_second_order_T():
-        # Integrate the linear monodromy M(t) and the second-order tensor T
-        # together over one field period; returns the (2, 2, 2) tensor T.
-        def rhs_full(t, y):
-            _, A, Hg = _on_axis_field_data(axis, magnetic_field, t, need_hessian=True)
-            Mt = y[:4].reshape((2, 2))
-            dM = 2 * np.pi * (A @ Mt)
-            Minv = np.linalg.inv(Mt)
-            dT = np.zeros((2, 2, 2))
-            for p in range(2):
-                inner = Mt.T @ Hg[p] @ Mt          # (M^T Hg[p] M)[j,k]
-                for i in range(2):
-                    dT[i] += np.pi * Minv[i, p] * inner
-            return np.concatenate([dM.flatten(), dT.flatten()])
-        y0 = np.concatenate([np.eye(2).flatten(), np.zeros(8)])
-        sol2 = solve_ivp(rhs_full, [0.0, L], y0, rtol=1e-12, atol=1e-12, method='RK45')
-        return sol2.y[4:, -1].reshape((2, 2, 2))
-
+    # Standardized classification output; only 'type' and 'legs' are consumed
+    # downstream — the rest aid reuse/inspection.
+    res = {'type': None, 'M': M, 'eigenvalues': np.linalg.eig(M)[0],
+           'iota': None, 'line_angles': None, 'directions': None, 'c': None, 'T': None}
+    
     # ---- Classify. ----
-    if np.abs(M - np.eye(2)).max() < id_tol:
+    if np.abs(M - np.eye(2)).max() < tol:
         case = 'snowflake'
-    elif np.abs(M + np.eye(2)).max() < id_tol:
+    elif np.abs(M + np.eye(2)).max() < tol:
         raise ValueError(
             "On-axis tangent map is -Identity; this degenerate case is not supported "
             "(only the +Identity 'snowflake' case is handled).")
@@ -268,8 +249,6 @@ def compute(axis, magnetic_field, tol=1e-7, id_tol=1e-6):
     if case == 'elliptic':
         evals = res['eigenvalues']
         res['iota'] = np.arctan2(np.imag(evals[0]), np.real(evals[0])) * nfp / (2 * np.pi)
-        # elliptic has no real invariant directions
-
     elif case == 'hyperbolic':
         evals, evecs = np.linalg.eig(M)
         evals = np.real(evals)
@@ -298,154 +277,61 @@ def compute(axis, magnetic_field, tol=1e-7, id_tol=1e-6):
         v = v / n if n > 0 else np.array([1.0, 0.0])
         res['line_angles'] = np.array([np.arctan2(v[1], v[0])])
         res['directions'] = _rays_from_line_angles(res['line_angles'])
-        res['T'] = _integrate_second_order_T()
+        res['T'] = _integrate_T(axis, magnetic_field, nfp)
 
     else:  # snowflake (M = +I): integrate the second-order return map.
-        T = _integrate_second_order_T()
+        T = _integrate_T(axis, magnetic_field, nfp)
         line_angles, directions = _snowflake_directions(T)
         res['line_angles'] = line_angles
         res['directions'] = directions
         res['T'] = T
 
-    # ---- Classify each invariant ray into a leg. ----
-    if res['directions'] is None:
-        res['legs'] = None
-    elif res['T'] is not None:
-        # Second-order radial coefficient c = Q(v)·v, Q_i(v) = sum_jk T[i,j,k] v_j v_k;
-        # stable if c < 0. Valid for the identity/unipotent linear part (snowflake
-        # and the tr(M)=+2 parabolic case).
-        legs = []
+    # Second-order radial coefficient c = Q(v).v per ray (snowflake & parabolic).
+    if res['T'] is not None:
+        cs = []
         for v in res['directions']:
             Qv = np.array([sum(res['T'][i, j, k] * v[j] * v[k]
                                for j in range(2) for k in range(2)) for i in range(2)])
-            c = float(np.dot(Qv, v))
-            legs.append({'direction': np.asarray(v), 'c': c, 'lam': None, 'stable': c < 0})
-        res['legs'] = legs
-    else:
-        # hyperbolic: rays are [unstable+, unstable-, stable+, stable-] (the first
-        # line is unstable). Classify by eigen-line; no quadratic rate (c = nan).
-        # 'lam' carries the eigenvalue of each ray's line (eigenvalues are
-        # ordered [unstable, stable]) for fundamental-domain seeding.
-        lam_u, lam_s = res['eigenvalues']
-        ray_lam = [lam_u, lam_u, lam_s, lam_s]
-        legs = []
-        for idx_ray, v in enumerate(res['directions']):
-            legs.append({'direction': np.asarray(v), 'c': float('nan'),
-                         'lam': float(np.real(ray_lam[idx_ray])), 'stable': idx_ray >= 2})
-        res['legs'] = legs
+            cs.append(float(np.dot(Qv, v)))
+        res['c'] = np.array(cs)
 
     return res
 
 
-def _monodromy(curve, magnetic_field, nfp, order=16):
-    """Fit curve to a CurveRZFourier and integrate the (2,2) monodromy M over one
-    field period. Returns (cRZ, M), or (None, None) if the fit fails."""
-    quadpoints = np.linspace(0, 0.5, 2 * order + 1, endpoint=False)
-    XYZ = []
-    for phi in quadpoints:
-        xyz, ok = evaluate_at_phi(curve, phi)
-        if not ok:
-            return None, None
-        XYZ.append(xyz)
-    cRZ = CurveRZFourier(quadpoints, order, nfp, False)
-    cRZ.least_squares_fit(XYZ)
-    L = 1.0 / nfp
-
-    def rhs_M(t, y):
-        _, A, _ = _on_axis_field_data(cRZ, magnetic_field, t, need_hessian=False)
-        return (2 * np.pi * (A @ y.reshape((2, 2)))).flatten()
-
-    sol = solve_ivp(rhs_M, [0.0, L], np.eye(2).flatten(), rtol=1e-12, atol=1e-12, method='RK45')
-    return cRZ, sol.y[:, -1].reshape((2, 2))
-
-
-def _integrate_T(cRZ, magnetic_field, nfp):
-    """Second-order return-map tensor T(2,2,2) over one field period."""
-    L = 1.0 / nfp
-
-    def rhs_full(t, y):
-        _, A, Hg = _on_axis_field_data(cRZ, magnetic_field, t, need_hessian=True)
-        Mt = y[:4].reshape((2, 2))
-        dM = 2 * np.pi * (A @ Mt)
-        Minv = np.linalg.inv(Mt)
-        dT = np.zeros((2, 2, 2))
-        for pp in range(2):
-            inner = Mt.T @ Hg[pp] @ Mt
-            for ii in range(2):
-                dT[ii] += np.pi * Minv[ii, pp] * inner
-        return np.concatenate([dM.flatten(), dT.flatten()])
-
-    y0 = np.concatenate([np.eye(2).flatten(), np.zeros(8)])
-    sol2 = solve_ivp(rhs_full, [0.0, L], y0, rtol=1e-12, atol=1e-12, method='RK45')
-    return sol2.y[4:, -1].reshape((2, 2, 2))
-
-
-def print_fixed_point_info(name, curve, magnetic_field, nfp, order=16, tol=1e-7, id_tol=1e-6):
-    """Print a full classification of the fixed point to the console (same format
-    as fieldline_gui_qt.py)."""
-    print(f"==================== {name} ====================")
-    cRZ, M = _monodromy(curve, magnetic_field, nfp, order)
-    if M is None:
-        print("  curve not evaluable at all phi; cannot classify.")
-        return
+def print_fixed_point_info(name, res):
+    """Print the fixed-point classification to the console, using compute()'s
+    output (res) only."""
+    M = res['M']
     tr = float(M[0, 0] + M[1, 1])
     det = float(np.linalg.det(M))
-    evals = np.linalg.eigvals(M)
-    xyz, ok = evaluate_at_phi(curve, 0.0)
-    if ok:
-        print(f"  location (phi=0): R = {np.hypot(xyz[0], xyz[1]):.6f}, Z = {xyz[2]:.6f}")
+    print(f"==================== {name} ====================")
     print(f"  monodromy M = [[{M[0,0]:+.6f}, {M[0,1]:+.6f}], [{M[1,0]:+.6f}, {M[1,1]:+.6f}]]")
     print(f"  trace(M) = {tr:+.8f}    det(M) = {det:+.8f}")
-    print(f"  eigenvalues = {np.array2string(evals, precision=6)}")
+    print(f"  eigenvalues = {np.array2string(np.asarray(res['eigenvalues']), precision=6)}")
 
-    if np.abs(M - np.eye(2)).max() < id_tol:
-        T = _integrate_T(cRZ, magnetic_field, nfp)
-        line_angles, dirs = _snowflake_directions(T)
+    if res['type'] == 'snowflake':
+        line_angles = res['line_angles']
         print(f"  type: SNOWFLAKE (M = I)")
-        print(f"  invariant lines: {len(line_angles)}   rays (legs): {len(dirs)}")
-        for t in line_angles:
-            v = np.array([np.cos(t), np.sin(t)])
-            Qv = np.array([sum(T[i, j, k] * v[j] * v[k]
-                               for j in range(2) for k in range(2)) for i in range(2)])
-            c = float(np.dot(Qv, v))
+        print(f"  invariant lines: {len(line_angles)}   rays (legs): {len(res['directions'])}")
+        for li, t in enumerate(line_angles):
+            c = res['c'][2 * li]          # c = Q(v).v for the +ray of this line
             print(f"    line {np.degrees(t):+7.2f} deg   c = {c:+.4e}   "
                   f"({'unstable' if c > 0 else 'stable'})")
-    elif np.abs(tr) > 2.0 + tol:
-        ev, evecs = np.linalg.eig(M)
-        ev = np.real(ev); evecs = np.real(evecs)
-        iu = int(np.argmax(np.abs(ev))); is_ = 1 - iu
-        au = np.degrees(np.arctan2(evecs[1, iu], evecs[0, iu]))
-        as_ = np.degrees(np.arctan2(evecs[1, is_], evecs[0, is_]))
+    elif res['type'] == 'hyperbolic':
+        lam_u, lam_s = res['eigenvalues']            # ordered [unstable, stable]
+        au, as_ = np.degrees(res['line_angles'])     # ordered [unstable, stable]
         print(f"  type: HYPERBOLIC")
         print(f"  invariant lines: 2   rays (legs): 4")
-        print(f"    unstable: eigenvalue {ev[iu]:+.6f}  angle {au:+.2f} deg")
-        print(f"    stable:   eigenvalue {ev[is_]:+.6f}  angle {as_:+.2f} deg")
-    elif np.abs(np.abs(tr) - 2.0) <= tol:
-        lam = float(np.sign(tr))
-        K = M - lam * np.eye(2)
-        a, b = K[0, 0], K[0, 1]
-        cc, d = K[1, 0], K[1, 1]
-        v = np.array([b, -a]) if abs(a) + abs(b) >= abs(cc) + abs(d) else np.array([d, -cc])
-        ang = np.degrees(np.arctan2(v[1], v[0]))
+        print(f"    unstable: eigenvalue {lam_u:+.6f}  angle {au:+.2f} deg")
+        print(f"    stable:   eigenvalue {lam_s:+.6f}  angle {as_:+.2f} deg")
+    elif res['type'] == 'parabolic':
+        lam = res['eigenvalues'][0]
+        ang = np.degrees(res['line_angles'][0])
         print(f"  type: PARABOLIC (repeated eigenvalue {lam:+.0f})")
         print(f"  invariant lines: 1   rays (legs): 2   angle {ang:+.2f} deg")
-    else:
-        iota = np.arctan2(np.imag(evals[0]), np.real(evals[0])) * nfp / (2 * np.pi)
-        a, b = M[0, 0], M[0, 1]
-        c, d = M[1, 0], M[1, 1]
-        Q = np.array([[c, 0.5 * (d - a)], [0.5 * (d - a), -b]])
-        if Q[0, 0] < 0:
-            Q = -Q
-        w, V = np.linalg.eigh(Q)
-        sa = 1.0 / np.sqrt(w[0])
-        sb = 1.0 / np.sqrt(w[1])
-        nrm = np.sqrt(sa * sb)
-        angle = np.degrees(np.arctan2(V[1, 0], V[0, 0]))
+    else:  # elliptic
         print(f"  type: ELLIPTIC")
-        print(f"  rotational transform iota = {iota:+.6f}")
-        print(f"  invariant ellipse: major/minor ratio = {sa / sb:.6f}")
-        print(f"    semi-major (unit area) = {sa / nrm:.6f}   semi-minor = {sb / nrm:.6f}")
-        print(f"    inclination = {angle:+.2f} deg")
+        print(f"  rotational transform iota = {res['iota']:+.6f}")
 
 
 # =========================
@@ -474,6 +360,8 @@ boozer_surface = boozer_surfaces[0]
 # the full nfp=2 field period [0, 0.5]. DN keeps the half-period [0, 0.25].
 PHI_MAX = 0.25 if boozer_surface.surface.stellsym else 0.5
 NPHI = 9
+PHIS = np.linspace(0, PHI_MAX, NPHI)   # panel grid, phi/2pi
+PHIS_RAD = PHIS * 2 * np.pi            # radians, for compute_fieldlines
 # SN is non-stellsym, so the "bottom" X-point is NOT the Z-mirror of the top:
 # only trace/record the top X-point (the mirror-based bottom would be wrong).
 is_sn = not boozer_surface.surface.stellsym
@@ -506,122 +394,206 @@ xpoint_RZ.least_squares_fit(XYZ)
 
 res = compute(xpoint_RZ, boozer_surface.biotsavart, tol=CLASSIFY_TOL)
 
-xpoint.need_to_run_code=False
-xpoint.res = {'length':CurveLength(xpoint.curve).J()}
-
 OUT_DIR = str(p.parent) + "/"   # write next to singular.json so plot + sync find the files
 os.makedirs(OUT_DIR, exist_ok=True)
-legs = res['legs'] or []
 
 g0 = xpoint.curve.gamma()[0]
 nfp = xpoint.curve.nfp
 
+
 if comm_world is None or comm_world.rank == 0:
+    print_fixed_point_info("X-point", res)
+
     np.savetxt(OUT_DIR + 'xpoint.txt', g0[None, :])
     # Single source of truth for the panel phi grid (plot_manifolds.py reads this
     # so DN half-period [0,0.25] vs SN full-period [0,0.5] always agree).
-    np.savetxt(OUT_DIR + 'phis.txt', np.linspace(0, PHI_MAX, NPHI))
+    np.savetxt(OUT_DIR + 'phis.txt', PHIS)
     # X-point classification, so plot_manifolds.py can pick the zoom window
     # (hyperbolic uses a wider zoom).
     with open(OUT_DIR + 'xpoint_type.txt', 'w') as fh:
         fh.write(f"{res['type']}\n")
     with open(OUT_DIR + 'legs.txt', 'w') as fh:
-        # lam: eigenvalue of the line (hyperbolic only; nan otherwise).
-        # c  : second-order radial coefficient Q(v).v (snowflake/parabolic only;
-        #      nan for hyperbolic). Exactly one of lam/c is finite per leg.
-        fh.write('# k, theta, vR, vZ, kind, sign, lam, c\n')
-        for k, leg in enumerate(legs):
-            v2  = leg['direction']
+        fh.write('# k, theta, vR, vZ, kind, speed\n')
+        for k, v2 in enumerate([] if res['directions'] is None else res['directions']):
             th = np.arctan2(v2[1], v2[0])
-            lam = leg['lam'] if leg['lam'] is not None else float('nan')
-            c = leg['c']
-            sign = +1.0 if not leg['stable'] else -1.0
-            kind = 'stable' if leg['stable'] else 'unstable'
-            fh.write(f"{k}, {th:.6f}, {v2[0]:.6f}, {v2[1]:.6f}, {kind}, {sign:+.0f}, {lam:.6f}, {c:.6f}\n")
-
-if comm_world is None or comm_world.rank == 0:
-    print_fixed_point_info("X-point", xpoint.curve, boozer_surface.biotsavart,
-                           xpoint.curve.nfp, tol=CLASSIFY_TOL)
-    print_fixed_point_info("O-point (magnetic axis)", axes[0].curve, boozer_surface.biotsavart,
-                           axes[0].curve.nfp, tol=CLASSIFY_TOL)
-
+            if res['type'] == 'hyperbolic':
+                speed = res['eigenvalues'][0 if k < 2 else 1]   # rays [u+, u-, s+, s-]
+                stable = k >= 2
+            else:                                               # snowflake / parabolic
+                speed = res['c'][k]
+                stable = speed < 0
+            kind = 'stable' if stable else 'unstable'
+            fh.write(f"{k}, {th:.6f}, {v2[0]:.6f}, {v2[1]:.6f}, {kind}, {speed:.6f}\n")
 
 print("running the integration now...")
-def trace_fieldlines(bfield, g0, legs):
-    tmax_fl = 2e5
-    # Trace each manifold leg for this many full toroidal transits.
-    n_transits = 6
+
+# Manifold growth (type-agnostic): integrate a fixed budget of toroidal transits,
+# measure the manifold arclength in the phi=0 plane, and while it is below the
+# target re-seed from the image of the outermost fundamental interval and
+# integrate another budget. Stop once the target arclength is reached.
+BUDGET = 6                     # toroidal transits per integration call
+MANIFOLD_TARGET_LEN = 0.5   # target manifold arclength [m], measured at phi=0
+MAX_GENERATIONS = 100          # cap on re-seeding iterations
+TMAX_FL = 2e5
+
+
+def _phi_plane_rows(hits, i, ids=None):
+    """[seed_id, x, y, z] rows for every seed's hits in phi-plane i. ids maps
+    seed index -> id label (default: the seed index itself)."""
+    blocks = []
+    for j, h in enumerate(hits):
+        sel = h[h[:, 1] == i]
+        if sel.size:
+            sid = j if ids is None else ids[j]
+            blocks.append(np.column_stack((np.full(sel.shape[0], sid), sel[:, 2], sel[:, 3], sel[:, 4])))
+    return np.vstack(blocks) if blocks else np.zeros((0, 4))
+
+
+def _phi_plane_rows_s(hits, i, ids, base_s):
+    """[seed_id, s, x, y, z] rows for every seed's hits in phi-plane i, tagged
+    with the global manifold parameter s. base_s[j] is the s-value of seed j's
+    first recorded crossing this generation; successive crossings advance s by
+    one return each. Ordering the manifold polyline by s (instead of by raw
+    return index) is what keeps the line walking strictly outward: seeds that
+    survive a different number of transits, or whose seed index does not match
+    their position along the manifold, no longer fold the curve back on itself."""
+    blocks = []
+    for j, h in enumerate(hits):
+        sel = h[h[:, 1] == i]
+        if sel.size:
+            s = base_s[j] + np.arange(sel.shape[0])
+            sid = np.full(sel.shape[0], ids[j])
+            blocks.append(np.column_stack((sid, s, sel[:, 2], sel[:, 3], sel[:, 4])))
+    return np.vstack(blocks) if blocks else np.zeros((0, 5))
+
+
+def _manifold_arclength(phi0, max_arclen=None):
+    """Arclength of the manifold polyline (rows [id, s, x, y, z]), reordered by
+    the global manifold parameter s so it walks outward from the X-point (matches
+    plot_manifolds.py). With max_arclen set, the walk is cut there and
+    (capped_length, kept_rows) is returned, where kept_rows is the leading
+    <= max_arclen portion (original row order, so the plot's reorder reproduces
+    the same outward walk on the subset)."""
+    if phi0.shape[0] < 2:
+        return (0.0, phi0) if max_arclen is not None else 0.0
+    order = np.argsort(phi0[:, 1], kind='stable')   # walk outward by global parameter s
+    R = np.hypot(phi0[order, 2], phi0[order, 3])
+    Z = phi0[order, 4]
+    cum = np.concatenate(([0.0], np.cumsum(np.hypot(np.diff(R), np.diff(Z)))))
+    if max_arclen is None:
+        return float(cum[-1])
+    keep = order[cum <= max_arclen]
+    return float(min(cum[-1], max_arclen)), phi0[np.sort(keep)]
+
+
+def grow_manifold(signed_bfield, R0, Z0, t_seed):
+    """Grow one manifold branch to MANIFOLD_TARGET_LEN by repeated fixed-budget
+    integration with re-seeding. Each generation traces the current seeds for
+    BUDGET transits; if the accumulated phi=0 arclength is still short, each
+    surviving seed's last phi=0 crossing becomes the next generation's seed.
+
+    Every crossing carries a global manifold parameter s = base_s + return, where
+    base_s is the s-value of the seed's first recorded crossing this generation
+    and t_seed[j] is seed j's offset within the initial fundamental interval (in
+    return-map units). On re-seeding, base_s advances by the number of returns the
+    seed actually completed, so the s-axis stays continuous and monotone across
+    generations even though seeds survive different numbers of transits. Returns a
+    list (length NPHI) of (M,5) arrays [seed_id, s, x, y, z] and the arclength."""
+    
+    phis = PHIS_RAD
+    combined = [np.zeros((0, 5)) for _ in range(NPHI)]
+    seeds_R = np.asarray(R0, float).copy()
+    seeds_Z = np.asarray(Z0, float).copy()
+    ids = np.arange(seeds_R.size)          # original-seed id, carried across generations
+    base_s = np.asarray(t_seed, float).copy()   # global parameter of each seed's first crossing
+    L = 0.0
+    for gen in range(MAX_GENERATIONS):
+        _, hits = compute_fieldlines(
+            signed_bfield, seeds_R, seeds_Z, tmax=TMAX_FL, tol=1e-14, comm=comm_world,
+            phis=phis, stopping_criteria=[ToroidalTransitStoppingCriterion(BUDGET, False)])
+        # Append this generation's hits per phi plane, tagged with the global
+        # parameter s so the manifold polyline is ordered by arclength position.
+        for i in range(NPHI):
+            combined[i] = np.vstack((combined[i], _phi_plane_rows_s(hits, i, ids, base_s)))
+        L = _manifold_arclength(combined[0])
+        proc0_print(f"    gen {gen}: {seeds_R.size} seeds, arclength {L:.4f} m")
+        if L >= MANIFOLD_TARGET_LEN:
+            break
+        # Re-seed every surviving fieldline from its own last phi=0 crossing.
+        # base_s advances by (#crossings - 1): the last crossing becomes the new
+        # seed's first crossing, so s is continuous across the generation seam.
+        # Seeds that did not complete a full transit (< 2 crossings) are dropped.
+        nR, nZ, nid, nbase = [], [], [], []
+        for j, h in enumerate(hits):
+            p0 = h[h[:, 1] == 0]
+            if p0.shape[0] >= 2:
+                nR.append(np.hypot(p0[-1, 2], p0[-1, 3])); nZ.append(p0[-1, 4])
+                nid.append(ids[j]); nbase.append(base_s[j] + (p0.shape[0] - 1))
+        if not nR:
+            break
+        seeds_R, seeds_Z = np.array(nR), np.array(nZ)
+        ids, base_s = np.array(nid), np.array(nbase)
+    # The final generation overshoots the target; trim every plane to the target
+    # arclength so we keep and report only the manifold up to MANIFOLD_TARGET_LEN.
+    trimmed = [_manifold_arclength(c, MANIFOLD_TARGET_LEN) for c in combined]
+    return [rows for (_, rows) in trimmed], trimmed[0][0]
+
+
+def trace_fieldlines(bfield, g0, res):
     t1 = time.time()
+    nmanif = 10
+    nmanif_hyper = 10   # more seeds for the hyperbolic fundamental domain
+    R_xp = np.sqrt(g0[0]**2 + g0[1]**2)
+    dirs = [] if res['directions'] is None else res['directions']
+    for k, v2 in enumerate(dirs):
+        if res['type'] == 'hyperbolic':
+            speed = res['eigenvalues'][0 if k < 2 else 1]   # rays [u+, u-, s+, s-]
+            stable = k >= 2
+        else:                                               # snowflake / parabolic
+            speed = res['c'][k]
+            stable = speed < 0
+        kind = 'stable' if stable else 'unstable'
+        ang = np.degrees(np.arctan2(v2[1], v2[0]))
+        proc0_print(f"  tracing leg idx={k} ({kind}, angle {ang:+.2f} deg)")
 
-    n_stable = sum(1 for leg in legs if leg['stable'])
-    proc0_print(f"tracing {len(legs)} legs "
-                f"({len(legs) - n_stable} unstable, {n_stable} stable)")
-
-    nmanif=10
-    nmanif_hyper=10   # more seeds for the hyperbolic fundamental domain (pyoculus uses ~30)
-    #r_vals  = np.geomspace(1e-4, 5e-2, nmanif)   # multi-radius seeding
-    for k, leg in enumerate(legs):
-        rad = leg['c']
-        lam = leg.get('lam')
-        kind = 'stable' if leg['stable'] else 'unstable'
-        _ang = np.degrees(np.arctan2(leg['direction'][1], leg['direction'][0]))
-        proc0_print(f"  tracing leg idx={k} ({kind}, angle {_ang:+.2f} deg)")
-
-        r_max = 0.05                         # outer seed radius (stay in linear regime)
-        if lam is not None and np.isfinite(lam) and abs(lam) not in (0.0, 1.0):
-            # Hyperbolic: the map r -> ratio*r is a translation in u = log r, so the
-            # invariant seeding is uniform in log r (geomspace) over one fundamental
-            # domain [eps0/ratio, eps0]. Anchor at eps0 = 1 mm near the X-point.
-            #
-            # IMPORTANT: lam is the PER-FIELD-PERIOD eigenvalue (compute() integrates
-            # the monodromy M over 1/nfp of a torus). But compute_fieldlines records
-            # Poincare hits at a FIXED plane, which a field line returns to only once
-            # per FULL toroidal transit = nfp field periods. So the growth factor
-            # BETWEEN PLOTTED DOTS is the full-torus eigenvalue lam**nfp, and the tile
-            # that maps endpoint-to-endpoint (eps0/ratio -> eps0) under one such return
-            # must use ratio = |lam|**nfp. Using |lam| instead leaves a |lam|**(nfp-1)
-            # multiplicative gap between successive images (endpoints don't line up).
-            # (det M = 1 => the backward-traced stable leg expands by 1/|lam_s| = |lam_u|.)
-            ratio = (abs(lam) if abs(lam) > 1.0 else 1.0 / abs(lam)) ** nfp
+        # Initial fundamental-interval seeds along the eigendirection. t_seed[j]
+        # is seed j's offset (in return-map units) within the initial interval,
+        # measured in the conjugacy coordinate where one phi=0 return is a unit
+        # shift; it interleaves the seeds when the manifold is ordered by s.
+        if res['type'] == 'hyperbolic':
             eps0 = 1e-3
+            # log-uniform over one fundamental domain [eps0/ratio, eps0]; the
+            # return map scales r by `ratio` per phi=0 return, so s = log_ratio(r).
+            ratio = (abs(speed) if abs(speed) > 1.0 else 1.0 / abs(speed)) ** nfp
             r_vals = np.geomspace(eps0 / ratio, eps0, nmanif_hyper)
-        elif np.isfinite(rad) and abs(rad) > 1e-30:
-            # Snowflake/parabolic: quadratic drift r -> r + 1/2 c r^2. This map is
-            # a translation in u = 1/r, so the invariant seeding is uniform in
-            # 1/r (not log r). r_max set so the outer per-period step ~ target_step.
-            target_step = 0.01  # desired per-return displacement (5 mm)
-            r_max = min(np.sqrt(2 * target_step / abs(rad)), 0.05)
-            r_min = max(r_max / 50, 1e-3)
-            r_vals = 1.0 / np.linspace(1.0 / r_max, 1.0 / r_min, nmanif)
+            t_seed = np.log(r_vals / r_vals.min()) / np.log(ratio)
+        elif np.isfinite(speed) and abs(speed) > 1e-30:
+            eps0 = 1e-3
+            # snowflake/parabolic: uniform in 1/r (the quadratic drift is a 1/r
+            # translation of size nfp*|c| per phi=0 return, c = res['c'][k]).
+            r_max = min(np.sqrt(2 * eps0 / abs(speed)), 0.05)
+            r_vals = 1.0 / np.linspace(1.0 / r_max, 1.0 / max(r_max / 100, 1e-3), nmanif)
+            t_seed = (1.0 / r_vals.min() - 1.0 / r_vals) / (nfp * abs(speed))
         else:
-            r_min = max(r_max / 50, 1e-3)
-            r_vals = np.geomspace(r_min, r_max, nmanif)
+            r_vals = np.geomspace(1e-3, 0.05, nmanif)
+            t_seed = np.linspace(0.0, 1.0, r_vals.size)   # no model: order seeds only
 
-        v2  = leg['direction']
-        sign = +1.0 if kind == 'unstable' else -1.0
-        # v2 is the leg direction in the (R, Z) plane; seed directly in
-        # cylindrical coords (compute_fieldlines launches at phi=0).
-        R0 = np.sqrt(g0[0]**2 + g0[1]**2) + r_vals * v2[0]
+        # parabolic has no stable/unstable split (single eigendirection): always
+        # trace forward in time. Otherwise unstable -> forward, stable -> backward.
+        sign = +1.0 if (res['type'] == 'parabolic' or kind == 'unstable') else -1.0
+        R0 = R_xp + r_vals * v2[0]
         Z0 = g0[2] + r_vals * v2[1]
-        
-        print(v2)
+
         for xp in (['top'] if is_sn else ['top', 'bot']):
             tt = sign * (1.0 if xp == 'top' else -1.0)
-            phis = np.linspace(0, PHI_MAX, NPHI)*2*np.pi
-            fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
-                tt*bfield, R0, (-1.0 if xp == 'bot' else 1.0) * Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
-                phis=phis, stopping_criteria=[ToroidalTransitStoppingCriterion(n_transits, False),
-                                              LevelsetStoppingCriterion(surface_classifier.dist)])
-            proc0_print(f"  {time.time()-t1:.1f}s, hits/seed: " +' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 
+            Zseed = Z0 if xp == 'top' else -Z0
+            combined, L = grow_manifold(tt * bfield, R0, Zseed, t_seed)
+            proc0_print(f"  {time.time()-t1:.1f}s, leg {k} {xp}: arclength {L:.4f} m")
             if comm_world is None or comm_world.rank == 0:
-                for i in range(len(phis)):
-                    data_this_phi = np.zeros((0, 4))
-                    for j in range(len(fieldlines_phi_hits)):
-                        toadd = fieldlines_phi_hits[j][np.where(fieldlines_phi_hits[j][:, 1] == i)[0], 2:]
-                        toadd = np.concatenate( (j*np.ones((toadd.shape[0], 1)), toadd), axis=1)
-                        data_this_phi = np.concatenate((data_this_phi, toadd), axis=0)
-                    np.savetxt(OUT_DIR+f'poincare_{xp}_{i}_{k}.txt', data_this_phi, comments='', delimiter=',')
+                for i in range(NPHI):
+                    np.savetxt(OUT_DIR + f'poincare_{xp}_{i}_{k}.txt',
+                               combined[i], comments='', delimiter=',')
 
 
 def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
@@ -637,31 +609,23 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
     R0 = R_axis + s * (R_xp - R_axis)
     Z0 = Z_axis + s * (Z_xp - Z_axis)
 
-    phis = np.linspace(0, PHI_MAX, NPHI) * 2 * np.pi
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         bfield, R0, Z0, tmax=tmax_fl, tol=1e-13, comm=comm_world,
-        phis=phis, stopping_criteria=[ToroidalTransitStoppingCriterion(75, False),
-                                      LevelsetStoppingCriterion(surface_classifier.dist)])
+        phis=PHIS_RAD, stopping_criteria=[ToroidalTransitStoppingCriterion(75, False),
+                                          LevelsetStoppingCriterion(surface_classifier.dist)])
     proc0_print(f"  interior {time.time()-t1:.1f}s, hits/seed: " +
                 ' '.join(str(h.shape[0]) for h in fieldlines_phi_hits))
 
     if comm_world is None or comm_world.rank == 0:
-        for i in range(len(phis)):
-            data_this_phi = np.zeros((0, 4))
-            for j in range(len(fieldlines_phi_hits)):
-                m = fieldlines_phi_hits[j][:, 1] == i
-                toadd = fieldlines_phi_hits[j][m, 2:]
-                toadd = np.concatenate((j * np.ones((toadd.shape[0], 1)), toadd), axis=1)
-                data_this_phi = np.concatenate((data_this_phi, toadd), axis=0)
+        for i in range(NPHI):
             np.savetxt(OUT_DIR + f'poincare_interior_{i}.txt',
-                       data_this_phi, comments='', delimiter=',')
+                       _phi_plane_rows(fieldlines_phi_hits, i), comments='', delimiter=',')
 
 
 def surface_cross_sections(surface):
     """Optimization-surface (R, Z) cross sections at the manifold phi values.
     surface.cross_section takes the normalized angle phi/(2*pi)."""
-    phis = np.linspace(0, PHI_MAX, NPHI)
-    for ii, phi in enumerate(phis):
+    for ii, phi in enumerate(PHIS):
         XYZ = surface.cross_section(phi, thetas=100)
         R, Z = np.hypot(XYZ[:, 0], XYZ[:, 1]), XYZ[:, 2]
         RZ = np.concatenate((R[:, None], Z[:, None]), axis=1)
@@ -670,7 +634,7 @@ def surface_cross_sections(surface):
 
 def extract_vessel_cross_sections(sdf, nR=200, nZ=200):
     """Vessel SDF zero-level (R, Z) contours at the manifold phi values."""
-    phis = np.linspace(0, PHI_MAX, NPHI) * 2 * np.pi
+    phis = PHIS_RAD
     Rg = np.linspace(0.0, 1.5, nR)
     Zg = np.linspace(-1.0, 1.0, nZ)
     Rm, Zm = np.meshgrid(Rg, Zg, indexing='xy')
@@ -711,8 +675,7 @@ def save_fixed_points(axis_curve, xp_curve):
 
     A phi's file is written only when the axis + top evaluate_at_phi succeed; the
     bottom row is appended (DN only) when its evaluate_at_phi also succeeds."""
-    phis = np.linspace(0, PHI_MAX, NPHI)
-    for ii, phi in enumerate(phis):
+    for ii, phi in enumerate(PHIS):
         a_xyz, a_ok = evaluate_at_phi(axis_curve, phi)
         x_xyz, x_ok = evaluate_at_phi(xp_curve, phi)
         if not (a_ok and x_ok):
@@ -736,5 +699,5 @@ if comm_world is None or comm_world.rank == 0:
     extract_vessel_cross_sections(sdf)
     save_fixed_points(axes[0].curve, xpoint.curve)
 
-trace_fieldlines(boozer_surface.biotsavart, g0, legs)
+trace_fieldlines(boozer_surface.biotsavart, g0, res)
 trace_interior(boozer_surface.biotsavart, axes[0].curve.gamma()[0], g0)
