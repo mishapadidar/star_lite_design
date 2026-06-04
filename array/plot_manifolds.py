@@ -122,29 +122,30 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
     # even in the zoom inset where the manifold lines use dot_alpha.
     _scatter_file(ax, p.parent / f"poincare_interior_{i}.txt", interior_dot_size, alpha=1.0)
     # Manifolds, drawn on top of the interior dots (leg index k is the trailing
-    # number in poincare_{top|bot}_{i}_{k}.txt):
-    #   hyperbolic -> red (stable) / blue (unstable) lines,
-    #   snowflake  -> categorical lines,
-    #   parabolic  -> just the Poincaré dots (no stable/unstable structure; the
-    #                 single eigendirection is drawn below).
+    # number in poincare_{top|bot}_{i}_{k}.txt). All classified X-point types are
+    # drawn as Poincaré scatter DOTS (no solid manifold lines):
+    #   hyperbolic -> red (stable) / blue (unstable) dots,
+    #   snowflake  -> red (stable) / blue (unstable) dots,
+    #   parabolic  -> black dots (no stable/unstable structure; the single
+    #                 eigendirection is drawn below).
     for f in sorted(glob.glob(str(p.parent / f"poincare_*_{i}_*.txt"))):
         m = re.search(r'_(\d+)\.txt$', os.path.basename(f))
         leg_k = int(m.group(1)) if m is not None else 0
-        if _xpoint_type == 'parabolic' or _xpoint_type == 'snowflake':   # no stable/unstable structure: dots only
-            if _xpoint_type == 'snowflake':
-                col='red' if _leg_is_stable[leg_k] else 'blue'
+        if _xpoint_type in ('parabolic', 'snowflake', 'hyperbolic'):   # dots only
+            lbl = None
+            if _xpoint_type == 'parabolic':
+                col = 'black'
+            elif leg_k in _leg_is_stable:   # snowflake & hyperbolic: red=stable/blue=unstable
+                stable = _leg_is_stable[leg_k]
+                col = 'red' if stable else 'blue'
+                lbl = 'stable manifold' if stable else 'unstable manifold'
             else:
-                col='black'
-            _scatter_file(ax, f, 5, color=col)
+                col = None   # unclassified leg: per-fieldline-id categorical colour
+            _scatter_file(ax, f, 5, color=col, label=lbl)
             continue
-        col = lbl = None
-        if (_xpoint_type == 'hyperbolic' or _xpoint_type == 'snowflake') and leg_k in _leg_is_stable:
-            stable = _leg_is_stable[leg_k]
-            col = 'red' if stable else 'blue'
-            lbl = 'stable manifold' if stable else 'unstable manifold'
-        # zorder just above the analytical direction lines (leg_zorder) so the
-        # red/blue manifold lines draw OVER the black invariant-direction lines.
-        _line_file(ax, f, color=col, label=lbl, alpha=dot_alpha, lw=manif_lw,
+        # Fallback for an unknown/unclassified X-point type (xpoint_type.txt
+        # missing): draw the raw manifold files as categorical lines.
+        _line_file(ax, f, color=None, label=None, alpha=dot_alpha, lw=manif_lw,
                    leg_k=leg_k, zorder=leg_zorder + 1, do_print=do_print)
 
     f_v = p.parent / f"vessel_cross_{i}.txt"
@@ -248,7 +249,7 @@ print(f"X-point type: {_xpoint_type or '(unknown: xpoint_type.txt missing — re
 def _add_zoom(ax, i, center, rect):
     R0, Z0 = center
     axins = ax.inset_axes(rect)
-    # In the zoom, draw the invariant lines + manifolds prominently and on top.
+    # In the zoom, draw the invariant lines + manifold dots prominently and on top.
     draw_panel(axins, i, leg_zorder=5, dot_alpha=0.5)
     axins.set_xlim(R0 - ZOOM_HALF, R0 + ZOOM_HALF)
     axins.set_ylim(Z0 - ZOOM_HALF, Z0 + ZOOM_HALF)
