@@ -66,11 +66,12 @@ sync_back_filtered() {
       --include='*/' \
       --include='design_opt_final.json' \
       --include='design_opt_final.yaml' \
+      --include='design_polished_final.json' \
+      --include='design_polished_final.yaml' \
       --include='singular.json' \
       --include='singular.yaml' \
       --include='summary.txt' \
       --include='max_rel_error.txt' \
-      --include='nonQS.txt' \
       --include='scene_*.png' \
       --include='xs_*.png' \
       --include='poincare*.txt' \
@@ -161,19 +162,22 @@ if [ ! -f "$INIT_JSON" ]; then
   exit 1
 fi
 
-# nonQS gate on the initial device.
-nonqs_file="$INIT_DIR/nonQS.txt"
-if [ ! -f "$nonqs_file" ]; then
-  echo "ERROR: $nonqs_file not found"
+# Max-relative-error gate on the initial device: boozer_all.py writes the
+# largest relative constraint error (a fraction) to max_rel_error.txt. If it
+# exceeds 0.1% the device did not meet its constraints, so do NOT proceed to
+# polishing / tracing / rendering.
+maxerr_file="$INIT_DIR/max_rel_error.txt"
+if [ ! -f "$maxerr_file" ]; then
+  echo "ERROR: $maxerr_file not found"
   deactivate
   exit 1
 fi
-if awk '{ exit !($1 > 20) }' "$nonqs_file"; then
-  echo "ERROR: nonQS = $(cat "$nonqs_file")% > 20%, aborting"
+if awk '{ exit !($1 > 0.001) }' "$maxerr_file"; then
+  echo "ERROR: max relative error = $(cat "$maxerr_file") > 0.1%, aborting"
   deactivate
   exit 1
 fi
-echo "nonQS = $(cat "$nonqs_file")% (OK)"
+echo "max relative error = $(cat "$maxerr_file") (<= 0.1%, OK)"
 
 # Directories to render in Phase B, paired with the json the tracer consumes.
 RENDER_DIRS=("$INIT_DIR")
@@ -195,29 +199,22 @@ if [ -n "$MONO_CONSTRAINT" ]; then
     mkdir -p "$POLISH_DIR"
 
     echo "--- polishing+optimizing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
-    # boozer_singular_opt.py reads THIS run's num_aux=0 design (and the
-    # design_opt_final.yaml saved next to it for the weights), runs the
-    # singular polish + coil optimization, and writes design_opt_final.json
-    # (boozer surfaces/axes re-solved on the combined modular+aux coil set)
-    # into --outdir.
-    ./boozer_singular_opt.py \
-      --input "$INIT_JSON" \
-      --num-aux "$num_aux" \
-      --constraint "$MONO_CONSTRAINT" \
-      --margin "$margin" \
-      --well "$well" \
-      --Z "$Z" \
-      --distance "$distance" \
-      --on-vessel "$on_vessel" \
-      --config "$config" \
-      --outdir "$POLISH_DIR" || true
+    # Copy THIS run's num_aux=0 design (json + sibling yaml) into the polish dir;
+    # boozer_singular_opt.py reads ALL its parameters from that yaml (weights,
+    # thresholds, monodromy constraint, config id, num_aux=10, well state) and
+    # writes design_polished_final.json (+ .yaml) IN PLACE in the same dir, with
+    # the boozer surfaces/axes re-solved on the combined modular+aux coil set.
+    cp "$INIT_JSON" "$POLISH_DIR/design_opt_final.json"
+    cp "$INIT_DIR/design_opt_final.yaml" "$POLISH_DIR/design_opt_final.yaml"
 
-    if [ -f "$POLISH_DIR/design_opt_final.json" ]; then
+    ./boozer_singular_opt.py "$POLISH_DIR/design_opt_final.json" --num-aux "$num_aux" || true
+
+    if [ -f "$POLISH_DIR/design_polished_final.json" ]; then
       echo "singular optimization num_aux=$num_aux succeeded"
       RENDER_DIRS+=("$POLISH_DIR")
-      RENDER_JSONS+=("$POLISH_DIR/design_opt_final.json")
+      RENDER_JSONS+=("$POLISH_DIR/design_polished_final.json")
     else
-      echo "singular optimization num_aux=$num_aux failed (no design_opt_final.json) — skipping"
+      echo "singular optimization num_aux=$num_aux failed (no design_polished_final.json) — skipping"
       rm -rf "$POLISH_DIR"
     fi
   done
@@ -237,10 +234,11 @@ export NUMEXPR_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
 
-# mk_manifolds + plot_manifolds support all of mono=0,1,2; every device (init
-# and polished+optimized) reads its own design_opt_final.json. For polished
-# devices that json carries the COMBINED modular+aux coil set, written by the
-# finalize step of boozer_singular_opt.py.
+# mk_manifolds + plot_manifolds support all of mono=0,1,2. The init device is
+# traced from its design_opt_final.json; each polished device is traced from its
+# design_polished_final.json (which carries the COMBINED modular+aux coil set,
+# written by the finalize step of boozer_singular_opt.py). RENDER_JSONS already
+# holds the right path per device.
 for i in "${!RENDER_DIRS[@]}"; do
   d="${RENDER_DIRS[$i]}"
   j="${RENDER_JSONS[$i]}"

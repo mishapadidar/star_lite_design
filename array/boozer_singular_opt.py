@@ -64,73 +64,53 @@ from star_lite_design.utils.SingularPeriodicFieldline_diff import (
     SingularPeriodicFieldline_diff, DependentMu, _mu_names, _CURRENT_SCALE)
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--input", type=str, required=True,
-                    help="design json from a boozer_all.py run "
-                         "([boozer_surfaces, iota_Gs, axes, xpoints, sdf])")
-parser.add_argument("--num-aux", type=int, required=True,
-                    help="number of planar circular auxiliary coils (>= 1)")
-parser.add_argument("--constraint", type=str, required=True, choices=['trace', 'identity'],
-                    help="monodromy constraint of the singular polish")
-parser.add_argument("--margin", type=float)
-parser.add_argument("--well", type=str, default='OFF')
-parser.add_argument("--Z", type=int)
-parser.add_argument("--distance", type=int)
-parser.add_argument("--on-vessel", type=int)
-parser.add_argument("--config", type=int)
-parser.add_argument("--outdir", type=str, default=None,
-                    help="output directory (default: ./output_singular_opt/<task name>/)")
+# The boozer_all design json is the only required input; everything else
+# (weights, thresholds, monodromy constraint, config id, well state, ...) is
+# read from the sibling yaml of the same basename in the same directory. The
+# number of auxiliary coils is given on the command line (prefix.sh passes it),
+# defaulting to NUM_AUX_DEFAULT. Outputs are written in place, next to the input.
+NUM_AUX_DEFAULT = 10
 
+parser = argparse.ArgumentParser(
+    description="Singular polish + coil optimization, continuing a boozer_all "
+                "design. Reads all run parameters from the design json's sibling "
+                ".yaml; writes its outputs next to the input.")
+parser.add_argument("design_json",
+                    help="path to a boozer_all design_opt_final.json (the matching "
+                         ".yaml in the same directory supplies all parameters)")
+parser.add_argument("--num-aux", type=int, default=NUM_AUX_DEFAULT,
+                    help=f"number of planar circular auxiliary coils (default {NUM_AUX_DEFAULT})")
 args = parser.parse_args()
 
-if args.well == "OFF":
-    well_target = 0.0
-    well_active = False
-else:
-    well_target = float(args.well)
-    well_active = True
+_in = os.path.abspath(args.design_json)
+_yaml_path = os.path.splitext(_in)[0] + '.yaml'
+config = yaml.safe_load(open(_yaml_path, 'r'))
+data = load(_in)
 
-on_vessel = args.on_vessel
-margin_target = args.margin
-Z_weight = args.Z
-distance_weight = args.distance
-config_id = args.config
-num_aux = args.num_aux
-mon_constraint = args.constraint
-if num_aux < 1:
-    raise SystemExit(f"--num-aux must be >= 1, got {num_aux}")
+# run parameters: num_aux from the command line, everything else from the yaml
+config_id = int(config['CONFIG_ID'])
+mon_constraint = config['MONODROMY_CONSTRAINT']
+if mon_constraint not in ('trace', 'identity'):
+    raise SystemExit(f"config MONODROMY_CONSTRAINT must be 'trace' or 'identity', "
+                     f"got {mon_constraint!r}")
+num_aux = int(args.num_aux)
+config['NUM_AUX'] = num_aux   # record it in the (output) yaml
 # 1 dependent current for the trace system, 3 for identity.
 N_DEP_CURRENTS = 1 if mon_constraint == 'trace' else 3
 if num_aux < N_DEP_CURRENTS:
-    raise SystemExit(f"--num-aux must be >= {N_DEP_CURRENTS} for the "
+    raise SystemExit(f"NUM_AUX must be >= {N_DEP_CURRENTS} for the "
                      f"{mon_constraint!r} constraint, got {num_aux}")
 
-margin_str = f"{margin_target:.2f}".replace(".", "p")
-if args.well == "OFF":
-    well_str = "OFF"
-else:
-    well_str = str(float(args.well))
-_in_tag = os.path.basename(os.path.dirname(os.path.abspath(args.input))) or \
-    os.path.splitext(os.path.basename(args.input))[0]
-TASK_NAME = (f"{_in_tag}_singopt_margin={margin_str}_well={well_str}_Z={Z_weight}"
-             f"_onvessel={on_vessel}_distance={distance_weight}_configID={config_id}"
-             f"_numaux={num_aux}_constraint={mon_constraint}")
-OUT_DIR = (os.path.join(args.outdir, '') if args.outdir is not None
-           else f"./output_singular_opt/{TASK_NAME}/")
+# write outputs in place (next to the input design json)
+OUT_DIR = os.path.join(os.path.dirname(_in), '')
+TASK_NAME = os.path.basename(os.path.dirname(_in)) or os.path.basename(_in)
 print(f"Task: {TASK_NAME}")
+print(f"Input: {_in}")
 print(f"Output dir: {OUT_DIR}")
+print(f"constraint={mon_constraint}  num_aux={num_aux}  config_id={config_id}")
 
 print("Running SINGULAR-POLISH Optimization")
 print("================================")
-
-# load the optimized design produced by boozer_all.py. The lists are already
-# sliced to the configuration(s) that run optimized; the vessel sdf is the one
-# the design was optimized against. The weights/thresholds come from the yaml
-# boozer_all.py saved NEXT TO the input json (design_opt_final.yaml), so this
-# run continues from that run's final (escalated) weights.
-_yaml_path = os.path.splitext(args.input)[0] + '.yaml'
-config = yaml.safe_load(open(_yaml_path, 'r'))
-data = load(args.input)
 boozer_surfaces = data[0]   # BoozerSurfaces
 iota_Gs = data[1]           # (iota, G) pairs
 axes = data[2]              # magnetic axis field lines
@@ -154,39 +134,28 @@ curves = [c.curve for c in coils]
 base_curve_idx = [0, 4] if boozer_surfaces[0].surface.stellsym else [0, 1, 2]
 base_curves = [curves[i] for i in base_curve_idx]
 
-config['COIL_ON_VESSEL_THRESHOLD'] = -0.001
+# ALL thresholds AND weights are read STRAIGHT from the config yaml (boozer_all
+# wrote them); the polish does not set its own values. This includes the well
+# state: WELL_ACTIVE False / WELL_WEIGHT == 0 means the well penalty was OFF in
+# the boozer_all run and is loaded as off here.
 COIL_ON_VESSEL_THRESHOLD = config['COIL_ON_VESSEL_THRESHOLD']
-
-# leave enough space for trims
-config['COIL_CLEARANCE_THRESHOLD'] = 0.12
 COIL_CLEARANCE_THRESHOLD = config['COIL_CLEARANCE_THRESHOLD']
-
-config['COIL_ON_VESSEL_WEIGHT'] = 1e-1 if on_vessel else 0.0
-config['COIL_CLEARANCE_WEIGHT'] = 0.0 if on_vessel else config['COIL_TO_VESSEL_WEIGHT']
-
 COIL_ON_VESSEL_WEIGHT = Weight(config['COIL_ON_VESSEL_WEIGHT'])
 COIL_CLEARANCE_WEIGHT = Weight(config['COIL_CLEARANCE_WEIGHT'])
 
+PLASMA_VESSEL_MARGIN_THRESHOLD = config['PLASMA_VESSEL_MARGIN_THRESHOLD']
 
-PLASMA_VESSEL_MARGIN_THRESHOLD = margin_target
-config['PLASMA_VESSEL_MARGIN_THRESHOLD'] = PLASMA_VESSEL_MARGIN_THRESHOLD
-
-# load all the target, and threshold quantities along with their associated penalty weights
 CURRENT_THRESHOLD = config['CURRENT_THRESHOLD']
 CURRENT_WEIGHT = Weight(config['CURRENT_WEIGHT'])
 
-config['WELL_THRESHOLD'] = well_target
-config['WELL_WEIGHT'] = 1e-9 if well_active else 0.0
+well_active = bool(config['WELL_ACTIVE'])
 WELL_THRESHOLD = float(config['WELL_THRESHOLD'])
 WELL_WEIGHT = Weight(config['WELL_WEIGHT'])
+print(f"WELL loaded from config: active={well_active}  threshold={WELL_THRESHOLD}  weight={WELL_WEIGHT.value}")
 
-config['FIELDLINE_MEANZ_WEIGHT'] = 10.0 * Z_weight
-config['FIELDLINE_MEANZ_THRESHOLD'] = 0.001
 FIELDLINE_MEANZ_WEIGHT = Weight(config['FIELDLINE_MEANZ_WEIGHT'])
 FIELDLINE_MEANZ_THRESHOLD = config['FIELDLINE_MEANZ_THRESHOLD']
 
-config['FIELDLINE_MEANDIST_WEIGHT'] = 10.0 * distance_weight
-config['FIELDLINE_MEANDIST_THRESHOLD'] = 0.001
 FIELDLINE_MEANDIST_WEIGHT = Weight(config['FIELDLINE_MEANDIST_WEIGHT'])
 FIELDLINE_MEANDIST_THRESHOLD = config['FIELDLINE_MEANDIST_THRESHOLD']
 
@@ -206,12 +175,12 @@ CURVATURE_WEIGHT = Weight(config['CURVATURE_WEIGHT'])
 MEAN_SQUARED_CURVATURE_WEIGHT = Weight(config['MEAN_SQUARED_CURVATURE_WEIGHT'])
 LENGTH_WEIGHT = Weight(config['LENGTH_WEIGHT'])
 IOTAS_WEIGHT=Weight(config['IOTAS_WEIGHT'])
-MAJOR_RADIUS_WEIGHT=Weight(config['MAJOR_RADIUS_WEIGHT']/1000.)
+MAJOR_RADIUS_WEIGHT=Weight(config['MAJOR_RADIUS_WEIGHT'])
 
 BOOZER_RESIDUAL_WEIGHT=Weight(config['BOOZER_RESIDUAL_WEIGHT'])
 
 
-PLASMA_VESSEL_MARGIN_WEIGHT = Weight(config['COIL_TO_VESSEL_WEIGHT'])
+PLASMA_VESSEL_MARGIN_WEIGHT = Weight(config['PLASMA_VESSEL_MARGIN_WEIGHT'])
 MODB_WEIGHT = Weight(config['MODB_WEIGHT'])
 ARCLENGTH_WEIGHT = Weight(config['ARCLENGTH_WEIGHT'])
 
@@ -341,25 +310,29 @@ for boozer_surface in boozer_surfaces:
         else:
             J_curr += CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
 
-# INDEPENDENT aux currents: bounded the same way as the modular coil currents
-# (|I| <= CURRENT_THRESHOLD), accumulated into J_curr so they share
-# CURRENT_WEIGHT and its escalation. mu currents are in scaled units, hence
-# the threshold CURRENT_THRESHOLD/_CURRENT_SCALE (parallel to the
-# CURRENT_THRESHOLD/curr.scale used for the ScaledCurrents above).
+
+# AUX coil currents: BOTH dependent and independent aux currents are constrained
+# to -AUX_CURRENT_EPS <= I <= AUX_CURRENT_EPS, sharing ONE penalty weight
+# (AUX_CURRENT_WEIGHT) in a single objective J_aux_current. Dependent currents go
+# through DependentMu (their value is an implicit function of the design vars, so
+# the gradient must flow through the adjoint); independent currents are free mu
+# dofs handled directly by MuBound. (mu units: EPS/_CURRENT_SCALE; EPS is in A.)
+config['AUX_CURRENT_EPS'] = 1.0  # Amperes
+config['AUX_CURRENT_WEIGHT'] = 1e4
+AUX_CURRENT_EPS = config['AUX_CURRENT_EPS']
+AUX_CURRENT_WEIGHT = Weight(config['AUX_CURRENT_WEIGHT'])
+_aux_eps_mu = AUX_CURRENT_EPS / _CURRENT_SCALE   # bound in mu units
+dependent_mus = [DependentMu(fl, name) for fl in sing_fls for name in DEP_CURRENT_NAMES]
+J_aux_current = sum(QuadraticPenalty(dm, +_aux_eps_mu, 'max')
+                    + QuadraticPenalty(dm, -_aux_eps_mu, 'min')
+                    for dm in dependent_mus)
 for fl in sing_fls:
     for name in INDEP_CURRENT_NAMES:
-        J_curr += MuBound(fl, name, CURRENT_THRESHOLD / _CURRENT_SCALE)
+        J_aux_current += MuBound(fl, name, _aux_eps_mu)
 
-# DEPENDENT aux currents: inequality constraint -EPS <= I_dep <= EPS on the
-# DependentMu optimizable (mu units: EPS * _CURRENT_SCALE ~ 796 A).
-config['DEP_AUX_CURRENT_EPS'] = 1e-6
-config['DEP_AUX_CURRENT_WEIGHT'] = 1e4
-DEP_AUX_CURRENT_EPS = config['DEP_AUX_CURRENT_EPS']
-DEP_AUX_CURRENT_WEIGHT = Weight(config['DEP_AUX_CURRENT_WEIGHT'])
-dependent_mus = [DependentMu(fl, name) for fl in sing_fls for name in DEP_CURRENT_NAMES]
-J_dep_aux = sum(QuadraticPenalty(dm, +DEP_AUX_CURRENT_EPS, 'max')
-                + QuadraticPenalty(dm, -DEP_AUX_CURRENT_EPS, 'min')
-                for dm in dependent_mus)
+
+
+
 
 plasma_boundary_entities = xpoints + boozer_surfaces
 plasma_boundary_signs = np.array([-1.0 for _ in xpoints] + [-1.0 for _ in boozer_surfaces])
@@ -421,7 +394,7 @@ JF = (J_nonQSRatio
     + WELL_WEIGHT * J_wells
     + FIELDLINE_MEANZ_WEIGHT * J_meanz
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
-    + DEP_AUX_CURRENT_WEIGHT * J_dep_aux
+    + AUX_CURRENT_WEIGHT * J_aux_current
     )
 
 
@@ -442,7 +415,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'fieldline meanz': FIELDLINE_MEANZ_WEIGHT * J_meanz,
         'fieldline mean dist':FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance,
         'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
-        'aux dependent current': DEP_AUX_CURRENT_WEIGHT * J_dep_aux,
+        'aux current': AUX_CURRENT_WEIGHT * J_aux_current,
         }
 
 states = {
@@ -538,14 +511,22 @@ def callback(dofs):
     for k in states.keys():
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
-    # auxiliary-coil parameters mu, with currents scaled up to Amperes.
+    # auxiliary-coil parameters, per fl: summarize the currents (scaled to
+    # Amperes) by min/max, separated into DEPENDENT (solved, bounded to
+    # +-AUX_CURRENT_EPS) and INDEPENDENT (free design vars); list the radii + z.
     for fi, fl in enumerate(sing_fls):
-        mu_str = '  '.join(
-            f"{nm}={v * _CURRENT_SCALE:+.4e}A" if k < num_aux else f"{nm}={v:+.4f}"
-            for k, (nm, v) in enumerate(zip(MU_NAMES, fl.mu)))
-        table2.add_row(f'aux mu [{fi}]', mu_str)
-    table2.add_row('aux dependent currents [A]',
-                   ' '.join([f'{dm.J() * _CURRENT_SCALE:+.4e}' for dm in dependent_mus]))
+        mu = np.asarray(fl.mu)
+        dep_I = np.abs(mu[:N_DEP_CURRENTS]) * _CURRENT_SCALE
+        indep_I = np.abs(mu[N_DEP_CURRENTS:num_aux]) * _CURRENT_SCALE
+        radii = mu[num_aux:2 * num_aux]
+        z = float(mu[-1])
+        table2.add_row(f'aux dep |I| [{fi}] [A]',
+                       f'min={dep_I.min():.4e}  max={dep_I.max():.4e}')
+        table2.add_row(f'aux indep |I| [{fi}] [A]',
+                       (f'min={indep_I.min():.4e}  max={indep_I.max():.4e}'
+                        if indep_I.size else '(none)'))
+        table2.add_row(f'aux r,z [{fi}]',
+                       '  '.join([f'r{k+1}={radii[k]:+.4f}' for k in range(num_aux)] + [f'z={z:+.4f}']))
     table2.add_row('singular polish monodromy', ' '.join(
         [f'{np.array2string(np.asarray(fl.res["monodromy_matrix"]))}' for fl in sing_fls]))
     table2.add_row('well', ' '.join([f'{w.well().max():.3e}' for w in magnetic_wells]))
@@ -579,7 +560,7 @@ def callback(dofs):
             boozer_surface.surface.to_vtk(OUT_DIR + f"surf_tmp_{idx}")
         # standard 5-entry layout, with the singular-polish field lines in the
         # x-point slot (xpoints is sing_fls).
-        save([boozer_surfaces, iota_Gs, axes, sing_fls, sdf], OUT_DIR + f'design_tmp.json')
+        save([boozer_surfaces, iota_Gs, axes, sing_fls, sdf], OUT_DIR + f'design_polished_tmp.json')
 
     dat_dict["iter"] += 1
 
@@ -605,6 +586,12 @@ def _restore_state():
     # set JF.x LAST: it owns the independent mu (free dofs of the sing_fls), so
     # this re-imposes the good design vector after the mu reset above.
     JF.x = dat_dict['x']
+
+
+# Failed-evaluation barrier: aim the 1-D parabola minimum at ~this fraction of
+# the failed step, so the line search retreats to a short feasible step rather
+# than all the way to zero (which would stall BFGS).
+BARRIER_RETREAT = 0.1
 
 
 def fun(dofs):
@@ -639,13 +626,23 @@ def fun(dofs):
             fail_reasons.append(f'singular polish[{i}] system is not square (bad mu partition)')
 
     if fail_reasons:
-        print('failed — rolling back to last good state: ' + '; '.join(fail_reasons))
+        print('failed — quadratic barrier toward last good point: ' + '; '.join(fail_reasons))
         _restore_state()
-        # Return the previous J and the negated previous gradient so BFGS's
-        # line search shrinks the step back toward the last good point.
-        # in case the penalty method is failing, this will always return
-        # larger by 1e3
-        return 1e3 + dat_dict['J'], -dat_dict['dJ']
+        # The trial step left the solvable region (Newton solves diverged /
+        # surface self-intersects). Return a SMOOTH, CONSISTENT quadratic barrier
+        # anchored at the last good point (x0, f0, g0):
+        #     f(x) = f0 + g0.(x-x0) + (K/2)||x-x0||^2 ,   g(x) = g0 + K (x-x0)
+        # Because g == grad f exactly and, along the BFGS search direction, f is a
+        # convex parabola, the Wolfe line search backtracks to a short step just
+        # inside the feasible region instead of failing on a flat/inconsistent
+        # wall. K places the parabola minimum at ~BARRIER_RETREAT of this failed
+        # step (scale-aware, floored to stay strongly convex).
+        x0, f0, g0 = dat_dict['x'], dat_dict['J'], dat_dict['dJ']
+        dx = dofs - x0
+        nrm2 = float(dx @ dx) + 1e-300
+        gdx = float(g0 @ dx)
+        K = max(abs(gdx) / (BARRIER_RETREAT * nrm2), 1.0)
+        return f0 + gdx + 0.5 * K * nrm2, g0 + K * dx
 
     return J, grad
 
@@ -691,16 +688,19 @@ for j in range(10):
     J0, dJ0 = fun(dofs)
     callback(dofs)
 
-    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
-    # the INDEPENDENT aux currents are bounded like the modular currents:
-    # include them (in Amperes) so curr_err escalates CURRENT_WEIGHT for both.
+    # MODULAR coil currents (A): bounded by CURRENT_THRESHOLD; weight CURRENT_WEIGHT.
+    modular_currents = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value())
+                        for boozer_surface in boozer_surfaces for idx in base_curve_idx]
+    curr_err = max([max(c - CURRENT_THRESHOLD, 0.) / CURRENT_THRESHOLD for c in modular_currents])
+    # AUX currents (A): BOTH dependent and independent are bounded by AUX_CURRENT_EPS
+    # and share ONE weight (AUX_CURRENT_WEIGHT) via J_aux_current. dm.J() is the mu
+    # value -> *_CURRENT_SCALE for A; independent currents are read straight from fl.mu.
+    dep_aux_amps = [np.abs(float(dm.J())) * _CURRENT_SCALE for dm in dependent_mus]
     indep_aux_amps = [np.abs(float(fl.mu[k])) * _CURRENT_SCALE
                       for fl in sing_fls for k in range(N_DEP_CURRENTS, num_aux)]
-    currents_list = currents_list + indep_aux_amps
-    curr_err = max([max([c-CURRENT_THRESHOLD, 0.])/CURRENT_THRESHOLD for c in currents_list])
-    # DEPENDENT aux currents: violation of -EPS <= I_dep <= EPS (mu units).
-    dep_aux_vals = [float(dm.J()) for dm in dependent_mus]
-    dep_aux_err = max([max(abs(v) - DEP_AUX_CURRENT_EPS, 0.)/DEP_AUX_CURRENT_EPS for v in dep_aux_vals])
+    aux_amps = dep_aux_amps + indep_aux_amps
+    aux_err = (max([max(c - AUX_CURRENT_EPS, 0.) / AUX_CURRENT_EPS for c in aux_amps])
+               if aux_amps else 0.)
     iota_err = max([np.abs(IOTAS.J() - IOT_TARGET)/np.abs(IOT_TARGET) for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
     mr_err = np.abs(mr.J()-MR_TARGET)/MR_TARGET
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
@@ -745,17 +745,19 @@ for j in range(10):
     # check which constraints are violated and increase weight if violated by more than 0.1%
     if curr_err > 0.001 and CURRENT_WEIGHT.value != 0.:
         CURRENT_WEIGHT*=10
-        print("CURRENT ERROR (modular + independent aux)", curr_err)
-    if dep_aux_err > 0.001 and DEP_AUX_CURRENT_WEIGHT.value != 0.:
-        DEP_AUX_CURRENT_WEIGHT *= 10
-        print("DEPENDENT AUX CURRENT ERROR", dep_aux_err)
+        print("MODULAR CURRENT ERROR", curr_err)
+    if aux_err > 0.001 and AUX_CURRENT_WEIGHT.value != 0.:
+        AUX_CURRENT_WEIGHT *= 10
+        print("AUX CURRENT ERROR (dependent + independent)", aux_err)
     if plasma_vessel_margin_err > 0.001 and PLASMA_VESSEL_MARGIN_WEIGHT.value != 0.:
         PLASMA_VESSEL_MARGIN_WEIGHT*=10
         print("PLASMA-VESSEL MARGIN ERROR", plasma_vessel_margin_err)
-    if (on_vessel and coil_on_vessel_err > 0.001) and COIL_ON_VESSEL_WEIGHT.value != 0.:
+    # on-vessel vs clearance is encoded by which weight is nonzero (the other is
+    # 0 in the config), so the weight check alone selects the active constraint.
+    if coil_on_vessel_err > 0.001 and COIL_ON_VESSEL_WEIGHT.value != 0.:
         COIL_ON_VESSEL_WEIGHT *= 10
         print("COIL-ON-VESSEL ERROR", coil_on_vessel_err)
-    if ((not on_vessel) and coil_clearance_err > 0.001) and COIL_CLEARANCE_WEIGHT.value != 0.:
+    if coil_clearance_err > 0.001 and COIL_CLEARANCE_WEIGHT.value != 0.:
         COIL_CLEARANCE_WEIGHT *= 10
         print("COIL-CLEARANCE ERROR", coil_clearance_err)
     if iota_err > 0.001 and IOTAS_WEIGHT.value != 0.:
@@ -801,11 +803,11 @@ for j in range(10):
         boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_{j}")
     # standard 5-entry layout, with the singular-polish field lines in the
     # x-point slot (xpoints is sing_fls).
-    save([boozer_surfaces, iota_Gs, axes, sing_fls, sdf], OUT_DIR + f'design_opt_{j}.json')
+    save([boozer_surfaces, iota_Gs, axes, sing_fls, sdf], OUT_DIR + f'design_polished_{j}.json')
 
     # save the weights in a yaml file
     config['CURRENT_WEIGHT'] = CURRENT_WEIGHT.value
-    config['DEP_AUX_CURRENT_WEIGHT'] = DEP_AUX_CURRENT_WEIGHT.value
+    config['AUX_CURRENT_WEIGHT'] = AUX_CURRENT_WEIGHT.value
     config['COIL_TO_COIL_WEIGHT'] = COIL_TO_COIL_WEIGHT.value
     config['CURVATURE_WEIGHT'] = CURVATURE_WEIGHT.value
     config['MEAN_SQUARED_CURVATURE_WEIGHT'] = MEAN_SQUARED_CURVATURE_WEIGHT.value
@@ -823,7 +825,7 @@ for j in range(10):
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
 
     # Save to YAML
-    with open(OUT_DIR + f'design_opt_{j}.yaml', 'w') as f:
+    with open(OUT_DIR + f'design_polished_{j}.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
 sdf.to_vtk(OUT_DIR + f'vessel_opt_final', nx=40, ny=40, nz=40)
@@ -833,9 +835,9 @@ curves_to_vtk([fl.curve for fl in sing_fls], OUT_DIR + f"xpoint_singular_curves_
 curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_final")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_final")
-with open(OUT_DIR + f'design_opt_final.yaml', 'w') as f:
+with open(OUT_DIR + f'design_polished_final.yaml', 'w') as f:
     yaml.dump(config, f, default_flow_style=False)
-# design_opt_final.json is written by the FINALIZE step at the end of the
+# design_polished_final.json is written by the FINALIZE step at the end of the
 # script (boozer surfaces and axes re-solved on the COMBINED modular+aux coil
 # set), so downstream tracing (mk_manifolds.py) sees the polished field.
 
@@ -845,10 +847,8 @@ final_nonqs_pct = 100. * J_nonQSRatio.J()**0.5
 # Recompute all error metrics one more time with final dofs
 final_metrics = {
     'nonQS_percent':              (final_nonqs_pct,                                None,                          None),
-    'current':                    (max(currents_list),                             CURRENT_THRESHOLD,             curr_err if CURRENT_WEIGHT.value != 0. else 0.0),
-    'aux_dependent_current_A':    (max(abs(v) for v in dep_aux_vals) * _CURRENT_SCALE,
-                                                                                   DEP_AUX_CURRENT_EPS * _CURRENT_SCALE,
-                                                                                   dep_aux_err if DEP_AUX_CURRENT_WEIGHT.value != 0. else 0.0),
+    'current':                    (max(modular_currents),                          CURRENT_THRESHOLD,             curr_err if CURRENT_WEIGHT.value != 0. else 0.0),
+    'aux_current_A':              (max(aux_amps) if aux_amps else 0.0,             AUX_CURRENT_EPS,               aux_err if AUX_CURRENT_WEIGHT.value != 0. else 0.0),
     'iotas':                      (max(IOTAS.J() for IOTAS in IOTAS_LIST),         max(IOTAS_TARGET),             iota_err if IOTAS_WEIGHT.value != 0. else 0.0),
     'major_radius':               (mr.J(),                                         MR_TARGET,                     mr_err if MAJOR_RADIUS_WEIGHT.value != 0. else 0.0),
     'coil_length':                (max(Jl.J() for Jl in Jls),                      LENGTH_THRESHOLD,              clen_err if LENGTH_WEIGHT.value != 0. else 0.0),
@@ -937,14 +937,14 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
     bs_res = bs_out.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
     if not bs_res['success'] or bs_out.surface.is_self_intersecting():
         print(f"ERROR: idx={idx}: BoozerSurface re-solve on the combined coil set failed")
-        print("ABORT: design_opt_final.json will not be written.")
+        print("ABORT: design_polished_final.json will not be written.")
         raise SystemExit(1)
 
     new_ax = PeriodicFieldLine(BiotSavart(combined_coils), ax.curve)
     ax_res = new_ax.run_code(CurveLength(ax.curve).J())
     if not ax_res['success']:
         print(f"ERROR: idx={idx}: magnetic-axis re-solve on the combined coil set failed")
-        print("ABORT: design_opt_final.json will not be written.")
+        print("ABORT: design_polished_final.json will not be written.")
         raise SystemExit(1)
 
     out_boozer_surfaces.append(bs_out)
@@ -956,5 +956,5 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
 # standard 5-entry layout consumed by mk_manifolds.py: the boozer surfaces and
 # axes carry the COMBINED (modular + aux) coils, and the singular-polish field
 # lines sit in the x-point slot.
-save([out_boozer_surfaces, out_iota_Gs, out_axes, sing_fls, sdf], OUT_DIR + f'design_opt_final.json')
-print(f"wrote {OUT_DIR}design_opt_final.json (combined modular+aux coil set)")
+save([out_boozer_surfaces, out_iota_Gs, out_axes, sing_fls, sdf], OUT_DIR + f'design_polished_final.json')
+print(f"wrote {OUT_DIR}design_polished_final.json (combined modular+aux coil set)")

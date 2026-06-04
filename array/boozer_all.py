@@ -192,6 +192,10 @@ CURRENT_THRESHOLD = config['CURRENT_THRESHOLD']
 CURRENT_WEIGHT = Weight(config['CURRENT_WEIGHT'])
 
 config['WELL_THRESHOLD'] = well_target
+# Record the well ON/OFF state explicitly so the downstream polish can load it
+# (well OFF -> WELL_ACTIVE False and WELL_WEIGHT 0.0; both are written to the
+# design_opt_final.yaml).
+config['WELL_ACTIVE'] = bool(well_active)
 config['WELL_WEIGHT'] = 1e-9 if well_active else 0.0
 WELL_THRESHOLD = float(config['WELL_THRESHOLD'])
 WELL_WEIGHT = Weight(config['WELL_WEIGHT'])
@@ -311,6 +315,12 @@ J_fieldline_mean_distance = VesselDistance(
 config['MONODROMY_THRESHOLD'] = 0.1
 MONODROMY_THRESHOLD = config['MONODROMY_THRESHOLD']
 MONODROMY_WEIGHT = Weight(1e-4) if mono > 0 else Weight(0.)
+# Record, for the downstream singular polish, which configuration this design
+# is for and which monodromy constraint to enforce (mono 1 -> M=I 'identity',
+# mono 2 -> tr(M)=2 'trace'; mono 0 -> no polish). The polish reads these from
+# the saved yaml so it needs no command-line arguments.
+config['CONFIG_ID'] = config_id
+config['MONODROMY_CONSTRAINT'] = {1: 'identity', 2: 'trace'}.get(mono, None)
 tmos = [TangentMap(xp, BiotSavart(boozer_surface.biotsavart.coils), MONODROMY_THRESHOLD, mtype='identity' if mono == 1 else 'jordan') for xp, boozer_surface in zip(xpoints, boozer_surfaces)]
 MONODROMY_LIST = [Monodromy(tmo) for tmo in tmos]
 J_monodromy = sum(MONODROMY_LIST) # target rotational transform is that computed on the initial surface
@@ -715,6 +725,12 @@ class _XpointSurfaceSatisfied(Exception):
     pass
 
 
+# Failed-evaluation barrier: aim the 1-D parabola minimum at ~this fraction of
+# the failed step, so the line search retreats to a short feasible step rather
+# than all the way to zero (which would stall BFGS).
+BARRIER_RETREAT = 0.1
+
+
 def fun(dofs):
     JF.x = dofs
 
@@ -742,13 +758,23 @@ def fun(dofs):
             fail_reasons.append(f'xpoint[{i}] Newton solve did not converge')
 
     if fail_reasons:
-        print('failed — rolling back to last good state: ' + '; '.join(fail_reasons))
+        print('failed — quadratic barrier toward last good point: ' + '; '.join(fail_reasons))
         _restore_state()
-        # Return the previous J and the negated previous gradient so BFGS's
-        # line search shrinks the step back toward the last good point.
-        # in case the penalty method is failing, this will always return
-        # larger by 1e3
-        return 1e3 + dat_dict['J'], -dat_dict['dJ']
+        # The trial step left the solvable region (Newton solves diverged /
+        # surface self-intersects). Return a SMOOTH, CONSISTENT quadratic barrier
+        # anchored at the last good point (x0, f0, g0):
+        #     f(x) = f0 + g0.(x-x0) + (K/2)||x-x0||^2 ,   g(x) = g0 + K (x-x0)
+        # Because g == grad f exactly and, along the BFGS search direction, f is a
+        # convex parabola, the Wolfe line search backtracks to a short step just
+        # inside the feasible region instead of failing on a flat/inconsistent
+        # wall. K places the parabola minimum at ~BARRIER_RETREAT of this failed
+        # step (scale-aware, floored to stay strongly convex).
+        x0, f0, g0 = dat_dict['x'], dat_dict['J'], dat_dict['dJ']
+        dx = dofs - x0
+        nrm2 = float(dx @ dx) + 1e-300
+        gdx = float(g0 @ dx)
+        K = max(abs(gdx) / (BARRIER_RETREAT * nrm2), 1.0)
+        return f0 + gdx + 0.5 * K * nrm2, g0 + K * dx
 
     return J, grad
 
@@ -1083,6 +1109,3 @@ with open(OUT_DIR + 'summary.txt', 'w') as f:
 max_rel_err = max(abs(v[2]) for v in final_metrics.values() if v[2] is not None)
 with open(OUT_DIR + 'max_rel_error.txt', 'w') as f:
     f.write(f"{max_rel_err:.18e}\n")
-
-# keep nonQS.txt for backwards compatibility
-np.savetxt(OUT_DIR + f'nonQS.txt', np.array([final_nonqs_pct]))
