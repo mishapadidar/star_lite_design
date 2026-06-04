@@ -4,15 +4,16 @@ set -uo pipefail
 # Merged initial-optimization + polish workflow.
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                    <vessel_id> <mono> <attempt> <null(DN|SN)>
+#                    <vessel_id> <mono> <attempt> <null(DN|SN)> [num_aux]
 #
 # 1. boozer_all.py produces the unpolished device (num_aux=0); its base modular
 #    coils are perturbed (seeded by the device ID) for this attempt.
 # 2. The num_aux=0 device is traced + plotted + rendered.
-# 3. If mono is 1 or 2, num_aux = 1..NUM_AUX_MAX is scanned, polishing AND
-#    re-optimizing the freshly-computed num_aux=0 design
-#    (boozer_singular_opt.py) into its own num_aux=N directory. A failed run
-#    for one num_aux is logged and skipped (it does not fail the task). It
+# 3. If mono is 1 or 2, the freshly-computed num_aux=0 design is polished AND
+#    re-optimized (boozer_singular_opt.py) at EXACTLY num_aux=NUM_AUX_POLISH
+#    auxiliary coils (11th argument, default 10; no scan) into its own
+#    num_aux=N directory -- so devices carry either 0 or NUM_AUX_POLISH aux
+#    coils. A failed run is logged and skipped (it does not fail the task). It
 #    reuses THIS run's num_aux=0 design from local scratch, so there is no
 #    cross-task dependency.
 
@@ -27,8 +28,9 @@ mono="$8"
 attempt="$9"
 null="${10}"
 
-# Maximum number of auxiliary planar coils to try when polishing (mono=1,2).
-NUM_AUX_MAX=7
+# Number of auxiliary planar coils for the polish (mono=1,2): either devices
+# have 0 (unpolished) or exactly this many aux coils.
+NUM_AUX_POLISH="${11:-10}"
 
 if [ "$well" = "OFF" ]; then
   well_str="OFF"
@@ -187,7 +189,7 @@ else
 fi
 
 if [ -n "$MONO_CONSTRAINT" ]; then
-  for num_aux in $(seq 1 "$NUM_AUX_MAX"); do
+  for num_aux in "$NUM_AUX_POLISH"; do
     POLISH_NAME="$(task_name "$num_aux")"
     POLISH_DIR="./output/$POLISH_NAME"
     mkdir -p "$POLISH_DIR"
@@ -235,8 +237,10 @@ export NUMEXPR_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
 
-# mk_manifolds + plot_manifolds support all of mono=0,1,2; the init device reads
-# design_opt_final.json, polished devices read singular.json.
+# mk_manifolds + plot_manifolds support all of mono=0,1,2; every device (init
+# and polished+optimized) reads its own design_opt_final.json. For polished
+# devices that json carries the COMBINED modular+aux coil set, written by the
+# finalize step of boozer_singular_opt.py.
 for i in "${!RENDER_DIRS[@]}"; do
   d="${RENDER_DIRS[$i]}"
   j="${RENDER_JSONS[$i]}"

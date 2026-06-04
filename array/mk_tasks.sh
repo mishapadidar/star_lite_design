@@ -2,14 +2,16 @@
 # Emit the disBatch task list for the merged (init + polish) workflow.
 #
 # One line per (margin, well, Z, distance, on_vessel, config, vessel_id, mono,
-# attempt). num_aux is NOT a task dimension: prefix.sh always produces the
-# num_aux=0 (unpolished) device, and then for mono=1,2 it loops internally over
-# num_aux = 1..NUM_AUX_MAX, polishing the freshly-computed num_aux=0 design.
-# So num_aux>0 devices are created only for mono=1,2, as required.
+# attempt). prefix.sh always produces the num_aux=0 (unpolished) device, and
+# then for mono=1,2 it polishes+re-optimizes the freshly-computed num_aux=0
+# design at EXACTLY num_aux=NUM_AUX (passed as the 11th argument; no scan).
+# Devices therefore carry either 0 or NUM_AUX auxiliary coils, and num_aux>0
+# devices are created only for mono=1,2, as required.
 #
 # Each parameter combination is attempted ATTEMPTS times; each attempt perturbs
 # the base modular coils with a different (device-ID-seeded) jitter so the
 # optimizer starts from a different point.
+NUM_AUX=10
 margins=(0.06 0.08 0.10 0.12)
 wells=(OFF 100 0 -100)
 binary_values=(0 1)
@@ -34,7 +36,7 @@ for margin in "${margins[@]}"; do
               for mono in "${mono_values[@]}"; do
                 for null in "${null_values[@]}"; do
                   for ((attempt=0; attempt<ATTEMPTS; attempt++)); do
-                    echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${attempt} ${null}" >> tasks.jobs
+                    echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${attempt} ${null} ${NUM_AUX}" >> tasks.jobs
                   done
                 done
               done
