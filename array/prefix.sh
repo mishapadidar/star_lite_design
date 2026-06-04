@@ -209,13 +209,21 @@ if [ -n "$MONO_CONSTRAINT" ]; then
 
     ./boozer_singular_opt.py "$POLISH_DIR/design_opt_final.json" --num-aux "$num_aux" || true
 
-    if [ -f "$POLISH_DIR/design_polished_final.json" ]; then
-      echo "singular optimization num_aux=$num_aux succeeded"
-      RENDER_DIRS+=("$POLISH_DIR")
-      RENDER_JSONS+=("$POLISH_DIR/design_polished_final.json")
-    else
+    if [ ! -f "$POLISH_DIR/design_polished_final.json" ]; then
       echo "singular optimization num_aux=$num_aux failed (no design_polished_final.json) — skipping"
       rm -rf "$POLISH_DIR"
+    else
+      # Verify the POLISHED device also meets its constraints to 0.1% (the polish
+      # writes its own max_rel_error.txt). If it exceeds 0.1%, keep the results
+      # but do NOT trace/plot/render it.
+      polish_err="$POLISH_DIR/max_rel_error.txt"
+      if [ -f "$polish_err" ] && awk '{ exit !($1 > 0.001) }' "$polish_err"; then
+        echo "polished num_aux=$num_aux exceeds 0.1% (max rel err = $(cat "$polish_err")) — not rendering"
+      else
+        echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err" 2>/dev/null) <= 0.1%)"
+        RENDER_DIRS+=("$POLISH_DIR")
+        RENDER_JSONS+=("$POLISH_DIR/design_polished_final.json")
+      fi
     fi
   done
 fi
