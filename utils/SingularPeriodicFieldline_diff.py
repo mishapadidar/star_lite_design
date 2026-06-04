@@ -551,14 +551,22 @@ class SingularPeriodicFieldline_diff(Optimizable):
                                       # independent mu + modular-coil dofs
     """
 
-    def __init__(self, biotsavart, curve, mu, options=None, stellsym_aux=True,
-                 monodromy_matrix=None, length=None):
+    def __init__(self, biotsavart, curve, mu=None, options=None, stellsym_aux=True,
+                 monodromy_matrix=None, length=None, dofs=None):
         # mu ARE the local dofs of this Optimizable.  Fixing a mu dof
         # (self.fix('z')) marks it DEPENDENT: the Newton solver solves for it
         # and it is removed from the optimization design space.  Free mu dofs
         # are INDEPENDENT design variables, held during the Newton solve.
-        mu = np.asarray(mu, dtype=float)
-        super().__init__(x0=mu, names=_mu_names(len(mu)), depends_on=[biotsavart])
+        #
+        # ``dofs`` is supplied by simsopt's from_dict on reconstruction: it is a
+        # DOFs object carrying the mu values, names AND the fixed/free mask, so
+        # it preserves the dependent/independent partition across save/load.
+        # It takes precedence over ``mu`` (also serialized, but maskless).
+        if dofs is not None:
+            super().__init__(dofs=dofs, depends_on=[biotsavart])
+        else:
+            mu = np.asarray(mu, dtype=float)
+            super().__init__(x0=mu, names=_mu_names(len(mu)), depends_on=[biotsavart])
         self.biotsavart = biotsavart
         self.curve = curve
         self.need_to_run_code = True
