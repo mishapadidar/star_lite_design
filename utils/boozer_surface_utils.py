@@ -365,4 +365,44 @@ def solve_residual_equation_exactly_newton2(self, tol=1e-10, maxiter=10, iota=0.
     self.need_to_run_code = False
     return res
 
+from scipy.optimize import fsolve, least_squares, root_scalar
+def evaluate_at_phi(curve, phi, tol=1e-10):
+    # map phi to [0, 1)
+    phi += np.ceil(-phi)
+
+    def curve_val(theta):
+        return curve.gamma_pure(curve.x, np.array([theta]))[0]
+
+    def theta2phi(theta_in, phi0):
+        xyz = curve_val(theta_in)
+        angle = np.atan2(xyz[1], xyz[0]) / (2 * np.pi) - phi0
+        angle += np.ceil(-angle)
+        return angle
+
+    def fun(theta):
+        # if theta is exactly 1, then override the rest. hacky.
+        if theta == 1.:
+            return 1. - phi_prime
+        angle = theta2phi(theta, phi0)
+        return angle - phi_prime
+
+    xyz0 = curve_val(0.)
+    phi0 = np.arctan2(xyz0[1], xyz0[0]) / (2 * np.pi)
+    phi_prime = phi - phi0
+    phi_prime += np.ceil(-phi_prime)
+
+    result = root_scalar(fun, bracket=[0, 1.])
+    conv = result.converged
+
+    # check that the result is accurate by dotting with something orthogonal to the angle
+    xyz = curve_val(result.root)
+    R = np.sqrt(xyz[0]**2 + xyz[1]**2)
+    c = np.cos(2 * np.pi * phi)
+    s = np.sin(2 * np.pi * phi)
+    accurate = np.abs(-s * xyz[0] + c * xyz[1]) / R < tol
+    success = conv and accurate
+
+    return xyz, success
+
+
 

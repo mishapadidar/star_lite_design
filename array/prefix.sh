@@ -9,11 +9,12 @@ set -uo pipefail
 # 1. boozer_all.py produces the unpolished device (num_aux=0); its base modular
 #    coils are perturbed (seeded by the device ID) for this attempt.
 # 2. The num_aux=0 device is traced + plotted + rendered.
-# 3. If mono is 1 or 2, num_aux = 1..NUM_AUX_MAX is scanned, polishing the
-#    freshly-computed num_aux=0 design (boozer_singular.py) into its own
-#    num_aux=N directory. A failed polish for one num_aux is logged and skipped
-#    (it does not fail the task). The polish reuses THIS run's num_aux=0 design
-#    from local scratch, so there is no cross-task dependency.
+# 3. If mono is 1 or 2, num_aux = 1..NUM_AUX_MAX is scanned, polishing AND
+#    re-optimizing the freshly-computed num_aux=0 design
+#    (boozer_singular_opt.py) into its own num_aux=N directory. A failed run
+#    for one num_aux is logged and skipped (it does not fail the task). It
+#    reuses THIS run's num_aux=0 design from local scratch, so there is no
+#    cross-task dependency.
 
 margin="$1"
 well="$2"
@@ -84,6 +85,7 @@ sync_back_filtered() {
       --include='curves_opt_final.vtu' \
       --include='ma_opt_final.vtu' \
       --include='xpoint_curves_opt_final.vtu' \
+      --include='xpoint_singular_curves_opt_final.vtu' \
       --include='vessel_opt_final.vtr' \
       --include='*xpoint_deletion*' \
       --exclude='*' \
@@ -189,19 +191,31 @@ if [ -n "$MONO_CONSTRAINT" ]; then
     POLISH_NAME="$(task_name "$num_aux")"
     POLISH_DIR="./output/$POLISH_NAME"
     mkdir -p "$POLISH_DIR"
-    # Reuse THIS run's num_aux=0 design as the polish input.
-    cp "$INIT_JSON" "$POLISH_DIR/design_opt_final.json"
 
-    echo "--- polishing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
-    ./boozer_singular.py "$POLISH_DIR/design_opt_final.json" "$MONO_CONSTRAINT" "$num_aux" || true
+    echo "--- polishing+optimizing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
+    # boozer_singular_opt.py reads THIS run's num_aux=0 design (and the
+    # design_opt_final.yaml saved next to it for the weights), runs the
+    # singular polish + coil optimization, and writes design_opt_final.json
+    # (boozer surfaces/axes re-solved on the combined modular+aux coil set)
+    # into --outdir.
+    ./boozer_singular_opt.py \
+      --input "$INIT_JSON" \
+      --num-aux "$num_aux" \
+      --constraint "$MONO_CONSTRAINT" \
+      --margin "$margin" \
+      --well "$well" \
+      --Z "$Z" \
+      --distance "$distance" \
+      --on-vessel "$on_vessel" \
+      --config "$config" \
+      --outdir "$POLISH_DIR" || true
 
-    if [ -f "$POLISH_DIR/singular.json" ]; then
-      echo "polish num_aux=$num_aux succeeded"
-      ./compute_summary.py "$POLISH_DIR/singular.json" "$INIT_SUMMARY" || true
+    if [ -f "$POLISH_DIR/design_opt_final.json" ]; then
+      echo "singular optimization num_aux=$num_aux succeeded"
       RENDER_DIRS+=("$POLISH_DIR")
-      RENDER_JSONS+=("$POLISH_DIR/singular.json")
+      RENDER_JSONS+=("$POLISH_DIR/design_opt_final.json")
     else
-      echo "polish num_aux=$num_aux failed (no singular.json) — skipping"
+      echo "singular optimization num_aux=$num_aux failed (no design_opt_final.json) — skipping"
       rm -rf "$POLISH_DIR"
     fi
   done

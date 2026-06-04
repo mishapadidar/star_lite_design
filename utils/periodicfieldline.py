@@ -155,6 +155,7 @@ class PeriodicFieldLine(Optimizable):
 
 
     def solve_residual_equation_exactly_newton(self, tol=1e-10, maxiter=10, length=None, verbose=False):
+        #verbose=True
         if not self.need_to_run_code:
             return self.res
         
@@ -173,7 +174,7 @@ class PeriodicFieldLine(Optimizable):
 
         norm = 1e6
         while i < maxiter:
-            norm = np.linalg.norm(b)
+            norm = np.linalg.norm(b, ord=np.inf)
             if norm <= tol:
                 break
             dx = np.linalg.solve(J, b)
@@ -197,4 +198,3 @@ class PeriodicFieldLine(Optimizable):
         self.res = res
         self.need_to_run_code = False
         return res
-

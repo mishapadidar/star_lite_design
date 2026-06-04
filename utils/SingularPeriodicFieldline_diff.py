@@ -102,7 +102,8 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.geo import CurveLength, CurveXYZFourierSymmetries
 from simsopt.objectives import forward_backward
 
-__all__ = ['SingularPeriodicFieldline_diff', 'DependentMu']
+__all__ = ['SingularPeriodicFieldline_diff', 'DependentMu',
+           'singularperiodicfieldline_dcoils_dcurrents_vjp']
 
 # mu_0 / (4 pi)  in SI units (T·m/A)
 _MU0_4PI = 1.0e-7
@@ -509,6 +510,30 @@ def _mu_names(nmu):
     return [f'I{k+1}' for k in range(N)] + [f'r{k+1}' for k in range(N)] + ['z']
 
 
+def singularperiodicfieldline_dcoils_dcurrents_vjp(lm, biotsavart, fieldline):
+    """lm^T dg/d(external inputs) at the converged singular polish, with the
+    same call signature as periodicfieldline_dcoils_dcurrents_vjp so the class
+    can be used by VesselDistance / FieldLineMeanZ / etc. via res['vjp'].
+
+    ``lm`` lives on the ACTIVE residual rows (it is the forward_backward
+    solution of Jm^T adj = dJ/dx built from res['PLU']).  Returns a simsopt
+    Derivative with two parts:
+      * the modular-coil part, assembled with B_vjp / B_and_dB_vjp;
+      * the INDEPENDENT-mu part, Derivative({fieldline: lm^T dg/dmu_indep}),
+        so downstream objectives also get correct gradients with respect to
+        the free mu design variables (the polished curve depends on them).
+    """
+    row_mask, n_mon = fieldline._row_mask()
+    dres2_dB, dM_dB, dM_dgradB = fieldline._field_partials()
+    deriv = fieldline._lm_to_vjp(lm, row_mask, n_mon, dres2_dB, dM_dB, dM_dgradB)
+    J_indep = fieldline.res.get('J_indep')
+    if J_indep is not None and J_indep.shape[1] > 0:
+        g = np.zeros(fieldline.local_full_dof_size)
+        g[fieldline.res['indep_idx']] = lm @ J_indep
+        deriv = deriv + Derivative({fieldline: g})
+    return deriv
+
+
 class SingularPeriodicFieldline_diff(Optimizable):
     """Self-contained singular periodic field line whose LOCAL DOFS ARE mu,
     with an adaptive Newton polish over the dependent/independent partition
@@ -597,7 +622,8 @@ class SingularPeriodicFieldline_diff(Optimizable):
 
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
-        self._dmu_cache = None   # invalidate the cached dmu_by_dindependent() dict
+        self._dmu_cache = None       # invalidate the cached dmu_by_dindependent() dict
+        self._partials_cache = None  # invalidate the cached _field_partials() tensors
 
     @property
     def mu(self):
@@ -734,6 +760,16 @@ class SingularPeriodicFieldline_diff(Optimizable):
             'square': square,
             'monodromy_matrix': M,
         }
+        # Adjoint plumbing for downstream objectives (VesselDistance,
+        # FieldLineMeanZ, ...): the independent-mu columns of dg on the active
+        # rows, and -- for square partitions -- the PLU factorization and the
+        # dg/d(coils, independent mu) vjp.
+        indep_idx = np.where(~col_mask[-nmu:])[0]
+        res['indep_idx'] = indep_idx
+        res['J_indep'] = J[row_mask][:, J.shape[1] - nmu + indep_idx]
+        if square:
+            res['PLU'] = lu(Jm)
+            res['vjp'] = singularperiodicfieldline_dcoils_dcurrents_vjp
 
         if verbose:
             print(f"NEWTON solve - {res['success']}  iter={res['iter']}, length={res['length']:.8f}, "
@@ -856,7 +892,12 @@ class SingularPeriodicFieldline_diff(Optimizable):
         dres2_dB : (npts, 3, 3)   d(B_l/|B|)/dB_j on the field-line points.
         dM_dB    : (n_mon, npts_tm, 3)      d r_mon / dB on the monodromy points.
         dM_dgradB: (n_mon, npts_tm, 3, 3)   d r_mon / d(gradB) ([i,k,j] layout).
+
+        Cached per converged state (several downstream penalties call the vjp
+        per gradient evaluation); cleared by recompute_bell.
         """
+        if getattr(self, '_partials_cache', None) is not None:
+            return self._partials_cache
         res = self.res
         length = res['length']
         mu = np.asarray(res['mu'])
@@ -890,7 +931,8 @@ class SingularPeriodicFieldline_diff(Optimizable):
             # single equation M00 + M11 - 2  ->  combine rows 0 and 3.
             dM_dB = (dM_dB[0] + dM_dB[3])[None, ...]
             dM_dgradB = (dM_dgradB[0] + dM_dgradB[3])[None, ...]
-        return dres2_dB, dM_dB, dM_dgradB
+        self._partials_cache = (dres2_dB, dM_dB, dM_dgradB)
+        return self._partials_cache
 
     def _lm_to_vjp(self, lm_active, row_mask, n_mon, dres2_dB, dM_dB, dM_dgradB):
         """Given an adjoint vector on the active (masked) residual rows, return

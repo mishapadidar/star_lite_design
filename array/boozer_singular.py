@@ -137,7 +137,7 @@ for idx, (xpoint, boozer_surface, (iota, G), ax) in enumerate(
     # (stellsym_aux=False).
     xpoint_fl = SingularPeriodicFieldLine(
         BiotSavart(boozer_surface.biotsavart.coils), xpoint.curve,
-        options={'newton_tol': 1e-9, 'newton_maxiter': 20, 'verbose': True,
+        options={'newton_tol': 1e-10, 'newton_maxiter': 20, 'verbose': True,
                  'use_lstsq': True, 'monodromy_constraint': monodromy_constraint},
         stellsym_aux=boozer_surface.surface.stellsym,
     )

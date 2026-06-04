@@ -7,7 +7,12 @@ import numpy as np
 import jax.numpy as jnp
 from jax import jit, grad
 from .periodicfieldline import PeriodicFieldLine
+from .SingularPeriodicFieldline_diff import SingularPeriodicFieldline_diff
 from simsopt.geo import SurfaceRZFourier, Curve, BoozerSurface
+
+# Field-line entity types accepted by VesselDistance: both follow the same
+# interface (.curve, .biotsavart, run_code(res['length']), res['PLU'], res['vjp']).
+_FIELDLINE_TYPES = (PeriodicFieldLine, SingularPeriodicFieldline_diff)
 from pyevtk.hl import gridToVTK  # pip install pyevtk
 import jax
 import jax.numpy as jnp
@@ -292,7 +297,7 @@ class VesselDistance(Optimizable):
         max_dist_fieldline = -np.inf
         max_dist_bs = -np.inf
         for sign, entity in zip(self.sign, self.entities):
-            if isinstance(entity, PeriodicFieldLine):
+            if isinstance(entity, _FIELDLINE_TYPES):
                 curve = entity.curve
                 sd_tmp = self.sdf.pure(curve.gamma(), self.sdf.local_full_x, sign)
                 max_dist_tmp = np.abs(sd_tmp-sd_tmp.mean()).max()
@@ -319,7 +324,7 @@ class VesselDistance(Optimizable):
         min_dist_fieldline = np.inf
         min_dist_bs = np.inf
         for sign, entity in zip(self.sign, self.entities):
-            if isinstance(entity, PeriodicFieldLine):
+            if isinstance(entity, _FIELDLINE_TYPES):
                 curve = entity.curve
                 sd_tmp = self.sdf.pure(curve.gamma(), self.sdf.local_full_x, sign)
                 min_dist_tmp = sd_tmp.min()
@@ -343,7 +348,7 @@ class VesselDistance(Optimizable):
     def J(self):
         res = 0.
         for sign, entity in zip(self.sign, self.entities):
-            if isinstance(entity, PeriodicFieldLine):
+            if isinstance(entity, _FIELDLINE_TYPES):
                 # make sure the fieldline reflects its dofs
                 if entity.need_to_run_code:
                     entity.run_code(entity.res['length'])
@@ -366,15 +371,15 @@ class VesselDistance(Optimizable):
         dres = Derivative({self.sdf: np.zeros_like(self.sdf.local_full_x)})
 
         for sign, entity in zip(self.sign, self.entities):
-            if isinstance(entity, PeriodicFieldLine) or isinstance(entity, Curve):
-                line = entity.curve if isinstance(entity, PeriodicFieldLine) else entity
+            if isinstance(entity, _FIELDLINE_TYPES) or isinstance(entity, Curve):
+                line = entity.curve if isinstance(entity, _FIELDLINE_TYPES) else entity
                 
                 dJ_dgamma = self.thisgrad0(line.gamma(), self.sdf.local_full_x, sign)
                 dres_curve = line.dgamma_by_dcoeff_vjp(dJ_dgamma)
                 dJ_dparams = self.thisgrad1(line.gamma(), self.sdf.local_full_x, sign)
                 dres += dres_curve + Derivative({self.sdf:dJ_dparams}) 
 
-                if isinstance(entity, PeriodicFieldLine):
+                if isinstance(entity, _FIELDLINE_TYPES):
                     # make sure the fieldline reflects its dofs
                     if entity.need_to_run_code:
                         entity.run_code(entity.res['length'])
