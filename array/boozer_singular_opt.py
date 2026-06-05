@@ -467,6 +467,30 @@ penalties = {'nonQS': J_nonQSRatio,
         'aux coil distance': AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance,
         }
 
+# Weight object backing each penalty above, keyed identically. 'nonQS' has an
+# implicit weight of 1 (no Weight object) and is the primary objective, so it is
+# omitted and never pre-scaled.
+penalty_weights = {
+        'iotas': IOTAS_WEIGHT,
+        'length': LENGTH_WEIGHT,
+        'coil-to-coil': COIL_TO_COIL_WEIGHT,
+        'curvature': CURVATURE_WEIGHT,
+        'mean-squared curvature': MEAN_SQUARED_CURVATURE_WEIGHT,
+        'arclength': ARCLENGTH_WEIGHT,
+        'Boozer residual': BOOZER_RESIDUAL_WEIGHT,
+        'modB': MODB_WEIGHT,
+        'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT,
+        'coil-on-vessel': COIL_ON_VESSEL_WEIGHT,
+        'coil-clearance': COIL_CLEARANCE_WEIGHT,
+        'current': CURRENT_WEIGHT,
+        'well': WELL_WEIGHT,
+        'fieldline meanz': FIELDLINE_MEANZ_WEIGHT,
+        'fieldline mean dist': FIELDLINE_MEANDIST_WEIGHT,
+        'major radius': MAJOR_RADIUS_WEIGHT,
+        'aux current': AUX_CURRENT_WEIGHT,
+        'aux coil distance': AUX_COIL_DISTANCE_WEIGHT,
+        }
+
 states = {
         'iotas': IOTAS_LIST,
         'modB': modBs,
@@ -713,6 +737,25 @@ print("Norm QS gradient", np.linalg.norm(J_nonQSRatio.dJ()))
 for bbsurf in boozer_surfaces:
     for ii in base_curve_idx:
         print(f"Coil {ii} current: {bbsurf.biotsavart.coils[ii].current.full_x} A")
+
+# The weights were loaded from the yaml for the (modular-field) boozer_all run and
+# may be too large now that every penalty is evaluated in the TOTAL (modular + aux)
+# field. Before optimizing, shrink any weight whose CURRENT contribution
+# weight*penalty.J() exceeds 1 -- by repeated factors of 10 -- so each weighted
+# term starts below 1. The in-loop x10 escalation can raise it back as the
+# constraints demand. Modifying each Weight in place is seen by JF (same objects).
+print("Pre-scaling penalty weights so each weighted term starts below 1 in the total field:")
+for _name, _scaled in penalties.items():
+    _w = penalty_weights.get(_name)
+    if _w is None or _w.value == 0.:
+        continue
+    _prod = _scaled.J()
+    if not np.isfinite(_prod) or _prod <= 1.0:
+        continue
+    _bare = _prod / _w.value          # the unweighted penalty value (dofs fixed here)
+    while _w.value * _bare > 1.0:
+        _w *= 0.1
+    print(f"  {_name}: weight -> {_w.value:.3e}  (penalty={_bare:.3e}, product {_prod:.3e} -> {_w.value * _bare:.3e})")
 
 
 print("""
@@ -995,9 +1038,13 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
         aux_coils = [Coil(c, I) for c, I in zip(aux_base_curves, aux_base_currents)]
     combined_coils = boozer_surface.biotsavart.coils + aux_coils
 
-    # compute the Boozer surface and magnetic axis in the TOTAL field (modular +
-    # auxiliary) via SingularBiotSavart(fl) rather than an explicit combined coil set.
-    field = SingularBiotSavart(fl)
+    # Save the polished design on an EXPLICIT combined modular+aux BiotSavart
+    # (real CurveXYZFourier aux coils), NOT SingularBiotSavart: the total field is
+    # identical (~1e-17) but pure-C++, so downstream tracing (mk_manifolds.py's
+    # compute_fieldlines) runs at native speed instead of calling back into
+    # Python/jax per integration step. The optimization above still uses
+    # SingularBiotSavart; only the saved/finalized field is the combined coil set.
+    field = BiotSavart(combined_coils)
     bs_out = BoozerSurface(field, boozer_surface.surface,
                            Volume(boozer_surface.surface), boozer_surface.surface.volume())
     bs_res = bs_out.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
