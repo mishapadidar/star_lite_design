@@ -317,7 +317,7 @@ for boozer_surface in boozer_surfaces:
 # through DependentMu (their value is an implicit function of the design vars, so
 # the gradient must flow through the adjoint); independent currents are free mu
 # dofs handled directly by MuBound. (mu units: EPS/_CURRENT_SCALE; EPS is in A.)
-config['AUX_CURRENT_EPS'] = 100.0  # Amperes
+config['AUX_CURRENT_EPS'] = 10.0  # Amperes
 config['AUX_CURRENT_WEIGHT'] = 1e2
 AUX_CURRENT_EPS = config['AUX_CURRENT_EPS']
 AUX_CURRENT_WEIGHT = Weight(config['AUX_CURRENT_WEIGHT'])
