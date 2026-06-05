@@ -102,7 +102,7 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.geo import CurveLength, CurveXYZFourierSymmetries
 from simsopt.objectives import forward_backward
 
-__all__ = ['SingularPeriodicFieldline_diff', 'DependentMu',
+__all__ = ['SingularPeriodicFieldline_diff', 'DependentMu', 'AuxCoilDistance',
            'singularperiodicfieldline_dcoils_dcurrents_vjp']
 
 # mu_0 / (4 pi)  in SI units (T·m/A)
@@ -360,12 +360,43 @@ def tangent_map_pure(B, gradB, L, D):
 def monodromy_pure(B, gradB, L, gammadash, gammadashdash, D):
     """Project the tangent map onto the (normal, binormal) frame.
 
-    The frame is built from the curve's EXACT Fourier derivatives g', g''
-    (not by applying the Chebyshev D to gamma: differentiating the sampled
-    curve twice amplifies round-off by ~cond(D)^2 ~ N^4, which floored the
-    Newton residual at ~1e-9):
-
         fT = g'/|g'|,   fT' = (g'' - fT (fT.g''))/|g'|,   fN = fT'/|fT'|.
+
+    WHY g'/g'' INSTEAD OF D@gamma (don't "simplify" this back!):
+    -----------------------------------------------------------
+    The frame here is built from the curve's EXACT analytic Fourier
+    derivatives (curve_tm.gammadash()/gammadashdash()), NOT by applying the
+    Chebyshev differentiation matrix D to the sampled curve points. The old
+    code did `tangent = D@gamma; normal = D@fT` -- TWO numerical
+    differentiations -- and that floored the Newton residual at ~5e-10 (M was
+    only reproducible to ~1e-8). The fix took it to ~1e-14.
+
+    The mechanism: differentiating SAMPLED values amplifies round-off, because
+    the per-node float64 error (~1e-16, ABSOLUTE and the same size at every
+    node) is broadband -- it has energy at all modes up to the grid frequency
+    ~N, including the highest modes, where the (band-limited, smooth) true
+    curve has ~zero content. D multiplies mode k by ~k and, being a Chebyshev
+    matrix on N points, amplifies the top modes by ~||D|| ~ N^2. So a 1e-16
+    noise mode sitting where the signal is ~0 gets blown up by ~N^2 with no
+    signal to keep the relative error small; doing it TWICE (tangent, then
+    normal) squares that to ~N^4. With N = 6*order+1 = 97, N^4 ~ 1e8, hence
+    1e-16 -> ~1e-8 garbage in fN/fB and therefore in M.
+
+    The analytic Fourier derivative does NOT have this problem even though it
+    also multiplies high modes by k: the curve is stored as only ~order Fourier
+    coefficients c_k (no spurious high modes exist), and each c_k carries a
+    RELATIVE ~1e-16 error. Differentiation scales the coefficient AND its error
+    by the same (2*pi*k), so the relative accuracy is preserved (the factor
+    cancels in the ratio) -- it is a diagonal scaling with condition number
+    ~order(~16), not the ~N^2-norm, noise-injecting D-on-samples operator.
+    In short: the danger is not "multiply by k", it is differentiating
+    resampled band-limited data, where noise is a fixed absolute floor sitting
+    in high modes whose true value is 0. Staying in coefficient form avoids it.
+
+    (The tangent-map SOLVE below still uses D once, inside a linear solve; that
+    contributes only ~1e-15 to M -- a single, well-conditioned use, not a raw
+    double differentiation of the curve. Only the frame construction was the
+    culprit, and only it was changed.)
     """
     ngd = jnp.linalg.norm(gammadash, axis=-1)[:, None]
     fT = gammadash / ngd
@@ -1142,5 +1173,119 @@ class DependentMu(Optimizable):
                 f"a dependent (fixed) dof. Call fl.fix({self.name!r}) and re-solve.")
         self._J = float(fl.mu[self._idx])
         self._dJ = fl.dmu_by_dindependent()[self.name]
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class AuxCoilDistance(Optimizable):
+    """One-sided clearance penalty keeping the planar circular AUXILIARY coils
+    of one :class:`SingularPeriodicFieldline_diff` at least ``threshold`` away
+    from a set of MODULAR coil curves.
+
+    The aux coils are NOT Curve objects -- they live as the
+    mu = (I_1..I_N, r_1..r_N, Z) dofs of ``fl`` -- so, like :class:`DependentMu`,
+    this reads the aux radii r_k and height Z straight from ``fl.mu`` and returns
+    a simsopt ``Derivative`` landing on BOTH fl's (free) mu dofs AND the
+    modular-curve dofs (via each curve's dgamma_by_dcoeff vjp).
+
+    Aux coil k is a circle of radius r_k centered on the z-axis at height Z,
+    plus its stellarator-symmetric partner at -Z when ``fl.stellsym_aux``.  The
+    distance from a modular-curve point p=(x, y, z) to such a circle is closed
+    form,
+
+        d = sqrt((rho - r_k)^2 + (z - Z_s)^2),    rho = sqrt(x^2 + y^2),
+
+    so the penalty is the usual squared one-sided violation, summed over every
+    modular-curve quadrature point and every aux circle,
+
+        J = sum max(threshold - d, 0)^2.
+
+    Only the geometry (radii r_k, height Z) enters, all of which are independent
+    (free) mu design variables, so J/dJ need no Newton solve; the aux currents
+    do not affect the distance and receive zero gradient.
+
+    Typical use::
+
+        Jdist = AuxCoilDistance(fl, modular_curves, threshold=0.12)
+        Jdist.J()                  # sum of squared clearance violations
+        Jdist.shortest_distance()  # min center-line distance (for callbacks)
+    """
+
+    def __init__(self, fl, curves, threshold):
+        Optimizable.__init__(self, depends_on=[fl, *curves])
+        self.fl = fl
+        self.curves = list(curves)
+        self.threshold = float(threshold)
+
+    def _geom(self):
+        """Return the aux radii (array), N, and the aux-circle heights as
+        (Z_s, sZ) pairs with Z_s = sZ * Z (base coil + stellsym partner)."""
+        mu = np.asarray(self.fl.mu)
+        N = (mu.shape[0] - 1) // 2
+        radii = mu[N:2 * N]
+        Z = float(mu[-1])
+        heights = [(Z, +1.0), (-Z, -1.0)] if self.fl.stellsym_aux else [(Z, +1.0)]
+        return radii, N, heights
+
+    def shortest_distance(self):
+        """Minimum center-line distance between any modular-curve point and any
+        aux circle (a single scalar; useful for callback display / error checks)."""
+        radii, _, heights = self._geom()
+        dmin = np.inf
+        for c in self.curves:
+            g = c.gamma()
+            rho = np.hypot(g[:, 0], g[:, 1])
+            z = g[:, 2]
+            for rk in radii:
+                for Zs, _ in heights:
+                    d = np.sqrt((rho - rk) ** 2 + (z - Zs) ** 2)
+                    dmin = min(dmin, float(d.min()))
+        return dmin
+
+    def J(self):
+        radii, _, heights = self._geom()
+        thr = self.threshold
+        total = 0.0
+        for c in self.curves:
+            g = c.gamma()
+            rho = np.hypot(g[:, 0], g[:, 1])
+            z = g[:, 2]
+            for rk in radii:
+                for Zs, _ in heights:
+                    d = np.sqrt((rho - rk) ** 2 + (z - Zs) ** 2)
+                    total += float(np.sum(np.maximum(thr - d, 0.0) ** 2))
+        return total
+
+    @derivative_dec
+    def dJ(self):
+        radii, N, heights = self._geom()
+        thr = self.threshold
+        eps = 1e-30
+        g_mu = np.zeros(self.fl.local_full_dof_size)
+        curve_deriv = None
+        for c in self.curves:
+            g = c.gamma()
+            x, y, z = g[:, 0], g[:, 1], g[:, 2]
+            rho = np.hypot(x, y)
+            inv_rho = 1.0 / np.maximum(rho, eps)
+            seed = np.zeros_like(g)            # dJ/d(curve point), for the curve vjp
+            for k, rk in enumerate(radii):
+                for Zs, sZ in heights:
+                    dr = rho - rk
+                    dz = z - Zs
+                    d = np.sqrt(dr ** 2 + dz ** 2)
+                    viol = np.maximum(thr - d, 0.0)
+                    # coef = (dJ/dd)/d = -2 viol / d   (zero where not violated)
+                    coef = np.where(viol > 0.0, -2.0 * viol / np.maximum(d, eps), 0.0)
+                    seed[:, 0] += coef * dr * x * inv_rho
+                    seed[:, 1] += coef * dr * y * inv_rho
+                    seed[:, 2] += coef * dz
+                    # mu gradient: r_k (slot N+k) and Z (last slot). Z_s = sZ*Z,
+                    # so d(dz)/dZ = -sZ; currents (slots 0..N-1) do not move d.
+                    g_mu[N + k] += float(np.sum(coef * (-dr)))
+                    g_mu[-1] += float(np.sum(coef * dz * (-sZ)))
+            cd = c.dgamma_by_dcoeff_vjp(seed)
+            curve_deriv = cd if curve_deriv is None else curve_deriv + cd
+        return Derivative({self.fl: g_mu}) + curve_deriv
 
     return_fn_map = {'J': J, 'dJ': dJ}

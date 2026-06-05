@@ -84,8 +84,12 @@ def device_id(name: str) -> int:
 
 PARAM_ORDER = [
     "margin", "well", "Z", "onvessel",
-    "distance", "configID", "vesselID", "mono", "null", "num_aux", "attempt",
+    "distance", "configID", "vesselID", "mono", "null", "attempt",
 ]
+
+# Parameters parsed from folder names but deliberately NOT shown as a filter
+# selectbox in the sidebar.
+HIDDEN_PARAMS = {"num_aux"}
 
 MONO_LEGEND = {
     "0": "trace(M) > 2",
@@ -422,9 +426,9 @@ with st.sidebar:
     st.subheader("Parameter filters")
 
     available_keys = [k for k in PARAM_ORDER
-                      if any(k in r.params for r in records)]
+                      if k not in HIDDEN_PARAMS and any(k in r.params for r in records)]
     extras = sorted({k for r in records for k in r.params
-                     if k not in available_keys})
+                     if k not in available_keys and k not in HIDDEN_PARAMS})
     keys = available_keys + extras
 
     selections: dict[str, str] = {}

@@ -21,6 +21,13 @@ The optimization then adds inequality constraints on the aux currents:
   * independent currents: same bound as the modular coil currents
     (|I| <= CURRENT_THRESHOLD), via a CurrentBound-analogue on the mu dof,
     accumulated into J_curr so it shares CURRENT_WEIGHT and its escalation.
+
+It also keeps the aux coils clear of the modular coils: AuxCoilDistance adds a
+one-sided quadratic clearance penalty (minimum separation
+AUX_COIL_DISTANCE_THRESHOLD, weight AUX_COIL_DISTANCE_WEIGHT escalated after each
+BFGS run) between every modular coil and the planar circular aux coils. The aux
+coils are mu dofs (not Curves), so the penalty reads the aux radii/Z from fl.mu
+and its gradient lands on both the modular-coil dofs and the aux (mu) dofs.
 """
 import argparse
 import os
@@ -61,7 +68,7 @@ from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 from star_lite_design.utils.SingularPeriodicFieldline_diff import (
-    SingularPeriodicFieldline_diff, DependentMu, _mu_names, _CURRENT_SCALE)
+    SingularPeriodicFieldline_diff, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 
 
 # The boozer_all design json is the only required input; everything else
@@ -331,6 +338,22 @@ for fl in sing_fls:
         J_aux_current += MuBound(fl, name, _aux_eps_mu)
 
 
+# AUX coil <-> MODULAR coil clearance: keep every modular coil at least
+# AUX_COIL_DISTANCE_THRESHOLD away from the planar circular aux coils, sharing one
+# escalating weight (AUX_COIL_DISTANCE_WEIGHT) via J_aux_coil_distance. The aux
+# coils are mu dofs (not Curves), so AuxCoilDistance reads their radii/Z from
+# fl.mu directly (closed-form point-to-circle distance) and returns gradients to
+# BOTH the modular-coil dofs and the aux (mu) dofs. These keys are NEW (boozer_all
+# did not write them): default the requested threshold and a starting weight, but
+# let an existing yaml override so an escalated weight survives a restart.
+config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
+config.setdefault('AUX_COIL_DISTANCE_WEIGHT', 1e5)
+AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
+AUX_COIL_DISTANCE_WEIGHT = Weight(config['AUX_COIL_DISTANCE_WEIGHT'])
+aux_coil_distances = [AuxCoilDistance(fl, curves, AUX_COIL_DISTANCE_THRESHOLD) for fl in sing_fls]
+J_aux_coil_distance = sum(aux_coil_distances)
+
+
 
 
 
@@ -395,6 +418,7 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANZ_WEIGHT * J_meanz
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     + AUX_CURRENT_WEIGHT * J_aux_current
+    + AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance
     )
 
 
@@ -416,6 +440,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'fieldline mean dist':FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance,
         'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
         'aux current': AUX_CURRENT_WEIGHT * J_aux_current,
+        'aux coil distance': AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance,
         }
 
 states = {
@@ -543,6 +568,8 @@ def callback(dofs):
 
     table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
+    table2.add_row('minimum aux-to-modular coil distance',
+                   ' '.join([f'{a.shortest_distance():.3e}' for a in aux_coil_distances]))
 
     table2.add_row('fieldline mean-z', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in meanzs]))
     _, max_fieldline_mean_distance, _ = J_fieldline_mean_distance.longest_distance()
@@ -706,6 +733,8 @@ for j in range(10):
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
     cc_err = max(COIL_TO_COIL_THRESHOLD-Jccdist.shortest_distance(), 0)/np.abs(COIL_TO_COIL_THRESHOLD)
+    aux_coil_dist_err = max([max(AUX_COIL_DISTANCE_THRESHOLD - a.shortest_distance(), 0)
+                             / np.abs(AUX_COIL_DISTANCE_THRESHOLD) for a in aux_coil_distances])
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     plasma_vessel_margin_err = max(PLASMA_VESSEL_MARGIN_THRESHOLD-np.min([min_xpoint_to_vessel, min_boozer_surface_to_vessel]), 0)/np.abs(PLASMA_VESSEL_MARGIN_THRESHOLD)
 
@@ -772,6 +801,9 @@ for j in range(10):
     if cc_err > 0.001 and COIL_TO_COIL_WEIGHT.value != 0.:
         COIL_TO_COIL_WEIGHT*=10
         print("COIL TO COIL ERROR", cc_err)
+    if aux_coil_dist_err > 0.001 and AUX_COIL_DISTANCE_WEIGHT.value != 0.:
+        AUX_COIL_DISTANCE_WEIGHT*=10
+        print("AUX COIL DISTANCE ERROR", aux_coil_dist_err)
     if modB_err > 0.001 and MODB_WEIGHT.value != 0.:
         MODB_WEIGHT*=10
         print("MODB ERROR", modB_err)
@@ -809,6 +841,8 @@ for j in range(10):
     config['CURRENT_WEIGHT'] = CURRENT_WEIGHT.value
     config['AUX_CURRENT_WEIGHT'] = AUX_CURRENT_WEIGHT.value
     config['COIL_TO_COIL_WEIGHT'] = COIL_TO_COIL_WEIGHT.value
+    config['AUX_COIL_DISTANCE_WEIGHT'] = AUX_COIL_DISTANCE_WEIGHT.value
+    config['AUX_COIL_DISTANCE_THRESHOLD'] = AUX_COIL_DISTANCE_THRESHOLD
     config['CURVATURE_WEIGHT'] = CURVATURE_WEIGHT.value
     config['MEAN_SQUARED_CURVATURE_WEIGHT'] = MEAN_SQUARED_CURVATURE_WEIGHT.value
     config['LENGTH_WEIGHT'] = LENGTH_WEIGHT.value
@@ -853,6 +887,7 @@ final_metrics = {
     'major_radius':               (mr.J(),                                         MR_TARGET,                     mr_err if MAJOR_RADIUS_WEIGHT.value != 0. else 0.0),
     'coil_length':                (max(Jl.J() for Jl in Jls),                      LENGTH_THRESHOLD,              clen_err if LENGTH_WEIGHT.value != 0. else 0.0),
     'coil_to_coil':               (Jccdist.shortest_distance(),                    COIL_TO_COIL_THRESHOLD,        cc_err if COIL_TO_COIL_WEIGHT.value != 0. else 0.0),
+    'aux_coil_distance':          (min(a.shortest_distance() for a in aux_coil_distances), AUX_COIL_DISTANCE_THRESHOLD, aux_coil_dist_err if AUX_COIL_DISTANCE_WEIGHT.value != 0. else 0.0),
     'plasma_vessel_margin':       (min(min_xpoint_to_vessel, min_boozer_surface_to_vessel),
                                                                                    PLASMA_VESSEL_MARGIN_THRESHOLD, plasma_vessel_margin_err if PLASMA_VESSEL_MARGIN_WEIGHT.value != 0. else 0.0),
     'coil_on_vessel':             (min_coil_on_vessel_distance,                    COIL_ON_VESSEL_THRESHOLD,      coil_on_vessel_err if COIL_ON_VESSEL_WEIGHT.value != 0. else 0.0),
