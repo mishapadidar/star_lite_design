@@ -7,12 +7,12 @@ import numpy as np
 import jax.numpy as jnp
 from jax import jit, grad
 from .periodicfieldline import PeriodicFieldLine
-from .SingularPeriodicFieldline_diff import SingularPeriodicFieldline_diff
+from .singularperiodicfieldline import SingularPeriodicFieldline
 from simsopt.geo import SurfaceRZFourier, Curve, BoozerSurface
 
 # Field-line entity types accepted by VesselDistance: both follow the same
 # interface (.curve, .biotsavart, run_code(res['length']), res['PLU'], res['vjp']).
-_FIELDLINE_TYPES = (PeriodicFieldLine, SingularPeriodicFieldline_diff)
+_FIELDLINE_TYPES = (PeriodicFieldLine, SingularPeriodicFieldline)
 from pyevtk.hl import gridToVTK  # pip install pyevtk
 import jax
 import jax.numpy as jnp

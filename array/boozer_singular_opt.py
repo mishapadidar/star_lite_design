@@ -5,7 +5,7 @@ Continue a boozer_all.py optimization WITH the singular polish in the loop.
 
 Takes as input a design json produced by boozer_all.py
 ([boozer_surfaces, iota_Gs, axes, xpoints, sdf]).  For each X-point a
-SingularPeriodicFieldline_diff is created with --num-aux planar circular
+SingularPeriodicFieldline is created with --num-aux planar circular
 auxiliary coils:
 
   1) initially ALL aux currents and radii are DEPENDENT (fixed dofs, solved by
@@ -67,8 +67,9 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
-from star_lite_design.utils.SingularPeriodicFieldline_diff import (
-    SingularPeriodicFieldline_diff, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
+from star_lite_design.utils.singularperiodicfieldline import (
+    SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
+from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
 
 
 # The boozer_all design json is the only required input; everything else
@@ -193,13 +194,18 @@ ARCLENGTH_WEIGHT = Weight(config['ARCLENGTH_WEIGHT'])
 
 print("""
 ################################################################################
-### Singular polish: SingularPeriodicFieldline_diff per X-point ###############
+### Singular polish: SingularPeriodicFieldline per X-point ###############
 ################################################################################
 """)
 # Auxiliary-coil parameters mu = (I_1..I_N, r_1..r_N, Z) become local dofs of
-# the SingularPeriodicFieldline_diff. FIXED mu dofs are DEPENDENT (solved by
+# the SingularPeriodicFieldline. FIXED mu dofs are DEPENDENT (solved by
 # the Newton polish), FREE mu dofs are INDEPENDENT design variables.
 max_Z = np.max([np.abs(c.curve.gamma()[:, 2]) for c in boozer_surfaces[0].biotsavart.coils])
+# Aux-coil clearance threshold, read now because it also sets the INITIAL aux-coil
+# height Z = max_Z + AUX_COIL_DISTANCE_THRESHOLD (one clearance above the modular
+# coils). NEW key (boozer_all did not write it); an existing yaml may override it.
+config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
+AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
 radii0 = np.linspace(0.25, 1.25, num_aux + 1)[1:]
 MU_NAMES = _mu_names(2 * num_aux + 1)
 DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
@@ -207,21 +213,21 @@ INDEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS, num_aux)]
 
 sing_fls = []
 for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
-    mu0 = np.concatenate([np.zeros(num_aux), radii0, [max_Z + 0.15]])
+    mu0 = np.concatenate([np.zeros(num_aux), radii0, [max_Z + AUX_COIL_DISTANCE_THRESHOLD]])
     # The polish gets its OWN copy of the X-point curve: the plain `xpoint`
     # field line keeps re-solving its curve every objective evaluation, so
     # sharing dofs would have the two Newton solvers fight each other.
     xc = xpoint.curve
     fl_curve = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, xc.stellsym, ntor=xc.ntor)
     fl_curve.set_dofs(xc.get_dofs())
-    fl = SingularPeriodicFieldline_diff(
+    fl = SingularPeriodicFieldline(
         BiotSavart(boozer_surface.biotsavart.coils), fl_curve, mu0,
         options={'newton_tol': 1e-12, 'newton_maxiter': 10, 'verbose': True,
                  'monodromy_constraint': mon_constraint},
         stellsym_aux=boozer_surface.surface.stellsym)
 
     # (1) initial polish: ALL aux currents and radii are DEPENDENT (fixed),
-    # z is independent (held at max_Z + 0.15). Under-determined -> pinv Newton.
+    # z is independent (held at max_Z + AUX_COIL_DISTANCE_THRESHOLD). Under-determined -> pinv Newton.
     for k in range(num_aux):
         fl.fix(f'I{k+1}')
         fl.fix(f'r{k+1}')
@@ -256,10 +262,30 @@ for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
 # mu design variables.
 xpoints = sing_fls
 
+# Recompute the Boozer surfaces and magnetic axes in the TOTAL field (modular +
+# auxiliary): wrap each polished singular field line in a SingularBiotSavart and
+# REPLACE the loaded (modular-field) boozer_surfaces / axes with ones solved on
+# the total field. Every field-dependent objective below is then built against the
+# total field too. Each object that drives its own set_points gets its OWN
+# SingularBiotSavart(fl) wrapper (all sharing fl), mirroring the original
+# per-objective BiotSavart(coils) so their point caches stay independent.
+new_boozer_surfaces, new_axes = [], []
+for boozer_surface, axis, fl in zip(boozer_surfaces, axes, sing_fls):
+    nbs = BoozerSurface(SingularBiotSavart(fl), boozer_surface.surface,
+                        boozer_surface.label, boozer_surface.targetlabel,
+                        constraint_weight=boozer_surface.constraint_weight,
+                        options=boozer_surface.options)
+    nbs.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
+    new_boozer_surfaces.append(nbs)
+    nax = PeriodicFieldLine(SingularBiotSavart(fl), axis.curve, options=axis.options)
+    nax.run_code(axis.res['length'])
+    new_axes.append(nax)
+boozer_surfaces, axes = new_boozer_surfaces, new_axes
+
 
 class MuBound(Optimizable):
     """CurrentBound analogue for one named (independent / free) mu dof of a
-    SingularPeriodicFieldline_diff:  J = max(|mu_k| - threshold, 0)^2."""
+    SingularPeriodicFieldline:  J = max(|mu_k| - threshold, 0)^2."""
 
     def __init__(self, fl, name, threshold):
         Optimizable.__init__(self, depends_on=[fl])
@@ -284,12 +310,12 @@ class MuBound(Optimizable):
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
 mr = MajorRadius(boozer_surfaces[0])
 ls = [CurveLength(c) for c in base_curves]
-brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
+brs = [BoozerResidual(boozer_surface, SingularBiotSavart(fl)) for boozer_surface, fl in zip(boozer_surfaces, sing_fls)]
 J_major_radius = QuadraticPenalty(mr, MR_TARGET, 'identity')  # target major radius is that computed on the initial surface
 
 IOTAS_LIST = [Iotas(boozer_surface) for boozer_surface in boozer_surfaces]
 J_iotas = sum([QuadraticPenalty(IOTAS, IOT_TARGET, 'identity') for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)]) # target rotational transform is that computed on the initial surface
-nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
+nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, SingularBiotSavart(fl)) for boozer_surface, fl in zip(boozer_surfaces, sing_fls)]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
 
@@ -305,7 +331,7 @@ msc_penalty = sum(QuadraticPenalty(J, MEAN_SQUARED_CURVATURE_THRESHOLD, "max") f
 Jbrs = sum(brs)
 
 # penalty on deviation from target mean field strength
-modBs = [ModBOnFieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
+modBs = [ModBOnFieldLine(axis, SingularBiotSavart(fl)) for axis, fl in zip(axes, sing_fls)]
 JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
 
 J_curr = None
@@ -324,7 +350,7 @@ for boozer_surface in boozer_surfaces:
 # through DependentMu (their value is an implicit function of the design vars, so
 # the gradient must flow through the adjoint); independent currents are free mu
 # dofs handled directly by MuBound. (mu units: EPS/_CURRENT_SCALE; EPS is in A.)
-config['AUX_CURRENT_EPS'] = 10.0  # Amperes
+config['AUX_CURRENT_EPS'] = 1e3  # Amperes
 config['AUX_CURRENT_WEIGHT'] = 1e2
 AUX_CURRENT_EPS = config['AUX_CURRENT_EPS']
 AUX_CURRENT_WEIGHT = Weight(config['AUX_CURRENT_WEIGHT'])
@@ -343,12 +369,10 @@ for fl in sing_fls:
 # escalating weight (AUX_COIL_DISTANCE_WEIGHT) via J_aux_coil_distance. The aux
 # coils are mu dofs (not Curves), so AuxCoilDistance reads their radii/Z from
 # fl.mu directly (closed-form point-to-circle distance) and returns gradients to
-# BOTH the modular-coil dofs and the aux (mu) dofs. These keys are NEW (boozer_all
-# did not write them): default the requested threshold and a starting weight, but
-# let an existing yaml override so an escalated weight survives a restart.
-config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
+# BOTH the modular-coil dofs and the aux (mu) dofs. AUX_COIL_DISTANCE_THRESHOLD is
+# set above (it also fixes the initial aux-coil Z); here we just default/read the
+# starting weight, letting an existing yaml override so escalation survives a restart.
 config.setdefault('AUX_COIL_DISTANCE_WEIGHT', 1e5)
-AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
 AUX_COIL_DISTANCE_WEIGHT = Weight(config['AUX_COIL_DISTANCE_WEIGHT'])
 aux_coil_distances = [AuxCoilDistance(fl, curves, AUX_COIL_DISTANCE_THRESHOLD) for fl in sing_fls]
 J_aux_coil_distance = sum(aux_coil_distances)
@@ -570,6 +594,8 @@ def callback(dofs):
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
     table2.add_row('minimum aux-to-modular coil distance',
                    ' '.join([f'{a.shortest_distance():.3e}' for a in aux_coil_distances]))
+    table2.add_row('minimum aux-to-aux coil distance',
+                   ' '.join([f'{a.shortest_aux_distance():.3e}' for a in aux_coil_distances]))
 
     table2.add_row('fieldline mean-z', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in meanzs]))
     _, max_fieldline_mean_distance, _ = J_fieldline_mean_distance.longest_distance()
@@ -733,8 +759,12 @@ for j in range(10):
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
     cc_err = max(COIL_TO_COIL_THRESHOLD-Jccdist.shortest_distance(), 0)/np.abs(COIL_TO_COIL_THRESHOLD)
-    aux_coil_dist_err = max([max(AUX_COIL_DISTANCE_THRESHOLD - a.shortest_distance(), 0)
-                             / np.abs(AUX_COIL_DISTANCE_THRESHOLD) for a in aux_coil_distances])
+    aux_coil_mod_err = max([max(AUX_COIL_DISTANCE_THRESHOLD - a.shortest_distance(), 0)
+                            / np.abs(AUX_COIL_DISTANCE_THRESHOLD) for a in aux_coil_distances])
+    aux_coil_aux_err = max([max(AUX_COIL_DISTANCE_THRESHOLD - a.shortest_aux_distance(), 0)
+                            / np.abs(AUX_COIL_DISTANCE_THRESHOLD) for a in aux_coil_distances])
+    # one shared weight drives BOTH the modular<->aux and aux<->aux clearance
+    aux_coil_dist_err = max(aux_coil_mod_err, aux_coil_aux_err)
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     plasma_vessel_margin_err = max(PLASMA_VESSEL_MARGIN_THRESHOLD-np.min([min_xpoint_to_vessel, min_boozer_surface_to_vessel]), 0)/np.abs(PLASMA_VESSEL_MARGIN_THRESHOLD)
 
@@ -887,7 +917,8 @@ final_metrics = {
     'major_radius':               (mr.J(),                                         MR_TARGET,                     mr_err if MAJOR_RADIUS_WEIGHT.value != 0. else 0.0),
     'coil_length':                (max(Jl.J() for Jl in Jls),                      LENGTH_THRESHOLD,              clen_err if LENGTH_WEIGHT.value != 0. else 0.0),
     'coil_to_coil':               (Jccdist.shortest_distance(),                    COIL_TO_COIL_THRESHOLD,        cc_err if COIL_TO_COIL_WEIGHT.value != 0. else 0.0),
-    'aux_coil_distance':          (min(a.shortest_distance() for a in aux_coil_distances), AUX_COIL_DISTANCE_THRESHOLD, aux_coil_dist_err if AUX_COIL_DISTANCE_WEIGHT.value != 0. else 0.0),
+    'aux_coil_distance':          (min(a.shortest_distance() for a in aux_coil_distances), AUX_COIL_DISTANCE_THRESHOLD, aux_coil_mod_err if AUX_COIL_DISTANCE_WEIGHT.value != 0. else 0.0),
+    'aux_coil_to_aux_distance':   (min(a.shortest_aux_distance() for a in aux_coil_distances), AUX_COIL_DISTANCE_THRESHOLD, aux_coil_aux_err if AUX_COIL_DISTANCE_WEIGHT.value != 0. else 0.0),
     'plasma_vessel_margin':       (min(min_xpoint_to_vessel, min_boozer_surface_to_vessel),
                                                                                    PLASMA_VESSEL_MARGIN_THRESHOLD, plasma_vessel_margin_err if PLASMA_VESSEL_MARGIN_WEIGHT.value != 0. else 0.0),
     'coil_on_vessel':             (min_coil_on_vessel_distance,                    COIL_ON_VESSEL_THRESHOLD,      coil_on_vessel_err if COIL_ON_VESSEL_WEIGHT.value != 0. else 0.0),
@@ -964,7 +995,10 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
         aux_coils = [Coil(c, I) for c, I in zip(aux_base_curves, aux_base_currents)]
     combined_coils = boozer_surface.biotsavart.coils + aux_coils
 
-    bs_out = BoozerSurface(BiotSavart(combined_coils), boozer_surface.surface,
+    # compute the Boozer surface and magnetic axis in the TOTAL field (modular +
+    # auxiliary) via SingularBiotSavart(fl) rather than an explicit combined coil set.
+    field = SingularBiotSavart(fl)
+    bs_out = BoozerSurface(field, boozer_surface.surface,
                            Volume(boozer_surface.surface), boozer_surface.surface.volume())
     bs_res = bs_out.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
     if not bs_res['success'] or bs_out.surface.is_self_intersecting():
@@ -972,7 +1006,7 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
         print("ABORT: design_polished_final.json will not be written.")
         raise SystemExit(1)
 
-    new_ax = PeriodicFieldLine(BiotSavart(combined_coils), ax.curve)
+    new_ax = PeriodicFieldLine(field, ax.curve)
     ax_res = new_ax.run_code(CurveLength(ax.curve).J())
     if not ax_res['success']:
         print(f"ERROR: idx={idx}: magnetic-axis re-solve on the combined coil set failed")
