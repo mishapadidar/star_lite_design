@@ -270,15 +270,27 @@ xpoints = sing_fls
 # SingularBiotSavart(fl) wrapper (all sharing fl), mirroring the original
 # per-objective BiotSavart(coils) so their point caches stay independent.
 new_boozer_surfaces, new_axes = [], []
-for boozer_surface, axis, fl in zip(boozer_surfaces, axes, sing_fls):
+for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing_fls)):
     nbs = BoozerSurface(SingularBiotSavart(fl), boozer_surface.surface,
                         boozer_surface.label, boozer_surface.targetlabel,
                         constraint_weight=boozer_surface.constraint_weight,
                         options=boozer_surface.options)
-    nbs.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
+    bs_res = nbs.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
+    # fail fast: the total-field surface must converge AND not self-intersect.
+    if not bs_res['success']:
+        print(f"ERROR: idx={idx}: total-field BoozerSurface re-solve did not converge")
+        raise SystemExit(1)
+    if nbs.surface.is_self_intersecting():
+        print(f"ERROR: idx={idx}: total-field BoozerSurface is self-intersecting")
+        raise SystemExit(1)
     new_boozer_surfaces.append(nbs)
+
     nax = PeriodicFieldLine(SingularBiotSavart(fl), axis.curve, options=axis.options)
-    nax.run_code(axis.res['length'])
+    ax_res = nax.run_code(axis.res['length'])
+    # fail fast: the total-field magnetic axis must converge.
+    if not ax_res['success']:
+        print(f"ERROR: idx={idx}: total-field magnetic-axis re-solve did not converge")
+        raise SystemExit(1)
     new_axes.append(nax)
 boozer_surfaces, axes = new_boozer_surfaces, new_axes
 
