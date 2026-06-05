@@ -930,9 +930,6 @@ max_rel_err = max(abs(v[2]) for v in final_metrics.values() if v[2] is not None)
 with open(OUT_DIR + 'max_rel_error.txt', 'w') as f:
     f.write(f"{max_rel_err:.18e}\n")
 
-# keep nonQS.txt for backwards compatibility
-np.savetxt(OUT_DIR + f'nonQS.txt', np.array([final_nonqs_pct]))
-
 print("""
 ################################################################################
 ### Finalize: rebuild aux coils + re-solve on the COMBINED coil set ###########
