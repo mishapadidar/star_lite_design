@@ -113,6 +113,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A mono=0 device has no monodromy polish, so there is nothing for the
+# boozer_singular_opt.py restart to do. Fail fast and abort the task -- the EXIT
+# trap above cleans up scratch ($SCRATCH) and preserves the log.
+if [ "$mono" -eq 0 ]; then
+  echo "ERROR: mono=0 has no polish step — nothing to restart from boozer_singular_opt.py; aborting task"
+  exit 1
+fi
+
 rsync -a --exclude output --exclude logs --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
 mkdir -p "$SCRATCH/convert"
 rsync -a "$HOME_DIR/../convert/" "$SCRATCH/convert/"
@@ -174,9 +182,11 @@ if awk '{ exit !($1 > 0.001) }' "$maxerr_file"; then
 fi
 echo "max relative error = $(cat "$maxerr_file") (<= 0.1%, OK)"
 
-# Directories to render in Phase B, paired with the json the tracer consumes.
-RENDER_DIRS=("$INIT_DIR")
-RENDER_JSONS=("$INIT_JSON")
+# Phase B renders ONLY the polished device(s) that succeed; the restart never
+# re-renders the reused initial design_opt_final.json device. These arrays start
+# empty and are populated by the polish loop below only on a successful polish.
+RENDER_DIRS=()
+RENDER_JSONS=()
 
 # (2) Polish (mono=1 -> M=I, mono=2 -> tr(M)=2) over num_aux = 1..NUM_AUX_MAX.
 if [ "$mono" -eq 1 ]; then
@@ -225,30 +235,36 @@ fi
 deactivate
 
 # ──────────────── Phase B: trace + plot + render (matplotlib venv) ─────────
-module load modules/2.3-20240529
-module load paraview/5.10.1
-source /mnt/home/agiuliani/ceph/STAR_LITE/venv_matplotlib/bin/activate
-export PYTHONPATH="${PYTHONPATH}:/mnt/home/agiuliani/ceph/STAR_LITE/"
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export MKL_DYNAMIC=FALSE
-export NUMEXPR_NUM_THREADS=1
-export VECLIB_MAXIMUM_THREADS=1
-export BLIS_NUM_THREADS=1
+# Render ONLY the polished device(s) that succeeded (RENDER_DIRS); the restart
+# never re-renders the initial device. If the polish/optimization did not succeed
+# there is nothing to render, so skip Phase B entirely (no module/venv load) and
+# let the EXIT trap sync back whatever the polish produced.
+if [ "${#RENDER_DIRS[@]}" -eq 0 ]; then
+  echo "no polished device succeeded — skipping trace/plot/render"
+else
+  module load modules/2.3-20240529
+  module load paraview/5.10.1
+  source /mnt/home/agiuliani/ceph/STAR_LITE/venv_matplotlib/bin/activate
+  export PYTHONPATH="${PYTHONPATH}:/mnt/home/agiuliani/ceph/STAR_LITE/"
+  export OMP_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export MKL_DYNAMIC=FALSE
+  export NUMEXPR_NUM_THREADS=1
+  export VECLIB_MAXIMUM_THREADS=1
+  export BLIS_NUM_THREADS=1
 
-# mk_manifolds + plot_manifolds support all of mono=0,1,2. The init device is
-# traced from its design_opt_final.json; each polished device is traced from its
-# design_polished_final.json (which carries the COMBINED modular+aux coil set,
-# written by the finalize step of boozer_singular_opt.py). RENDER_JSONS already
-# holds the right path per device.
-for i in "${!RENDER_DIRS[@]}"; do
-  d="${RENDER_DIRS[$i]}"
-  j="${RENDER_JSONS[$i]}"
-  echo "=== rendering $d (input $j) ==="
-  ./mk_manifolds.py "$j"
-  ./plot_manifolds.py "$j"
-  xvfb-run -a pvbatch --force-offscreen-rendering mk_paraview.py "$d" || exit 1
-done
+  # Each polished device is traced from its design_polished_final.json (which
+  # carries the COMBINED modular+aux coil set, written by the finalize step of
+  # boozer_singular_opt.py). RENDER_JSONS holds the right path per device.
+  for i in "${!RENDER_DIRS[@]}"; do
+    d="${RENDER_DIRS[$i]}"
+    j="${RENDER_JSONS[$i]}"
+    echo "=== rendering $d (input $j) ==="
+    ./mk_manifolds.py "$j"
+    ./plot_manifolds.py "$j"
+    xvfb-run -a pvbatch --force-offscreen-rendering mk_paraview.py "$d" || exit 1
+  done
+fi
 
 echo "Finished: $(date)"
