@@ -50,13 +50,16 @@ square (stage-2) partition for which ``dmu_by_dindependent`` is defined.
 
 import numpy as np
 
-from simsopt.field import MagneticField
+from simsopt.field import MagneticField, BiotSavart, Coil, Current, coils_via_symmetries
+from simsopt.field.coil import ScaledCurrent
 from simsopt._core.derivative import Derivative
-from simsopt.geo import CurveLength
+from simsopt.geo import CurveLength, CurveXYZFourier
 
+# Forward (B / gradB / grad-gradB) is computed with a pure-C++ BiotSavart of the
+# aux circles (built once, dofs synced from mu) for speed; only the mu-ADJOINT
+# keeps the jax aux derivatives (_dB_aux_by_dmu, _dgradB_aux_by_dmu).
 from star_lite_design.utils.singularperiodicfieldline import (
-    _B_aux, _dB_aux_by_dX, _d2B_aux_by_dXdX,
-    _dB_aux_by_dmu, _dgradB_aux_by_dmu, _mu_names)
+    _dB_aux_by_dmu, _dgradB_aux_by_dmu, _mu_names, _CURRENT_SCALE)
 
 __all__ = ['SingularBiotSavart']
 
@@ -80,6 +83,16 @@ class SingularBiotSavart(MagneticField):
         # mirror BiotSavart's attribute so BoozerSurface can read the modular
         # currents (it uses both `.coils` and `._coils`) to form G.
         self._coils = fl.biotsavart.coils
+        self._aux_dirty = True            # aux coil dofs need (re)syncing from mu
+        self._build_aux()
+
+    def recompute_bell(self, parent=None):
+        # Idiomatic simsopt invalidation: a change in a depends_on object (the
+        # modular coils, or fl's free mu) means the aux BiotSavart dofs are stale
+        # and must be re-synced from mu before the next forward eval. Mark them
+        # dirty and let the base clear the cached B / gradB / grad-gradB.
+        self._aux_dirty = True
+        super().recompute_bell(parent)
 
     # ---- BiotSavart-like coil access (modular coils only) --------------------
     @property
@@ -90,6 +103,54 @@ class SingularBiotSavart(MagneticField):
     def modular(self):
         """The underlying modular-coil BiotSavart field."""
         return self.fl.biotsavart
+
+    # ---- auxiliary-coil C++ BiotSavart (forward only; synced from mu) --------
+    def _build_aux(self):
+        """Build a C++ BiotSavart of the auxiliary circular coils ONCE; its dofs
+        are re-synced from fl.mu before each forward evaluation. It is a fast
+        forward calculator only and is NOT in this Optimizable's depends_on, so
+        its (free) dofs never enter the optimization graph; the mu-adjoint is
+        handled separately by the jax derivatives in B_vjp / B_and_dB_vjp."""
+        mu = np.asarray(self.fl.mu)
+        self._naux = (mu.shape[0] - 1) // 2
+        qp = np.linspace(0.0, 1.0, 160, endpoint=False)
+        self._aux_base_curves = []
+        self._aux_currents = []                  # inner Current objects (raw mu units)
+        scaled = []
+        for k in range(self._naux):
+            c = CurveXYZFourier(qp, 1)
+            c.x = c.x * 0.
+            self._aux_base_curves.append(c)
+            cur = Current(float(mu[k]))
+            self._aux_currents.append(cur)
+            scaled.append(ScaledCurrent(cur, _CURRENT_SCALE))
+        if self.fl.stellsym_aux:
+            aux_coils = coils_via_symmetries(self._aux_base_curves, scaled, 1, True)
+        else:
+            aux_coils = [Coil(c, sc) for c, sc in zip(self._aux_base_curves, scaled)]
+        self._aux_bs = BiotSavart(aux_coils)
+        self._aux_dirty = True
+        self._sync_aux()
+
+    def _sync_aux(self):
+        """Write the current fl.mu (radii r_k, height Z, currents I_k) into the
+        aux BiotSavart's coil dofs, but ONLY when marked dirty by recompute_bell
+        (mu is constant within a single Newton solve, so this skips the per-call
+        .set / recompute_bell overhead). The stellsym -Z partners track the base
+        curves automatically (coils_via_symmetries)."""
+        if not self._aux_dirty:
+            return
+        mu = np.asarray(self.fl.mu)
+        N = self._naux
+        Z = float(mu[-1])
+        for k in range(N):
+            rk = float(mu[N + k])
+            c = self._aux_base_curves[k]
+            c.set('xc(1)', rk)
+            c.set('ys(1)', rk)
+            c.set('zc(0)', Z)
+            self._aux_currents[k].x = np.array([float(mu[k])])
+        self._aux_dirty = False
 
     # ---- re-solve + point bookkeeping ---------------------------------------
     def _ensure_solved(self):
@@ -105,33 +166,35 @@ class SingularBiotSavart(MagneticField):
             fl.run_code(length)
 
     def _prepare(self):
-        """Ensure the polish is current and the modular field points equal this
-        wrapper's evaluation points (the polish leaves the modular field pointed
-        at the field-line's own quadrature points), then return the points."""
+        """Ensure the polish is current, re-sync the aux coils from mu, and point
+        BOTH the modular and aux BiotSavart fields at this wrapper's evaluation
+        points (the polish leaves the modular field pointed at the field-line's
+        own quadrature points), then return the points."""
         pts = self.get_points_cart_ref()
         self._ensure_solved()
+        self._sync_aux()
         self.modular.set_points(pts)
+        self._aux_bs.set_points(pts)
         return pts
 
     def _set_points_cb(self):
-        # propagate points to the modular field (mirrors MagneticFieldSum)
-        self.modular.set_points_cart(self.get_points_cart_ref())
+        # propagate points to the modular + aux fields (mirrors MagneticFieldSum)
+        pts = self.get_points_cart_ref()
+        self.modular.set_points_cart(pts)
+        self._aux_bs.set_points_cart(pts)
 
-    # ---- forward field (modular + aux) --------------------------------------
+    # ---- forward field (modular + aux), both pure C++ ------------------------
     def _B_impl(self, B):
-        pts = self._prepare()
-        B[:] = self.modular.B() + np.asarray(
-            _B_aux(pts, self.fl.mu, stellsym=self.fl.stellsym_aux))
+        self._prepare()
+        B[:] = self.modular.B() + self._aux_bs.B()
 
     def _dB_by_dX_impl(self, dB):
-        pts = self._prepare()
-        dB[:] = self.modular.dB_by_dX() + np.asarray(
-            _dB_aux_by_dX(pts, self.fl.mu, stellsym=self.fl.stellsym_aux))
+        self._prepare()
+        dB[:] = self.modular.dB_by_dX() + self._aux_bs.dB_by_dX()
 
     def _d2B_by_dXdX_impl(self, ddB):
-        pts = self._prepare()
-        ddB[:] = self.modular.d2B_by_dXdX() + np.asarray(
-            _d2B_aux_by_dXdX(pts, self.fl.mu, stellsym=self.fl.stellsym_aux))
+        self._prepare()
+        ddB[:] = self.modular.d2B_by_dXdX() + self._aux_bs.d2B_by_dXdX()
 
     def compute(self, derivatives=0):
         """Populate the B (and up to ``derivatives`` spatial-derivative) caches.
