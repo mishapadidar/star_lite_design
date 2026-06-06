@@ -27,5 +27,9 @@ export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
 
 ./mk_manifolds.py "$design_json"
-./plot_manifolds.py "$design_json"
+# Run with DISPLAY removed for THIS command only (env -u), so plot_manifolds.py's
+# guard reliably pins the non-interactive Agg backend and nothing is shown. Scoped
+# to the one command, so the xvfb-run line below (which sets its own DISPLAY) is
+# unaffected.
+env -u DISPLAY ./plot_manifolds.py "$design_json"
 xvfb-run -a pvbatch --force-offscreen-rendering mk_paraview.py "$out_dir"

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 import os, glob, re
 import numpy as np
+import matplotlib
+# In batch/headless runs (no DISPLAY, e.g. run_render.sh on a compute node) pin the
+# non-interactive Agg backend, so importing pyplot / plt.show() can never select a
+# GUI backend (which would hang waiting on a window that never appears). On a
+# workstation with a display, leave the default backend so plt.show() still works.
+if not os.environ.get('DISPLAY'):
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import pandas as pd
@@ -151,7 +158,7 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
                 lbl = 'stable manifold' if stable else 'unstable manifold'
             else:
                 col = None   # unclassified leg: per-fieldline-id categorical colour
-            _scatter_file(ax, f, 5, color=col, label=lbl)
+            _scatter_file(ax, f, 2.8125, color=col, label=lbl)   # 5 * 0.75^2: 25% smaller diameter
             continue
         # Fallback for an unknown/unclassified X-point type (xpoint_type.txt
         # missing): draw the raw manifold files as categorical lines.
@@ -168,7 +175,7 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
     if os.path.exists(f_v):
         v = np.atleast_2d(np.loadtxt(f_v, delimiter=',', skiprows=1))
         if v.size:
-            ax.plot(v[:, 0], v[:, 1], 'r--', lw=1.0, label='optimization surface')
+            ax.plot(v[:, 0], v[:, 1], 'k--', lw=1.0, label='optimization surface')
 
     f_fp = p.parent / f"fixed_points_{i}.txt"
     if os.path.exists(f_fp):
