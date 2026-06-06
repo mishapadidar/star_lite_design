@@ -1,21 +1,22 @@
 #!/bin/bash
 set -uo pipefail
 
-# Merged initial-optimization + polish workflow.
+# Master driver. Orchestrates the per-device workflow by calling lower-level steps,
+# each of which loads its OWN venv (so there is no env/venv leakage between phases):
+#   run_boozer_all.sh -> initial num_aux=0 optimization   (boozer venv)
+#   run_polish.sh     -> singular polish + coil opt        (boozer venv)
+#   run_render.sh     -> trace + plot + paraview render    (matplotlib venv + paraview)
+# The master sets up local scratch, applies the max-relative-error gates, decides
+# what to keep, and COPIES (shards) kept results to ceph. Nothing is written to ceph
+# for a failed / out-of-spec device except the run log.
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
 #                    <vessel_id> <mono> <attempt> <null(DN|SN)> [num_aux]
 #
-# 1. boozer_all.py produces the unpolished device (num_aux=0); its base modular
-#    coils are perturbed (seeded by the device ID) for this attempt.
-# 2. The num_aux=0 device is traced + plotted + rendered.
-# 3. If mono is 1 or 2, the freshly-computed num_aux=0 design is polished AND
-#    re-optimized (boozer_singular_opt.py) at EXACTLY num_aux=NUM_AUX_POLISH
-#    auxiliary coils (11th argument, default 10; no scan) into its own
-#    num_aux=N directory -- so devices carry either 0 or NUM_AUX_POLISH aux
-#    coils. A failed run is logged and skipped (it does not fail the task). It
-#    reuses THIS run's num_aux=0 design from local scratch, so there is no
-#    cross-task dependency.
+# Flow: boozer_all -> gate. If it passes, render the num_aux=0 device and copy it to
+# ceph BEFORE polishing. Then (mono 1/2) polish at num_aux=NUM_AUX_POLISH; if the
+# polished device passes its own 0.1% gate, render + copy it; otherwise discard it
+# (nothing to ceph but the log), exactly as a failed boozer_all is treated.
 
 margin="$1"
 well="$2"
@@ -28,8 +29,8 @@ mono="$8"
 attempt="$9"
 null="${10}"
 
-# Number of auxiliary planar coils for the polish (mono=1,2): either devices
-# have 0 (unpolished) or exactly this many aux coils.
+# Number of auxiliary planar coils for the polish (mono=1,2): devices have either
+# 0 (unpolished) or exactly this many aux coils.
 NUM_AUX_POLISH="${11:-10}"
 
 if [ "$well" = "OFF" ]; then
@@ -41,17 +42,17 @@ margin_str=$(printf "%.2f" "$margin" | sed 's/\./p/')
 
 HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 
-# Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the
-# device IDs (and thus the perturbation seed) line up. Argument: num_aux.
+# Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the device
+# IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
   echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}"
 }
 
 # Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
 # ceph (output/, logs/) ever holds more than ~500 entries: output/<shard>/<device>
-# and logs/<shard>/<name>.out. The bucket is a pure function of the (deterministic)
-# folder name, so it is identical across runs/restarts, and readers that discover
-# devices by content (e.g. device_browser's os.walk) need no change.
+# and logs/<shard>/<name>.out. Pure function of the (deterministic) folder name, so
+# it matches prefix_restart.sh and readers that discover devices by content (e.g.
+# device_browser's os.walk) need no change.
 shard() { printf '%s' "$1" | md5sum | cut -c1-2; }
 
 INIT_NAME="$(task_name 0)"
@@ -65,51 +66,48 @@ mkdir -p "$RUN" "$HOME_DIR/output"  "$HOME_DIR/logs"
 # Duplicate stdout/stderr to $LOG while keeping the engine pipe alive.
 exec > >(tee "$LOG") 2>&1
 
-# Filtered sync of every produced output dir (init + any polished). Only run on
-# success, so failed runs never litter ceph with half-built directories.
-sync_back_filtered() {
-  [ -d "$RUN/output" ] || return 0
-  local includes=(
-    --include='*/'
-    --include='design_opt_final.json'
-    --include='design_opt_final.yaml'
-    --include='design_polished_final.json'
-    --include='design_polished_final.yaml'
-    --include='singular.json'
-    --include='singular.yaml'
-    --include='summary.txt'
-    --include='max_rel_error.txt'
-    --include='scene_*.png'
-    --include='xs_*.png'
-    --include='poincare*.txt'
-    --include='xpoint.txt'
-    --include='phis.txt'
-    --include='xpoint_type.txt'
-    --include='legs.txt'
-    --include='vessel_cross_*.txt'
-    --include='surface_cross_*.txt'
-    --include='fixed_points_*.txt'
-    --include='sc*.vts'
-    --include='aux_coils_*.vtu'
-    --include='surf_opt_*_final.vts'
-    --include='curves_opt_final.vtu'
-    --include='ma_opt_final.vtu'
-    --include='xpoint_curves_opt_final.vtu'
-    --include='xpoint_singular_curves_opt_final.vtu'
-    --include='vessel_opt_final.vtr'
-    --include='*xpoint_deletion*'
-    --exclude='*'
-  )
-  # Sync each produced device folder into its shard: output/<shard>/<device>/...
-  local d name dest
-  for d in "$RUN"/output/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
-    name="$(basename "$d")"
-    dest="$HOME_DIR/output/$(shard "$name")"
-    mkdir -p "$dest"
-    rsync -a "${includes[@]}" "$d/" "$dest/$name/"
-  done
+# Filter for what gets copied back from a kept device dir.
+SYNC_INCLUDES=(
+  --include='*/'
+  --include='design_opt_final.json'
+  --include='design_opt_final.yaml'
+  --include='design_polished_final.json'
+  --include='design_polished_final.yaml'
+  --include='singular.json'
+  --include='singular.yaml'
+  --include='summary.txt'
+  --include='max_rel_error.txt'
+  --include='scene_*.png'
+  --include='xs_*.png'
+  --include='poincare*.txt'
+  --include='xpoint.txt'
+  --include='phis.txt'
+  --include='xpoint_type.txt'
+  --include='legs.txt'
+  --include='vessel_cross_*.txt'
+  --include='surface_cross_*.txt'
+  --include='fixed_points_*.txt'
+  --include='sc*.vts'
+  --include='aux_coils_*.vtu'
+  --include='surf_opt_*_final.vts'
+  --include='curves_opt_final.vtu'
+  --include='ma_opt_final.vtu'
+  --include='xpoint_curves_opt_final.vtu'
+  --include='xpoint_singular_curves_opt_final.vtu'
+  --include='vessel_opt_final.vtr'
+  --include='*xpoint_deletion*'
+  --exclude='*'
+)
+
+# Copy ONE local device dir into its ceph shard: output/<shard>/<device>/...
+# Called explicitly by the master only for devices that should be KEPT.
+sync_dir() {
+  local d="${1%/}" name dest
+  [ -d "$d" ] || return 0
+  name="$(basename "$d")"
+  dest="$HOME_DIR/output/$(shard "$name")"
+  mkdir -p "$dest"
+  rsync -a "${SYNC_INCLUDES[@]}" "$d/" "$dest/$name/"
 }
 
 # Always preserved so the run is traceable, regardless of success/failure.
@@ -122,11 +120,8 @@ sync_log() {
 
 cleanup() {
   status=$?
-  # On success: filtered sync of all produced dirs. On failure: log only.
-  # Always wipe scratch.
-  if [ "$status" -eq 0 ]; then
-    sync_back_filtered
-  fi
+  # Device dirs are copied to ceph EXPLICITLY (sync_dir) at the points where they
+  # are decided to be kept, so cleanup only preserves the log and wipes scratch.
   sync_log
   rm -rf "$SCRATCH"
   exit "$status"
@@ -147,62 +142,42 @@ echo "mono=$mono attempt=$attempt"
 
 INIT_DIR="./output/$INIT_NAME"
 INIT_JSON="$INIT_DIR/design_opt_final.json"
-INIT_SUMMARY="$INIT_DIR/summary.txt"
 
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export MKL_DYNAMIC=FALSE
-export NUMEXPR_NUM_THREADS=1
-export VECLIB_MAXIMUM_THREADS=1
-export BLIS_NUM_THREADS=1
-export PYTHONPATH="/mnt/home/agiuliani/ceph/STAR_LITE:${PYTHONPATH:-}"
-
-# ───────────────────────── Phase A: solves (boozer venv) ──────────────────
-source /mnt/home/agiuliani/ceph/STAR_LITE/venv/bin/activate
-
-# (1) Initial optimization -> num_aux=0 device.
-./boozer_all.py \
-  --margin "$margin" \
-  --well "$well" \
-  --Z "$Z" \
-  --distance "$distance" \
-  --on-vessel "$on_vessel" \
-  --config "$config" \
-  --vessel-id "$vessel_id" \
-  --mono "$mono" \
-  --num-aux 0 \
-  --attempt "$attempt" \
-  --null "$null"
+# ───────────────────── (1) initial optimization -> num_aux=0 ──────────────────
+bash run_boozer_all.sh \
+  "$margin" "$well" "$Z" "$distance" "$on_vessel" \
+  "$config" "$vessel_id" "$mono" "$attempt" "$null"
 
 if [ ! -f "$INIT_JSON" ]; then
   echo "ERROR: $INIT_JSON not produced — boozer_all.py failed"
-  deactivate
   exit 1
 fi
 
-# Max-relative-error gate on the initial device: boozer_all.py writes the
-# largest relative constraint error (a fraction) to max_rel_error.txt. If it
-# exceeds 0.1% the device did not meet its constraints, so do NOT proceed to
-# polishing / tracing / rendering.
+# Max-relative-error gate on the initial device: boozer_all.py writes the largest
+# relative constraint error (a fraction) to max_rel_error.txt. If it exceeds 0.1%
+# the device did not meet its constraints -> abort (nothing to ceph but the log).
 maxerr_file="$INIT_DIR/max_rel_error.txt"
 if [ ! -f "$maxerr_file" ]; then
   echo "ERROR: $maxerr_file not found"
-  deactivate
   exit 1
 fi
 if awk '{ exit !($1 > 0.001) }' "$maxerr_file"; then
   echo "ERROR: max relative error = $(cat "$maxerr_file") > 0.1%, aborting"
-  deactivate
   exit 1
 fi
 echo "max relative error = $(cat "$maxerr_file") (<= 0.1%, OK)"
 
-# Directories to render in Phase B, paired with the json the tracer consumes.
-RENDER_DIRS=("$INIT_DIR")
-RENDER_JSONS=("$INIT_JSON")
+# ─────────── (2) boozer_all passed: render the num_aux=0 device, copy to ceph ──
+# Render BEFORE polishing so the init device is secured on ceph independently of
+# whatever happens to the polished device.
+echo "=== rendering init device $INIT_DIR ==="
+if ! bash run_render.sh "$INIT_JSON" "$INIT_DIR"; then
+  echo "ERROR: init render failed"
+  exit 1
+fi
+sync_dir "$INIT_DIR"
 
-# (2) Polish (mono=1 -> M=I, mono=2 -> tr(M)=2) over num_aux = 1..NUM_AUX_MAX.
+# ───────────────────────────── (3) polish (mono 1/2) ──────────────────────────
 if [ "$mono" -eq 1 ]; then
   MONO_CONSTRAINT="identity"
 elif [ "$mono" -eq 2 ]; then
@@ -212,67 +187,39 @@ else
 fi
 
 if [ -n "$MONO_CONSTRAINT" ]; then
-  for num_aux in "$NUM_AUX_POLISH"; do
-    POLISH_NAME="$(task_name "$num_aux")"
-    POLISH_DIR="./output/$POLISH_NAME"
-    mkdir -p "$POLISH_DIR"
+  num_aux="$NUM_AUX_POLISH"
+  POLISH_NAME="$(task_name "$num_aux")"
+  POLISH_DIR="./output/$POLISH_NAME"
+  mkdir -p "$POLISH_DIR"
 
-    echo "--- polishing+optimizing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
-    # Copy THIS run's num_aux=0 design (json + sibling yaml) into the polish dir;
-    # boozer_singular_opt.py reads ALL its parameters from that yaml (weights,
-    # thresholds, monodromy constraint, config id, num_aux=10, well state) and
-    # writes design_polished_final.json (+ .yaml) IN PLACE in the same dir, with
-    # the boozer surfaces/axes re-solved on the combined modular+aux coil set.
-    cp "$INIT_JSON" "$POLISH_DIR/design_opt_final.json"
-    cp "$INIT_DIR/design_opt_final.yaml" "$POLISH_DIR/design_opt_final.yaml"
+  echo "--- polishing+optimizing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
+  # boozer_singular_opt.py reads ALL its parameters from the sibling yaml and writes
+  # design_polished_final.json (+ .yaml) IN PLACE in the polish dir.
+  cp "$INIT_JSON" "$POLISH_DIR/design_opt_final.json"
+  cp "$INIT_DIR/design_opt_final.yaml" "$POLISH_DIR/design_opt_final.yaml"
 
-    ./boozer_singular_opt.py "$POLISH_DIR/design_opt_final.json" --num-aux "$num_aux" || true
+  bash run_polish.sh "$POLISH_DIR/design_opt_final.json" "$num_aux" || true
 
-    if [ ! -f "$POLISH_DIR/design_polished_final.json" ]; then
-      echo "singular optimization num_aux=$num_aux failed (no design_polished_final.json) — skipping"
+  if [ ! -f "$POLISH_DIR/design_polished_final.json" ]; then
+    echo "singular optimization num_aux=$num_aux failed (no design_polished_final.json) — discarding (nothing to ceph)"
+    rm -rf "$POLISH_DIR"
+  else
+    # Same gate as boozer_all: a polished device that exceeds 0.1% is discarded
+    # entirely (nothing to ceph but the log) -- symmetric with the init device.
+    polish_err="$POLISH_DIR/max_rel_error.txt"
+    if [ ! -f "$polish_err" ] || awk '{ exit !($1 > 0.001) }' "$polish_err"; then
+      echo "polished num_aux=$num_aux out of spec (max rel err = $(cat "$polish_err" 2>/dev/null)) — discarding (nothing to ceph except log)"
       rm -rf "$POLISH_DIR"
     else
-      # Verify the POLISHED device also meets its constraints to 0.1% (the polish
-      # writes its own max_rel_error.txt). If it exceeds 0.1%, keep the results
-      # but do NOT trace/plot/render it.
-      polish_err="$POLISH_DIR/max_rel_error.txt"
-      if [ -f "$polish_err" ] && awk '{ exit !($1 > 0.001) }' "$polish_err"; then
-        echo "polished num_aux=$num_aux exceeds 0.1% (max rel err = $(cat "$polish_err")) — not rendering"
-      else
-        echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err" 2>/dev/null) <= 0.1%)"
-        RENDER_DIRS+=("$POLISH_DIR")
-        RENDER_JSONS+=("$POLISH_DIR/design_polished_final.json")
+      echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err") <= 0.1%)"
+      echo "=== rendering polished device $POLISH_DIR ==="
+      if ! bash run_render.sh "$POLISH_DIR/design_polished_final.json" "$POLISH_DIR"; then
+        echo "ERROR: polished render failed"
+        exit 1
       fi
+      sync_dir "$POLISH_DIR"
     fi
-  done
+  fi
 fi
-deactivate
-
-# ──────────────── Phase B: trace + plot + render (matplotlib venv) ─────────
-module load modules/2.3-20240529
-module load paraview/5.10.1
-source /mnt/home/agiuliani/ceph/STAR_LITE/venv_matplotlib/bin/activate
-export PYTHONPATH="${PYTHONPATH}:/mnt/home/agiuliani/ceph/STAR_LITE/"
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export MKL_DYNAMIC=FALSE
-export NUMEXPR_NUM_THREADS=1
-export VECLIB_MAXIMUM_THREADS=1
-export BLIS_NUM_THREADS=1
-
-# mk_manifolds + plot_manifolds support all of mono=0,1,2. The init device is
-# traced from its design_opt_final.json; each polished device is traced from its
-# design_polished_final.json (which carries the COMBINED modular+aux coil set,
-# written by the finalize step of boozer_singular_opt.py). RENDER_JSONS already
-# holds the right path per device.
-for i in "${!RENDER_DIRS[@]}"; do
-  d="${RENDER_DIRS[$i]}"
-  j="${RENDER_JSONS[$i]}"
-  echo "=== rendering $d (input $j) ==="
-  ./mk_manifolds.py "$j"
-  ./plot_manifolds.py "$j"
-  xvfb-run -a pvbatch --force-offscreen-rendering mk_paraview.py "$d" || exit 1
-done
 
 echo "Finished: $(date)"
