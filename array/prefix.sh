@@ -47,6 +47,13 @@ task_name() {
   echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}"
 }
 
+# Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
+# ceph (output/, logs/) ever holds more than ~500 entries: output/<shard>/<device>
+# and logs/<shard>/<name>.out. The bucket is a pure function of the (deterministic)
+# folder name, so it is identical across runs/restarts, and readers that discover
+# devices by content (e.g. device_browser's os.walk) need no change.
+shard() { printf '%s' "$1" | md5sum | cut -c1-2; }
+
 INIT_NAME="$(task_name 0)"
 
 SCRATCH="${TMPDIR:-/tmp/$USER}/disbatch_${SLURM_JOB_ID:-local}_${INIT_NAME}"
@@ -61,44 +68,56 @@ exec > >(tee "$LOG") 2>&1
 # Filtered sync of every produced output dir (init + any polished). Only run on
 # success, so failed runs never litter ceph with half-built directories.
 sync_back_filtered() {
-  if [ -d "$RUN/output" ]; then
-    rsync -a \
-      --include='*/' \
-      --include='design_opt_final.json' \
-      --include='design_opt_final.yaml' \
-      --include='design_polished_final.json' \
-      --include='design_polished_final.yaml' \
-      --include='singular.json' \
-      --include='singular.yaml' \
-      --include='summary.txt' \
-      --include='max_rel_error.txt' \
-      --include='scene_*.png' \
-      --include='xs_*.png' \
-      --include='poincare*.txt' \
-      --include='xpoint.txt' \
-      --include='phis.txt' \
-      --include='xpoint_type.txt' \
-      --include='legs.txt' \
-      --include='vessel_cross_*.txt' \
-      --include='surface_cross_*.txt' \
-      --include='fixed_points_*.txt' \
-      --include='sc*.vts' \
-      --include='aux_coils_*.vtu' \
-      --include='surf_opt_*_final.vts' \
-      --include='curves_opt_final.vtu' \
-      --include='ma_opt_final.vtu' \
-      --include='xpoint_curves_opt_final.vtu' \
-      --include='xpoint_singular_curves_opt_final.vtu' \
-      --include='vessel_opt_final.vtr' \
-      --include='*xpoint_deletion*' \
-      --exclude='*' \
-      "$RUN/output/" "$HOME_DIR/output/"
-  fi
+  [ -d "$RUN/output" ] || return 0
+  local includes=(
+    --include='*/'
+    --include='design_opt_final.json'
+    --include='design_opt_final.yaml'
+    --include='design_polished_final.json'
+    --include='design_polished_final.yaml'
+    --include='singular.json'
+    --include='singular.yaml'
+    --include='summary.txt'
+    --include='max_rel_error.txt'
+    --include='scene_*.png'
+    --include='xs_*.png'
+    --include='poincare*.txt'
+    --include='xpoint.txt'
+    --include='phis.txt'
+    --include='xpoint_type.txt'
+    --include='legs.txt'
+    --include='vessel_cross_*.txt'
+    --include='surface_cross_*.txt'
+    --include='fixed_points_*.txt'
+    --include='sc*.vts'
+    --include='aux_coils_*.vtu'
+    --include='surf_opt_*_final.vts'
+    --include='curves_opt_final.vtu'
+    --include='ma_opt_final.vtu'
+    --include='xpoint_curves_opt_final.vtu'
+    --include='xpoint_singular_curves_opt_final.vtu'
+    --include='vessel_opt_final.vtr'
+    --include='*xpoint_deletion*'
+    --exclude='*'
+  )
+  # Sync each produced device folder into its shard: output/<shard>/<device>/...
+  local d name dest
+  for d in "$RUN"/output/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    name="$(basename "$d")"
+    dest="$HOME_DIR/output/$(shard "$name")"
+    mkdir -p "$dest"
+    rsync -a "${includes[@]}" "$d/" "$dest/$name/"
+  done
 }
 
 # Always preserved so the run is traceable, regardless of success/failure.
 sync_log() {
-  [ -f "$LOG" ] && rsync -a "$LOG" "$HOME_DIR/logs/${INIT_NAME}.out" || true
+  [ -f "$LOG" ] || return 0
+  local dest="$HOME_DIR/logs/$(shard "$INIT_NAME")"
+  mkdir -p "$dest"
+  rsync -a "$LOG" "$dest/${INIT_NAME}.out" || true
 }
 
 cleanup() {
