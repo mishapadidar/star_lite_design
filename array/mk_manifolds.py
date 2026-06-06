@@ -186,6 +186,25 @@ def _rays_from_line_angles(line_angles):
     return np.array(directions)
 
 
+def _snowflake_cubic_discriminant(T):
+    """Discriminant of the homogeneous cubic f(cos t, sin t) whose real roots are
+    the snowflake's invariant lines (see :func:`_snowflake_directions`).
+
+    With the binary cubic  p c^3 + q c^2 s + r c s^2 + w s^3  (c=cos t, s=sin t),
+        disc = q^2 r^2 - 4 p r^3 - 4 q^3 w + 18 p q r w - 27 p^2 w^2.
+
+    The sign tells you the leg count directly:
+        disc > 0 -> 3 distinct real lines -> 6 legs (genuine monkey-saddle snowflake)
+        disc < 0 -> 1 real line           -> 2 legs
+        disc ~ 0 -> a real double root: right at the 2<->6 leg transition.
+    """
+    a0 = T[0, 0, 0]; a1 = 2 * T[0, 0, 1]; a2 = T[0, 1, 1]
+    b0 = T[1, 0, 0]; b1 = 2 * T[1, 0, 1]; b2 = T[1, 1, 1]
+    p = -b0; q = a0 - b1; r = a1 - b2; w = a2
+    return float(q**2 * r**2 - 4 * p * r**3 - 4 * q**3 * w
+                 + 18 * p * q * r * w - 27 * p**2 * w**2)
+
+
 def _integrate_monodromy(curve, field, nfp):
     """Integrate the (2,2) tangent (monodromy) map over one field period."""
     def rhs(t, y):
@@ -230,7 +249,7 @@ def compute(axis, magnetic_field, tol=1e-5):
     # downstream — the rest aid reuse/inspection.
     res = {'type': None, 'M': M, 'eigenvalues': np.linalg.eig(M)[0],
            'iota': None, 'line_angles': None, 'directions': None, 'c': None, 'T': None,
-           'sigma': None, 'D': None}
+           'sigma': None, 'D': None, 'discriminant': None}
     
     # ---- Classify. ----
     if np.abs(M - np.eye(2)).max() < tol:
@@ -298,6 +317,9 @@ def compute(axis, magnetic_field, tol=1e-5):
         res['line_angles'] = line_angles
         res['directions'] = directions
         res['T'] = T
+        # Discriminant of the invariant-line cubic: >0 => 3 lines/6 legs (true
+        # monkey-saddle snowflake), <0 => 1 line/2 legs, ~0 => 2<->6 transition.
+        res['discriminant'] = _snowflake_cubic_discriminant(T)
 
     # Second-order radial coefficient c = Q(v).v per ray (snowflake & parabolic).
     if res['T'] is not None:
@@ -326,6 +348,11 @@ def print_fixed_point_info(name, res):
         line_angles = res['line_angles']
         print(f"  type: SNOWFLAKE (M = I)")
         print(f"  invariant lines: {len(line_angles)}   rays (legs): {len(res['directions'])}")
+        disc = res.get('discriminant')
+        if disc is not None:
+            verdict = ('3 real lines -> 6 legs (monkey saddle)' if disc > 0 else
+                       '1 real line -> 2 legs' if disc < 0 else 'degenerate (double root)')
+            print(f"  invariant-line cubic discriminant = {disc:+.4e}   ({verdict})")
         for li, t in enumerate(line_angles):
             c = res['c'][2 * li]          # c = Q(v).v for the +ray of this line
             print(f"    line {np.degrees(t):+7.2f} deg   c = {c:+.4e}   "
@@ -382,6 +409,7 @@ boozer_surface = boozer_surfaces[0]
 PHI_MAX = 0.25 if boozer_surface.surface.stellsym else 0.5
 NPHI = 9
 PHIS = np.linspace(0, PHI_MAX, NPHI)   # panel grid, phi/2pi
+PHIS[0] = PHIS[0] + 1e-10
 PHIS_RAD = PHIS * 2 * np.pi            # radians, for compute_fieldlines
 # SN is non-stellsym, so the "bottom" X-point is NOT the Z-mirror of the top:
 # only trace/record the top X-point (the mirror-based bottom would be wrong).
