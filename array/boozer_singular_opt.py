@@ -776,12 +776,12 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER=3000
+MAXITER=1000
 
 dofs = JF.x.copy()
 callback(dofs)
 
-for j in range(10):
+for j in range(5):
     dat_dict["iter"] = 0
 
     try:
