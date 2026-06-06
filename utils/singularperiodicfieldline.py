@@ -710,7 +710,8 @@ class SingularPeriodicFieldline(Optimizable):
                              "must be 'identity' or 'trace'.")
         row_mask, _ = self._row_mask(monodromy_constraint)
         n_rows = int(np.sum(row_mask))
-        n_cols_full = int(np.sum(self.get_stellsym_mask(tail=int(nmu))))
+        # state columns = curve dofs + length + all mu (every column of J).
+        n_cols_full = self.curve.get_dofs().size + 1 + int(nmu)
         n_indep = n_cols_full - n_rows
         if n_indep < 0 or n_indep > nmu:
             raise ValueError(
@@ -750,7 +751,16 @@ class SingularPeriodicFieldline(Optimizable):
         n_mon = 4 if mon_constraint == 'identity' else 1
         nmu = len(mu)
         row_mask = self.get_stellsym_mask(tail=n_mon)
-        col_mask = self.get_stellsym_mask(tail=nmu)
+        # The column mask selects the DEPENDENT state variables (the ones the
+        # Newton solve solves for). Every curve dof and the length are ALWAYS
+        # dependent -- for a stellsym=True curve get_dofs() is already the reduced
+        # symmetric set, and for stellsym=False it is the full set -- so the
+        # curve+length block is all-True regardless of stellsym. Only the mu tail
+        # is partitioned (fixed = dependent = True, free = independent = False).
+        # Build it directly: get_stellsym_mask is a RESIDUAL-ROW layout whose
+        # stellsym branch (a collocation-row selection) does not match the curve's
+        # column count for a stellsym=True curve.
+        col_mask = np.ones(curve.get_dofs().size + 1 + nmu, dtype=bool)
         col_mask[-nmu:] = ~np.asarray(self.local_dofs_free_status, dtype=bool)
         x = np.concatenate((curve.get_dofs(), [length], mu))
         i = 0
@@ -828,7 +838,12 @@ class SingularPeriodicFieldline(Optimizable):
 
     # ------------------------------------------------------------------ utils
     def get_stellsym_mask(self, tail=4):
-        # tail = 4 for the row mask (4 monodromy equations); tail = len(mu) for the col mask.
+        # RESIDUAL-ROW mask, mirroring PeriodicFieldLine.get_stellsym_mask with
+        # `tail` all-True rows appended for the monodromy equations (tail = n_mon).
+        # For a stellsym=True curve the field-line residual is over-determined on
+        # the collocation grid, so this selects the independent rows; for
+        # stellsym=False it is all-True. NOT used as a column mask (see the
+        # col_mask construction in solve_residual_equation_exactly_newton).
         order = self.curve.order
         stellsym = self.curve.stellsym
         if not stellsym:

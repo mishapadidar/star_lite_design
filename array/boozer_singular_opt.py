@@ -38,8 +38,7 @@ from rich.console import Console
 from rich.table import Table
 from scipy.optimize import minimize
 
-from simsopt._core import Optimizable, load, save
-from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt._core import load, save
 from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (
@@ -70,6 +69,7 @@ from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, 
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
+from star_lite_design.utils.mubound import MuBound
 
 
 # The boozer_all design json is the only required input; everything else
@@ -211,15 +211,59 @@ MU_NAMES = _mu_names(2 * num_aux + 1)
 DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
 INDEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS, num_aux)]
 
+# A loaded X-point is always parametrized stellsym=False, but it may in fact be
+# stellarator symmetric, i.e. gamma(t) = diag(1, -1, -1) gamma(-t) for all t. If
+# so we project it onto a stellsym=True curve below so the singular field line is
+# exactly stellarator symmetric. STELLSYM_TOL is the defect threshold (relative
+# to the curve scale); the separation between a truly symmetric X-point (defect
+# ~ machine eps) and a single-null one (defect ~ O(0.1 m)) is enormous, so the
+# exact value is not delicate.
+STELLSYM_TOL = 1e-9
+
+
+def _stellsym_defect(curve):
+    """max_t | gamma(t) - diag(1, -1, -1) gamma(-t) |, which is ~0 iff the curve
+    is stellarator symmetric. gamma is 1-periodic in the parametrization, so
+    gamma(-t) is evaluated on a copy of the curve at the reflected quadpoints."""
+    qp = np.asarray(curve.quadpoints)
+    refl = CurveXYZFourierSymmetries(np.mod(-qp, 1.0), curve.order, curve.nfp,
+                                     curve.stellsym, ntor=curve.ntor)
+    refl.set_dofs(curve.get_dofs())
+    flip = np.array([1.0, -1.0, -1.0])
+    return float(np.max(np.abs(curve.gamma() - flip * refl.gamma())))
+
+
 sing_fls = []
 for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
     mu0 = np.concatenate([np.zeros(num_aux), radii0, [max_Z + AUX_COIL_DISTANCE_THRESHOLD]])
     # The polish gets its OWN copy of the X-point curve: the plain `xpoint`
     # field line keeps re-solving its curve every objective evaluation, so
     # sharing dofs would have the two Newton solvers fight each other.
+    #
+    # The loaded X-point is always stellsym=False. If it is in fact stellarator
+    # symmetric, project it onto a stellsym=True curve so the singular field line
+    # is exactly stellarator symmetric: the stellsym=True parametrization keeps
+    # only the symmetric Fourier coefficients (xc, ys, zs); copying those by name
+    # drops the antisymmetric ones (xs, yc, zc), which are zero up to `defect`.
     xc = xpoint.curve
-    fl_curve = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, xc.stellsym, ntor=xc.ntor)
-    fl_curve.set_dofs(xc.get_dofs())
+    defect = _stellsym_defect(xc)
+    scale = float(np.max(np.abs(xc.gamma())))
+    if defect <= STELLSYM_TOL * scale:
+        fl_curve = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, True, ntor=xc.ntor)
+        sym_names = ([f'xc({i})' for i in range(xc.order + 1)]
+                     + [f'ys({i})' for i in range(1, xc.order + 1)]
+                     + [f'zs({i})' for i in range(1, xc.order + 1)])
+        for nm in sym_names:
+            fl_curve.set(nm, xc.get(nm))
+        print(f"[idx={idx}] X-point IS stellarator symmetric "
+              f"(defect={defect:.2e} <= {STELLSYM_TOL:.0e}*scale={STELLSYM_TOL * scale:.2e}); "
+              f"projected onto a stellsym=True singular field line")
+    else:
+        fl_curve = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, xc.stellsym, ntor=xc.ntor)
+        fl_curve.set_dofs(xc.get_dofs())
+        print(f"[idx={idx}] X-point is NOT stellarator symmetric "
+              f"(defect={defect:.2e} > {STELLSYM_TOL:.0e}*scale={STELLSYM_TOL * scale:.2e}); "
+              f"keeping the stellsym=False parametrization")
     fl = SingularPeriodicFieldline(
         BiotSavart(boozer_surface.biotsavart.coils), fl_curve, mu0,
         options={'newton_tol': 1e-12, 'newton_maxiter': 10, 'verbose': True,
@@ -293,30 +337,6 @@ for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing
         raise SystemExit(1)
     new_axes.append(nax)
 boozer_surfaces, axes = new_boozer_surfaces, new_axes
-
-
-class MuBound(Optimizable):
-    """CurrentBound analogue for one named (independent / free) mu dof of a
-    SingularPeriodicFieldline:  J = max(|mu_k| - threshold, 0)^2."""
-
-    def __init__(self, fl, name, threshold):
-        Optimizable.__init__(self, depends_on=[fl])
-        self.fl = fl
-        self.name = name
-        self._idx = _mu_names(fl.local_full_dof_size).index(name)
-        self.threshold = threshold
-
-    def J(self):
-        v = float(self.fl.mu[self._idx])
-        return max(abs(v) - self.threshold, 0.) ** 2
-
-    @derivative_dec
-    def dJ(self):
-        v = float(self.fl.mu[self._idx])
-        ex = max(abs(v) - self.threshold, 0.)
-        g = np.zeros(self.fl.local_full_dof_size)
-        g[self._idx] = 2.0 * ex * np.sign(v)
-        return Derivative({self.fl: g})
 
 
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
