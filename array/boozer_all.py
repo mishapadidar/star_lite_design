@@ -441,8 +441,9 @@ if null_type == 'DN':
 
 # ---- per-attempt perturbation of the two base modular coils -------------
 # Jitter the order-0, 1 and 2 Fourier coefficients of each base modular coil
-# (base_curve_idx) by N(0, 1cm) so each of the 4 attempts starts the optimizer
-# from a different point. This runs AFTER the stellsym dofs are fixed above and
+# (base_curve_idx) by N(0, 1cm). attempt 0 is the UNPERTURBED reference device
+# (no jitter); attempts >= 1 each start the optimizer from a different perturbed
+# point. This runs AFTER the stellsym dofs are fixed above and
 # only touches FREE dofs (we set only names present in local_dof_names), so the
 # enforced symmetry is preserved. Seeded by DEVICE_ID for reproducibility.
 #
@@ -454,7 +455,7 @@ if null_type == 'DN':
 # task failure rather than an indefinite hang.
 PERTURB_STD = 0.003   # metres (3 mm, both DN and SN)
 PERTURB_ORDERS = (0, 1, 2)   # Fourier harmonics to perturb
-MAX_PERTURB_TRIES = 100
+MAX_PERTURB_TRIES = 10
 pert_rng = np.random.default_rng(DEVICE_ID)
 
 # The two base coils named by base_curve_idx (unwrap RotatedCurve, as above).
@@ -537,29 +538,34 @@ def _resolve_perturbed():
             and not any(bs.surface.is_self_intersecting() for bs in boozer_surfaces))
 
 
-_perturb_solved = False
-for _ktry in range(MAX_PERTURB_TRIES):
-    _restore_unperturbed()
-    _apply_perturbation()
-    try:
-        ok = _resolve_perturbed()
-    except Exception as e:
-        print(f"perturbation try {_ktry}: solve raised: {e}")
-        ok = False
-    if ok:
-        print(f"perturbation converged after {_ktry + 1} tr{'y' if _ktry == 0 else 'ies'}")
-        _perturb_solved = True
-        break
-    # Shrink the perturbation on failure so subsequent resamples are gentler and
-    # more likely to converge (_apply_perturbation reads PERTURB_STD each call).
-    PERTURB_STD = PERTURB_STD / 2.0
-    print(f"perturbation try {_ktry}: failed (non-convergence or self-intersection); "
-          f"halving std to {PERTURB_STD:.2e} and resampling")
+if attempt == 0:
+    # attempt 0 is the UNPERTURBED reference device: keep the base coils exactly
+    # as loaded (already solved above) and skip the perturbation entirely.
+    print("attempt 0: no base-coil perturbation (unperturbed reference device)")
+else:
+    _perturb_solved = False
+    for _ktry in range(MAX_PERTURB_TRIES):
+        _restore_unperturbed()
+        _apply_perturbation()
+        try:
+            ok = _resolve_perturbed()
+        except Exception as e:
+            print(f"perturbation try {_ktry}: solve raised: {e}")
+            ok = False
+        if ok:
+            print(f"perturbation converged after {_ktry + 1} tr{'y' if _ktry == 0 else 'ies'}")
+            _perturb_solved = True
+            break
+        # Shrink the perturbation on failure so subsequent resamples are gentler and
+        # more likely to converge (_apply_perturbation reads PERTURB_STD each call).
+        PERTURB_STD = PERTURB_STD / 2.0
+        print(f"perturbation try {_ktry}: failed (non-convergence or self-intersection); "
+              f"halving std to {PERTURB_STD:.2e} and resampling")
 
-if not _perturb_solved:
-    raise RuntimeError(
-        f"could not find a converged base-coil perturbation in {MAX_PERTURB_TRIES} tries "
-        f"(device {DEVICE_ID}, task {TASK_NAME})")
+    if not _perturb_solved:
+        raise RuntimeError(
+            f"could not find a converged base-coil perturbation in {MAX_PERTURB_TRIES} tries "
+            f"(device {DEVICE_ID}, task {TASK_NAME})")
 
 print(JF.dof_names, JF.x.size)
 #import ipdb;ipdb.set_trace()

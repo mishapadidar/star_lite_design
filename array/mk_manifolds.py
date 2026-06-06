@@ -600,8 +600,8 @@ def grow_manifold(signed_bfield, R0, Z0, t_seed):
 
 def trace_fieldlines(bfield, g0, res):
     t1 = time.time()
-    nmanif = 10
-    nmanif_hyper = 10   # more seeds for the hyperbolic fundamental domain
+    nmanif = 30
+    nmanif_hyper = 30   # more seeds for the hyperbolic fundamental domain
     R_xp = np.sqrt(g0[0]**2 + g0[1]**2)
     dirs = [] if res['directions'] is None else res['directions']
     for k, v2 in enumerate(dirs):
