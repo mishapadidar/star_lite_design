@@ -206,7 +206,7 @@ max_Z = np.max([np.abs(c.curve.gamma()[:, 2]) for c in boozer_surfaces[0].biotsa
 # coils). NEW key (boozer_all did not write it); an existing yaml may override it.
 config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
 AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
-radii0 = np.linspace(0.35, 1.35, num_aux + 1, endpoint=False)
+radii0 = np.linspace(0.35, 1.35, num_aux, endpoint=False)
 MU_NAMES = _mu_names(2 * num_aux + 1)
 DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
 INDEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS, num_aux)]
