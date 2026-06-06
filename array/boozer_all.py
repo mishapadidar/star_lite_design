@@ -17,6 +17,7 @@ from simsopt.geo import (
     BoozerSurface,
     CurveCurveDistance,
     CurveLength,
+    LinkingNumber,
     LpCurveCurvature,
     MajorRadius,
     MeanSquaredCurvature,
@@ -411,6 +412,31 @@ if J_bot_surf is not None:
 if J_bot_coil is not None:
     penalties['bottom xpoint-coil'] = BOTTOM_XPOINT_COIL_WEIGHT * J_bot_coil
 
+# Weight object backing each penalty above, keyed identically (used by the
+# post-perturbation pre-scaling below). 'nonQS' has an implicit weight of 1 (no
+# Weight object) and is the primary objective, so it is omitted and never
+# scaled. The bottom-X-point penalties are special drop-when-satisfied
+# constraints (not in the in-loop escalation), so they are likewise omitted.
+penalty_weights = {
+        'monodromy': MONODROMY_WEIGHT,
+        'iotas': IOTAS_WEIGHT,
+        'length': LENGTH_WEIGHT,
+        'coil-to-coil': COIL_TO_COIL_WEIGHT,
+        'curvature': CURVATURE_WEIGHT,
+        'mean-squared curvature': MEAN_SQUARED_CURVATURE_WEIGHT,
+        'arclength': ARCLENGTH_WEIGHT,
+        'Boozer residual': BOOZER_RESIDUAL_WEIGHT,
+        'modB': MODB_WEIGHT,
+        'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT,
+        'coil-on-vessel': COIL_ON_VESSEL_WEIGHT,
+        'coil-clearance': COIL_CLEARANCE_WEIGHT,
+        'current': CURRENT_WEIGHT,
+        'well': WELL_WEIGHT,
+        'fieldline meanz': FIELDLINE_MEANZ_WEIGHT,
+        'fieldline mean dist': FIELDLINE_MEANDIST_WEIGHT,
+        'major radius': MAJOR_RADIUS_WEIGHT,
+        }
+
 states = {
         'iotas': IOTAS_LIST,
         'modB': modBs,
@@ -543,10 +569,24 @@ if attempt == 0:
     # as loaded (already solved above) and skip the perturbation entirely.
     print("attempt 0: no base-coil perturbation (unperturbed reference device)")
 else:
+    # SIMSOPT Gauss linking number over the full modular-coil set: 0 if no pair
+    # is interlocked, >=1 otherwise. The unperturbed coils are unlinked; a
+    # perturbation that interlocks them is rejected and resampled below.
+    J_linking_number = LinkingNumber(curves)
+    print(f"unperturbed modular-coil linking number: {int(J_linking_number.J())}")
+
     _perturb_solved = False
     for _ktry in range(MAX_PERTURB_TRIES):
         _restore_unperturbed()
         _apply_perturbation()
+        # Reject (and resample with a smaller amplitude) any perturbation that
+        # interlocks the modular coils, BEFORE paying for the re-solve.
+        _ln = int(J_linking_number.J())
+        if _ln != 0:
+            PERTURB_STD = PERTURB_STD / 2.0
+            print(f"perturbation try {_ktry}: modular coils interlink (linking number "
+                  f"{_ln}); halving std to {PERTURB_STD:.2e} and resampling")
+            continue
         try:
             ok = _resolve_perturbed()
         except Exception as e:
@@ -566,6 +606,26 @@ else:
         raise RuntimeError(
             f"could not find a converged base-coil perturbation in {MAX_PERTURB_TRIES} tries "
             f"(device {DEVICE_ID}, task {TASK_NAME})")
+
+    # The yaml weights were tuned for the unperturbed device; a perturbation can
+    # push a penalty's weighted contribution weight*penalty.J() above 1, letting
+    # it dominate the objective. Mirror boozer_singular_opt.py: after the
+    # perturbation, shrink any weight whose CURRENT product exceeds 1 -- by
+    # repeated factors of 10 -- so each weighted term starts below 1. The in-loop
+    # x10 escalation can raise it back as the constraints demand. Modifying each
+    # Weight in place is seen by JF/JF_base (same objects).
+    print("Pre-scaling penalty weights so each weighted term starts below 1 after the perturbation:")
+    for _name, _scaled in penalties.items():
+        _w = penalty_weights.get(_name)
+        if _w is None or _w.value == 0.:
+            continue
+        _prod = _scaled.J()
+        if not np.isfinite(_prod) or _prod <= 1.0:
+            continue
+        _bare = _prod / _w.value          # the unweighted penalty value (dofs fixed here)
+        while _w.value * _bare > 1.0:
+            _w *= 0.1
+        print(f"  {_name}: weight -> {_w.value:.3e}  (penalty={_bare:.3e}, product {_prod:.3e} -> {_w.value * _bare:.3e})")
 
 print(JF.dof_names, JF.x.size)
 #import ipdb;ipdb.set_trace()
