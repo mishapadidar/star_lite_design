@@ -483,6 +483,15 @@ if comm_world is None or comm_world.rank == 0:
             fh.write('# lam, theta, sigma, D\n')
             fh.write(f"{res['eigenvalues'][0]:.1f}, {res['line_angles'][0]:.8f}, "
                      f"{res['sigma']:.8e}, {res['D']:.8e}\n")
+    if res['type'] == 'snowflake':
+        # Invariant-line cubic discriminant for plot_manifolds.py's legend. Sign
+        # gives the leg count directly (disc>0: 3 lines/6 legs monkey saddle,
+        # disc<0: 1 line/2 legs, disc~0: the 2<->6 leg transition). Also save the
+        # realized leg count so the reader needn't re-derive it from the sign.
+        with open(OUT_DIR + 'snowflake_discriminant.txt', 'w') as fh:
+            fh.write('# discriminant, n_legs\n')
+            n_legs = 0 if res['directions'] is None else len(res['directions'])
+            fh.write(f"{res['discriminant']:.8e}, {n_legs}\n")
 
 print("running the integration now...")
 
@@ -700,11 +709,20 @@ def surface_cross_sections(surface):
         np.savetxt(OUT_DIR + f'surface_cross_{ii}.txt', RZ, delimiter=',')
 
 
-def extract_vessel_cross_sections(sdf, nR=200, nZ=200):
-    """Vessel SDF zero-level (R, Z) contours at the manifold phi values."""
+def extract_vessel_cross_sections(sdf, nR=200, nZ=200, pad=0.05):
+    """Vessel SDF zero-level (R, Z) contours at the manifold phi values.
+
+    The (R, Z) sampling window is sized from the vessel's own parameters via
+    sdf.rz_bounds() (+ a small pad) so the full vessel is captured regardless of
+    its size; SDFs without rz_bounds() fall back to a fixed generous window."""
     phis = PHIS_RAD
-    Rg = np.linspace(0.0, 1.5, nR)
-    Zg = np.linspace(-1.0, 1.0, nZ)
+    try:
+        R_max, Z_max = sdf.rz_bounds()
+        R_hi, Z_hi = R_max + pad, Z_max + pad
+    except AttributeError:
+        R_hi, Z_hi = 1.5, 1.0
+    Rg = np.linspace(0.0, R_hi, nR)
+    Zg = np.linspace(-Z_hi, Z_hi, nZ)
     Rm, Zm = np.meshgrid(Rg, Zg, indexing='xy')
     fig_tmp, ax_tmp = plt.subplots()   # only used to extract contour paths
     try:

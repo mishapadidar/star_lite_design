@@ -73,6 +73,7 @@ SYNC_INCLUDES=(
   --include='phis.txt'
   --include='xpoint_type.txt'
   --include='legs.txt'
+  --include='snowflake_discriminant.txt'
   --include='vessel_cross_*.txt'
   --include='surface_cross_*.txt'
   --include='fixed_points_*.txt'

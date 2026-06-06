@@ -2,6 +2,7 @@
 import os, glob, re
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import pandas as pd
 from pathlib import Path
 import sys
@@ -48,7 +49,16 @@ if _f_cusp.exists():
         _cusp = (float(_th), float(_sig), float(_D))
 _CUSP_HALF = 0.02       # half-width of the (R, Z) window for the level-set overlay
 
-fig, axes = plt.subplots(3, 3, figsize=(8.25, 10), sharex=True, sharey=True, gridspec_kw={"wspace": 0, "hspace": 0})
+# Snowflake invariant-line cubic discriminant (written by mk_manifolds for
+# snowflake X-points). Sign gives the leg count: >0 -> 6 legs (monkey saddle),
+# <0 -> 2 legs, ~0 -> the 2<->6 leg transition. Surfaced in the figure legend.
+_snow_disc = None
+_f_disc = p.parent / 'snowflake_discriminant.txt'
+if _xpoint_type == 'snowflake' and _f_disc.exists():
+    _dd = np.atleast_1d(np.loadtxt(_f_disc, delimiter=',', skiprows=1))
+    _snow_disc = float(_dd[0])
+
+fig, axes = plt.subplots(3, 3, figsize=(8.25, 8.3), sharex=True, sharey=True, gridspec_kw={"wspace": 0, "hspace": 0})
 
 def _scatter_file(ax, path, dot_size, color=None, label=None, alpha=None):
     """Plot a poincare file's dots (drop the first hit per fieldline id). If
@@ -232,8 +242,34 @@ for i, ax in enumerate(axes.flat):
             transform=ax.transAxes, ha='center', va='top', fontsize=8)
     ax.set_aspect('equal')
 
-axes[0, 0].set_xlim([0, 1])
-axes[0, 0].set_ylim([-0.5, 0.5])
+# Panel limits: contain the full vessel cross-section (the outermost geometry —
+# manifolds, surface and fixed points all sit inside it) across all phi panels so
+# it is never clipped. mk_manifolds samples the vessel over its parameter-derived
+# extent, so the union of the vessel_cross_*.txt data IS the vessel's (R, Z)
+# bounding box. Use a SQUARE window (equal R/Z span) centred on that box so the
+# shared equal-aspect, wspace=hspace=0 grid stays gap-free. Fall back to the old
+# fixed window if no vessel data is present.
+_vR, _vZ = [], []
+for _fv in glob.glob(str(p.parent / "vessel_cross_*.txt")):
+    _vd = np.atleast_2d(np.loadtxt(_fv, delimiter=',', skiprows=1))
+    if _vd.size:
+        _vR.append(_vd[:, 0]); _vZ.append(_vd[:, 1])
+if _vR:
+    _R = np.concatenate(_vR); _Z = np.concatenate(_vZ)
+    _R = _R[np.isfinite(_R)]; _Z = _Z[np.isfinite(_Z)]
+    _cx = 0.5 * (_R.min() + _R.max())
+    _cy = 0.5 * (_Z.min() + _Z.max())
+    _half = 0.5 * max(_R.max() - _R.min(), _Z.max() - _Z.min()) * 1.05   # 5% margin
+    axes[0, 0].set_xlim([_cx - _half, _cx + _half])
+    axes[0, 0].set_ylim([_cy - _half, _cy + _half])
+else:
+    axes[0, 0].set_xlim([0, 1])
+    axes[0, 0].set_ylim([-0.5, 0.5])
+
+# With wspace=0 the panels abut, so the boundary R-tick labels (R=0 of one panel,
+# R=1 of its neighbour) overlap. Prune the edge ticks so only interior R labels
+# show (shared x-axis, so setting it on one panel applies to all).
+axes[0, 0].xaxis.set_major_locator(MaxNLocator(nbins=5, prune='both'))
 
 for ax in axes[-1, :]: ax.set_xlabel('R')
 for ax in axes[:, 0]:  ax.set_ylabel('Z')
@@ -287,6 +323,15 @@ fig.legend(
     frameon=False,
     markerscale=2,
 )
+
+# Snowflake invariant-line cubic discriminant as a caption at the bottom of the
+# figure, with the leg-count verdict its sign implies.
+if _snow_disc is not None:
+    _verdict = ('6 legs' if _snow_disc > 0 else
+                '2 legs' if _snow_disc < 0 else 'degenerate (double root)')
+    fig.text(0.5, 0.05,
+             f'snowflake invariant-line cubic discriminant = {_snow_disc:+.2e}  ({_verdict})',
+             ha='center', va='top', fontsize=9)
 
 parent_name = p.parent.name
 grandparent_name = p.parent.parent.name
