@@ -786,11 +786,20 @@ for j in range(5):
 
     try:
         res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
-        dofs = res.x.copy()
         msg = res.message
     except Exception as e:
-        dofs = dat_dict['x'].copy()
         msg = f'caught exception: {e}, restarting from last successful callback.'
+
+    # Resume from the last ACCEPTED state, not res.x. dat_dict['x'] already equals
+    # res.x in the good case (callback saved it), but BFGS can return having left
+    # the surface/axis/mu warm-start on a DIFFERENT branch (it may stop on a
+    # feasible line-search probe, not a _restore_state), so re-solving fun(res.x)
+    # from that stale warm-start can land on a different (e.g. self-intersecting)
+    # surface. Reset dofs to the accepted point AND _restore_state() so the live
+    # warm-start matches it -- making the post-min eval and the next run start
+    # consistent and feasible.
+    dofs = dat_dict['x'].copy()
+    _restore_state()
 
     print(msg)
     J0, dJ0 = fun(dofs)

@@ -931,15 +931,23 @@ for j in range(10):
 
     try:
         res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
-        dofs = res.x.copy()
         msg = res.message
     except _XpointSurfaceSatisfied:
         _drop_bottom_penalties()
-        dofs = dat_dict['x'].copy()
         msg = 'XpointSurfaceDistance reached 0: dropped bottom X-point penalties, switched to base objective'
     except Exception as e:
-        dofs = dat_dict['x'].copy()
         msg = f'caught exception: {e}, restarting from last successful callback.'
+
+    # Resume from the last ACCEPTED state (dat_dict), restoring the live
+    # surface/axis/xpoint warm-start to match it. res.x can be left on a different
+    # (e.g. self-intersecting) branch -- BFGS may stop on a feasible line-search
+    # probe, not a _restore_state -- so re-solving fun(res.x) from that stale
+    # warm-start can pick a different surface solution. Reset dofs to the accepted
+    # point and _restore_state() so the post-min eval and the next run start
+    # consistent and feasible. (Safe after _drop_bottom_penalties: _restore_state
+    # iterates `bottom_xpoints or []`.)
+    dofs = dat_dict['x'].copy()
+    _restore_state()
 
     print(msg)
     J0, dJ0 = fun(dofs)
@@ -950,7 +958,6 @@ for j in range(10):
         callback(dofs)
     except _XpointSurfaceSatisfied:
         _drop_bottom_penalties()
-        dofs = dat_dict['x'].copy()
         print('XpointSurfaceDistance reached 0 at post-minimize callback: dropped '
               'bottom X-point penalties, switched to base objective')
     
