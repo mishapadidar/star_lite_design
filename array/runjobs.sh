@@ -1,13 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=singopt_test
 #SBATCH --partition=ccm
-#SBATCH --constraint=genoa
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=1-00:00:00
-#SBATCH --output=logs/singopt_test.%j.out
-#SBATCH --error=logs/singopt_test.%j.out
+#SBATCH --output=singopt_test.%j.out
+#SBATCH --error=singopt_test.%j.out
 
 # Single test run of boozer_singular_opt.py on a genoa node.
 #
@@ -23,11 +22,11 @@ set -uo pipefail
 # ── the boozer_all.py run to load ──────────────────────────────────────────
 # folder: margin=0p12  well=0.0  Z=0  onvessel=1  distance=0  configID=1
 #         vesselID=0   mono=1 (-> identity)  null=SN
-NAME="margin=0p12_well=0.0_Z=0_onvessel=1_distance=0_configID=1_vesselID=0_mono=1_null=SN"
+NAME="margin=0p06_well=0.0_Z=0_onvessel=0_distance=0_configID=0_vesselID=2_mono=1_null=SN_num_aux=10_attempt=0"
 INPUT="./output/${NAME}/design_opt_final.json"
 
 # ── singular-polish settings ───────────────────────────────────────────────
-NUM_AUX=5                 # planar circular aux coils (identity needs >= 3)
+NUM_AUX=10                 # planar circular aux coils (identity needs >= 3)
 CONSTRAINT="identity"     # mono=1 -> identity, mono=2 -> trace
 OUT_DIR="./output/${NAME}_singopt_numaux=${NUM_AUX}"
 
@@ -60,17 +59,7 @@ echo "Input: $INPUT"
 echo "Output dir: $OUT_DIR"
 
 # args decoded from the folder name above
-./boozer_singular_opt.py \
-  --input "$INPUT" \
-  --num-aux "$NUM_AUX" \
-  --constraint "$CONSTRAINT" \
-  --margin 0.12 \
-  --well 0.0 \
-  --Z 0 \
-  --distance 0 \
-  --on-vessel 1 \
-  --config 1 \
-  --outdir "$OUT_DIR"
+./boozer_singular_opt.py  "$INPUT" --num-aux 10
 status=$?
 
 deactivate
