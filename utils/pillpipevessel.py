@@ -87,6 +87,15 @@ class PillPipeSDF(Optimizable):
         pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
 
+    def rz_bounds(self):
+        """Conservative (R_max, |Z|_max) extent of the vessel surface in the
+        (R, Z) half-plane, from the vessel parameters. Used to size the
+        cross-section sampling window / plot limits so the full vessel is never
+        clipped. The surface lies within |x|<=bx+rr, |y|<=by+rr, |z|<=rr, so
+        R = hypot(x, y) <= hypot(bx+rr, by+rr) and |Z| <= rr."""
+        bx, by, r, rr = self.local_full_x
+        return float(np.hypot(bx + rr, by + rr)), float(rr)
+
     def to_vtk(self, name, nx=20, ny=20, nz=20):
         bx, by, r, rr = self.local_full_x
         pad = 0.1
@@ -147,6 +156,13 @@ class TorusSDF(Optimizable):
     def eval(self, x, y, z):
         pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
+
+    def rz_bounds(self):
+        """(R_max, |Z|_max) extent of the torus surface from its parameters: the
+        circular tube of minor radius r about the R=R circle reaches R<=R+r and
+        |Z|<=r. See PillPipeSDF.rz_bounds."""
+        r, R = self.local_full_x
+        return float(R + r), float(r)
 
     def to_vtk(self, name, nx=20, ny=20, nz=20):
         r, R = self.local_full_x
@@ -236,6 +252,14 @@ class RennaissanceSDF(Optimizable):
     def eval(self, x, y, z):
         pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None], z.flatten()[:, None]), axis=-1)
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
+
+    def rz_bounds(self):
+        """(R_max, |Z|_max) extent of the surface from its parameters: the two
+        radius-rr pipes (reflected into all octants) lie within |x|<=d1+rr,
+        |y|<=d2+rr, |z|<=rr, so R<=hypot(d1+rr, d2+rr) and |Z|<=rr. See
+        PillPipeSDF.rz_bounds."""
+        d1, d2, rr = self.local_full_x
+        return float(np.hypot(d1 + rr, d2 + rr)), float(rr)
 
     def to_vtk(self, name, nx=20, ny=20, nz=20):
         d1, d2, rr = self.local_full_x
