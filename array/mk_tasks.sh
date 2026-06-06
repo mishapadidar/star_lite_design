@@ -11,7 +11,7 @@
 # Each parameter combination is attempted ATTEMPTS times; each attempt perturbs
 # the base modular coils with a different (device-ID-seeded) jitter so the
 # optimizer starts from a different point.
-NUM_AUX=10
+NUM_AUX=6
 margins=(0.06 0.08 0.10 0.12)
 wells=(OFF 100 0 -100)
 binary_values=(0 1)
@@ -21,7 +21,7 @@ vessel_values=(0 1 2)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)
-ATTEMPTS=4
+ATTEMPTS=5
 
 mkdir -p logs
 : > tasks.jobs
