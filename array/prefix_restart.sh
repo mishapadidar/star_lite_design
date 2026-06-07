@@ -129,7 +129,7 @@ if [ "$mono" -eq 0 ]; then
   exit 1
 fi
 
-rsync -a --exclude output --exclude logs --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
+rsync -a --exclude 'output*' --exclude 'logs*' --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
 mkdir -p "$SCRATCH/convert"
 rsync -a "$HOME_DIR/../convert/" "$SCRATCH/convert/"
 

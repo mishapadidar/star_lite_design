@@ -129,7 +129,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-rsync -a --exclude output --exclude logs --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
+rsync -a --exclude 'output*' --exclude 'logs*' --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
 mkdir -p "$SCRATCH/convert"
 rsync -a "$HOME_DIR/../convert/" "$SCRATCH/convert/"
 
