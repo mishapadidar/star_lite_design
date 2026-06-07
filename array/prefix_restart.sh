@@ -1,20 +1,29 @@
 #!/bin/bash
 set -uo pipefail
 
-# RESTART master driver. Identical to prefix.sh EXCEPT it skips boozer_all.py and
-# the initial-device render: it REUSES the num_aux=0 device a previous prefix.sh run
-# already wrote to ceph, then re-runs only the polish (run_polish.sh) and renders
-# only the polished device (run_render.sh). Like prefix.sh, each lower-level step
-# loads its own venv, and the master does all ceph copying / keep-discard decisions.
-# Use this to re-run a rewritten boozer_singular_opt.py without recomputing the
-# (expensive) num_aux=0 device.
+# RESTART master driver. Like prefix.sh, but it tries to REUSE the num_aux=0 device a
+# previous prefix.sh run already wrote to ceph instead of recomputing it. Two checks
+# decide how much of the init phase is skipped:
+#
+#   * design_opt_final.{json,yaml} present on ceph?  -> copy them into scratch and
+#     SKIP boozer_all.py.  Absent -> FALL BACK to prefix.sh's init: recompute the
+#     device with run_boozer_all.sh.
+#   * the init device's *.png renders present on ceph?  -> the device is already
+#     traced + rendered, so SKIP its poincare+render.  Absent (or the device was just
+#     recomputed) -> run run_render.sh (poincare + render) for it and copy it to ceph.
+#
+# Either way, the polish (run_polish.sh) + the polished poincare+render (run_render.sh)
+# are then run. So the restart is self-healing: a missing init device, or a present
+# device that was never rendered, is regenerated and pushed to ceph for next time.
+# Each lower-level step loads its own venv; the master does all ceph copying /
+# keep-discard decisions. Use this to re-run a rewritten boozer_singular_opt.py
+# without recomputing the (expensive) num_aux=0 device when it already exists.
 #
 #   bash ./prefix_restart.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
 #                            <vessel_id> <mono> <attempt> <null(DN|SN)> [num_aux]
 #
-# mono=0 has no polish step, so the restart aborts immediately. The reused init
-# device is NOT re-rendered and NOT re-copied (it is already on ceph). A polished
-# device that fails or exceeds 0.1% is discarded (nothing to ceph but the log).
+# mono=0 has no polish step, so the restart aborts immediately. A polished device that
+# fails or exceeds 0.1% is discarded (nothing to ceph but the log).
 
 margin="$1"
 well="$2"
@@ -135,23 +144,32 @@ echo "mono=$mono attempt=$attempt (RESTART from boozer_singular_opt.py)"
 INIT_DIR="./output/$INIT_NAME"
 INIT_JSON="$INIT_DIR/design_opt_final.json"
 
-# ───────── (1) reuse the num_aux=0 device from ceph (sharded), then gate ───────
-# Copy design_opt_final.{json,yaml}(+max_rel_error.txt) from the persistent ceph
-# shard dir into local scratch, where run_polish.sh reads it. The init device is
-# NOT re-rendered and NOT re-copied to ceph (it is already there, unchanged).
+# ──── (1) num_aux=0 device: REUSE from ceph if present, else RECOMPUTE, then gate ─
+# If a previous prefix.sh run left design_opt_final.{json,yaml} in the persistent ceph
+# shard dir, copy them into local scratch (where run_polish.sh reads the json) and skip
+# boozer_all.py. Otherwise fall back to prefix.sh's init path and recompute the device.
 SRC_INIT_DIR="$HOME_DIR/output/$(shard "$INIT_NAME")/$INIT_NAME"
-if [ ! -f "$SRC_INIT_DIR/design_opt_final.json" ] || [ ! -f "$SRC_INIT_DIR/design_opt_final.yaml" ]; then
-  echo "ERROR: $SRC_INIT_DIR/design_opt_final.{json,yaml} not found — nothing to restart from"
-  exit 1
+if [ -f "$SRC_INIT_DIR/design_opt_final.json" ] && [ -f "$SRC_INIT_DIR/design_opt_final.yaml" ]; then
+  reused_init=1
+  mkdir -p "$INIT_DIR"
+  cp "$SRC_INIT_DIR/design_opt_final.json" "$INIT_JSON"
+  cp "$SRC_INIT_DIR/design_opt_final.yaml" "$INIT_DIR/design_opt_final.yaml"
+  [ -f "$SRC_INIT_DIR/max_rel_error.txt" ] && cp "$SRC_INIT_DIR/max_rel_error.txt" "$INIT_DIR/max_rel_error.txt"
+  echo "restart: reused design_opt_final.{json,yaml}(+max_rel_error.txt) from $SRC_INIT_DIR (skipping boozer_all)"
+else
+  reused_init=0
+  echo "restart: $SRC_INIT_DIR/design_opt_final.json not on ceph — recomputing the num_aux=0 device with boozer_all.py"
+  bash run_boozer_all.sh \
+    "$margin" "$well" "$Z" "$distance" "$on_vessel" \
+    "$config" "$vessel_id" "$mono" "$attempt" "$null"
+  if [ ! -f "$INIT_JSON" ]; then
+    echo "ERROR: $INIT_JSON not produced — boozer_all.py failed"
+    exit 1
+  fi
 fi
-mkdir -p "$INIT_DIR"
-cp "$SRC_INIT_DIR/design_opt_final.json" "$INIT_JSON"
-cp "$SRC_INIT_DIR/design_opt_final.yaml" "$INIT_DIR/design_opt_final.yaml"
-[ -f "$SRC_INIT_DIR/max_rel_error.txt" ] && cp "$SRC_INIT_DIR/max_rel_error.txt" "$INIT_DIR/max_rel_error.txt"
-echo "restart: reused design_opt_final.{json,yaml}(+max_rel_error.txt) from $SRC_INIT_DIR"
 
-# Same max-relative-error gate as prefix.sh; if the reused device is out of spec
-# (or its max_rel_error.txt is missing) the restart aborts.
+# Same max-relative-error gate as prefix.sh, applied whether the init device was
+# reused or freshly recomputed; >0.1% (or a missing max_rel_error.txt) aborts.
 maxerr_file="$INIT_DIR/max_rel_error.txt"
 if [ ! -f "$maxerr_file" ]; then
   echo "ERROR: $maxerr_file not found"
@@ -163,7 +181,28 @@ if awk '{ exit !($1 > 0.001) }' "$maxerr_file"; then
 fi
 echo "max relative error = $(cat "$maxerr_file") (<= 0.1%, OK)"
 
-# ───────────── (2) polish (mono 1/2) + render/copy ONLY the polished ──────────
+# ──── (2) ensure the init device is traced + rendered, then copy it to ceph ───────
+# Run the init poincare+render (run_render.sh) when EITHER the device was just
+# recomputed (fresh, never rendered) OR it was reused but has no *.png renders on ceph
+# (its tracing never ran / never finished). If a reused device already has its *.png
+# renders, it is left untouched on ceph. Any (re)render is copied back to ceph with
+# sync_dir so a later restart finds a complete init device.
+if [ "$reused_init" -eq 1 ] && ls "$SRC_INIT_DIR"/*.png >/dev/null 2>&1; then
+  echo "init device on ceph already has *.png renders — skipping init poincare+render"
+else
+  if [ "$reused_init" -eq 1 ]; then
+    echo "=== reused init device has no *.png renders — running poincare+render for $INIT_DIR ==="
+  else
+    echo "=== rendering recomputed init device $INIT_DIR ==="
+  fi
+  if ! bash run_render.sh "$INIT_JSON" "$INIT_DIR"; then
+    echo "ERROR: init poincare+render failed"
+    exit 1
+  fi
+  sync_dir "$INIT_DIR"
+fi
+
+# ─────────── (3) polish (mono 1/2) + poincare+render/copy ONLY the polished ───
 if [ "$mono" -eq 1 ]; then
   MONO_CONSTRAINT="identity"
 else
