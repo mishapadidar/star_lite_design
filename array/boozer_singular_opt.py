@@ -940,6 +940,21 @@ for j in range(5):
         print("FIELDLINE MEAN DIST ERROR", fieldline_mean_distance_err)
         FIELDLINE_MEANDIST_WEIGHT*=10
 
+    # Refresh the failed-evaluation barrier anchor with the JUST-ESCALATED weights.
+    # callback() above captured dat_dict['J']/['dJ'] BEFORE these weight bumps, so on
+    # the NEXT BFGS run's first line search the barrier (anchored at dat_dict) would
+    # be built from STALE, pre-escalation weights -- inconsistent with the new-weight
+    # phi(0)/phi'(0) the line search measures at this same point, which makes the
+    # barrier the "inconsistent wall" it was designed to avoid (every probe fails ->
+    # line search gives up with no accepted step). Re-evaluating fun() here at the
+    # unchanged dofs rebuilds (J, dJ) under the new weights so the barrier is again a
+    # faithful local model. fun() reuses the warm-started (feasible) solves, so this
+    # is one cheap extra evaluation per outer iteration.
+    J0, dJ0 = fun(dofs)
+    dat_dict['x'] = dofs.copy()
+    dat_dict['J'] = J0
+    dat_dict['dJ'] = dJ0.copy()
+
     sdf.to_vtk(OUT_DIR + f'vessel_opt_{j}', nx=40, ny=40, nz=40)
     curves_to_vtk(curves, OUT_DIR + f"curves_opt_{j}")
     curves_to_vtk([xpoint.curve for xpoint in xpoints], OUT_DIR + f"xpoint_curves_opt_{j}")
