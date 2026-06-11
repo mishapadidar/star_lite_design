@@ -373,7 +373,7 @@ JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB, axis, boo
 # penalty keeping |B| within +-MODB_RIPPLE_THRESHOLD of its mean ALONG THE AXIS, in
 # the TOTAL (modular + aux) field. NEW config keys (boozer_all did not write them);
 # an existing yaml may override so escalation survives a restart.
-config.setdefault('MODB_RIPPLE_THRESHOLD', 0.05)
+config.setdefault('MODB_RIPPLE_THRESHOLD', 0.001)
 config.setdefault('MODB_RIPPLE_WEIGHT', 1e2)
 MODB_RIPPLE_THRESHOLD = config['MODB_RIPPLE_THRESHOLD']
 MODB_RIPPLE_WEIGHT = Weight(config['MODB_RIPPLE_WEIGHT'])
