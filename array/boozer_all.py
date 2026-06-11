@@ -723,6 +723,7 @@ def callback(dofs):
     for k in states.keys():
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
     table2.add_row('aspect ratio', ' '.join([f'{bsurf.surface.aspect_ratio():.4e}' for bsurf in boozer_surfaces]))
+    table2.add_row('modB axis deviation', ' '.join([f'{r.max_deviation():.4e}' for r in modB_ripples]))
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
     if bottom_xpoints is not None:
         table2.add_row('xpoint_bottom(0)', ' '.join([f'{np.array2string(bx.curve.gamma()[0])}' for bx in bottom_xpoints]))
