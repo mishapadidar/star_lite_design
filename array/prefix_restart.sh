@@ -51,7 +51,7 @@ margin_str=$(printf "%.2f" "$margin" | sed 's/\./p/')
 HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}_AR=${AR}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}"
 }
 
 # Shard helper -- identical to prefix.sh so the reused device is read from exactly

@@ -105,8 +105,8 @@ else:
 # same ID from the folder name (it uses the identical zlib.crc32 convention).
 TASK_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_vessel}"
              f"_distance={distance_weight}_configID={config_id}_vesselID={vessel_id}"
-             f"_mono={mono}_null={null_type}_num_aux={num_aux}_attempt={attempt}"
-             f"_AR={args.AR}")
+             f"_mono={mono}_null={null_type}_num_aux={num_aux}_AR={args.AR}"
+             f"_attempt={attempt}")
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
 print(f"Task: {TASK_NAME}")
@@ -955,8 +955,9 @@ except _XpointSurfaceSatisfied:
 
 def _attempt_ar_reduction(j, dofs):
     """Aspect-ratio reduction (--AR 1), run before each BFGS step (see the call site).
-    Raise the Boozer-surface target volume toward the AR=5 torus estimate
-    V = 2*pi^2*R*r^2 (R = current major radius, r = R/5). If the full AR=5 target
+    Raise the Boozer-surface target-volume MAGNITUDE toward the AR=5 torus estimate
+    |V| = 2*pi^2*R*r^2 (R = current major radius, r = R/5), keeping the surface's
+    existing volume sign (it is negative for some devices). If the full AR=5 target
     converges with no self-intersection, adopt it and return True (caller then stops
     retrying). Otherwise BISECT (at most 5 times) between the current known-good
     volume and the AR=5 target, adopt the LARGEST volume that still converges without
@@ -965,9 +966,18 @@ def _attempt_ar_reduction(j, dofs):
     snapshot, downweight any penalty whose weighted value exceeds 1, and refresh the
     failed-evaluation barrier anchor (dat_dict)."""
     bs = boozer_surfaces[0]
-    R_cur = mr.J()
-    V_new = 2.0 * np.pi**2 * R_cur * (R_cur / 5.0)**2   # AR=5 torus volume
+    R_target = MR_TARGET   # target major radius (R is driven here by J_major_radius)
     V_old = bs.targetlabel
+    # The Boozer-surface volume is SIGNED (it depends on the surface orientation and
+    # is negative for some devices); preserve that sign and reason about MAGNITUDES.
+    # AR=5 -> minor radius r = R/5 -> |V| = 2*pi^2*R*r^2, which is LARGER than the
+    # current |V| (a smaller aspect ratio means a larger volume).
+    sgn = 1.0 if V_old >= 0.0 else -1.0
+    Vmag_old = abs(V_old)
+    Vmag_new = 2.0 * np.pi**2 * R_target * (R_target / 5.0)**2   # |volume| at AR=5
+    V_new = sgn * Vmag_new                                  # AR=5 target, same orientation
+    AR_old = bs.surface.aspect_ratio()                      # actual AR of the current surface
+
     # the current (known-good) surface is the fallback "best".
     best = {'V': V_old, 'sdofs': bs.surface.x.copy(),
             'iota': bs.res['iota'], 'G': bs.res['G']}
@@ -987,27 +997,31 @@ def _attempt_ar_reduction(j, dofs):
                 'iota': bs.res['iota'], 'G': bs.res['G']}
 
     done = False
-    if V_new <= V_old:
-        # current volume already >= AR=5 volume (AR already <= 5): nothing to do.
-        print(f"[AR] j={j}: current AR already <= 5 (V={V_old:.6e} >= V_AR5={V_new:.6e}); done")
+    if Vmag_new <= Vmag_old:
+        # current |volume| already >= AR=5 |volume| (AR already <= 5): nothing to do.
+        print(f"[AR] j={j}: current AR already <= 5 (AR~{AR_old:.3f}, "
+              f"|V|={Vmag_old:.6e} >= AR5 |V|={Vmag_new:.6e}); done")
         done = True
     elif _try_volume(V_new):
         best = _snapshot(V_new)
         done = True
-        print(f"[AR] j={j}: AR=5 reached on first try (V {V_old:.6e} -> {V_new:.6e}); won't retry")
+        # surface is now solved at the AR=5 target; report its actual aspect ratio.
+        print(f"[AR] j={j}: AR=5 reached on first try "
+              f"(AR~{AR_old:.3f} -> {bs.surface.aspect_ratio():.3f}, "
+              f"|V| {Vmag_old:.6e} -> {Vmag_new:.6e}); won't retry")
     else:
-        # bisect for the LARGEST working volume in (V_old, V_new]; lo works, hi fails.
-        lo, hi = V_old, V_new
+        # bisect on MAGNITUDE for the largest feasible |volume| in (Vmag_old, Vmag_new];
+        # lo works, hi fails. Apply the surface's sign to each trial target.
+        lo, hi = Vmag_old, Vmag_new
         for _bi in range(5):
             mid = 0.5 * (lo + hi)
-            if _try_volume(mid):
-                best = _snapshot(mid)
+            if _try_volume(sgn * mid):
+                best = _snapshot(sgn * mid)
                 lo = mid
             else:
                 hi = mid
-        _ar_best = R_cur / (best['V'] / (2.0 * np.pi**2 * R_cur))**0.5
-        print(f"[AR] j={j}: AR=5 (V={V_new:.6e}) did not converge; bisected (<=5x) to "
-              f"largest working volume V={best['V']:.6e} (AR~{_ar_best:.3f}); retry next iteration")
+        print(f"[AR] j={j}: AR=5 (|V|={Vmag_new:.6e}) did not converge; bisected (<=5x) to "
+              f"largest working |V|={abs(best['V']):.6e}; retry next iteration")
 
     # adopt the chosen volume: restore that surface state, retarget, re-solve.
     bs.surface.x = best['sdofs']
@@ -1038,6 +1052,10 @@ def _attempt_ar_reduction(j, dofs):
         dat_dict['x'] = dofs.copy()
         dat_dict['J'] = J0
         dat_dict['dJ'] = dJ0.copy()
+    # surface has been restored + re-solved at best['V'] above, so this is the
+    # actual aspect ratio of the adopted surface.
+    print(f"[AR] j={j}: updated aspect ratio AR~{bs.surface.aspect_ratio():.3f} "
+          f"(target |V|={abs(best['V']):.6e})")
     return done
 
 

@@ -50,7 +50,7 @@ HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 # Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the device
 # IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}_AR=${AR}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}"
 }
 
 # Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
