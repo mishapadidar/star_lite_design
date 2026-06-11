@@ -33,7 +33,7 @@ from star_lite_design.utils.boozer_surface_utils import BoozerResidual
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
-from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine
+from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 
 import sn_setup
@@ -275,6 +275,17 @@ Jbrs = sum(brs)
 modBs = [ModBOnFieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils)) for axis, boozer_surface in zip(axes, boozer_surfaces)]
 JmodB = sum([QuadraticPenalty(modB, MODB_TARGET, 'identity') for modB, axis, boozer_surface in zip(modBs, axes, boozer_surfaces)])
 
+# penalty keeping |B| within +-MODB_RIPPLE_THRESHOLD of its mean ALONG THE AXIS
+# (penalizes points outside [1-thr, 1+thr]*mean|B|). NEW config keys (boozer_all
+# did not write them); an existing yaml may override so escalation survives a restart.
+config.setdefault('MODB_RIPPLE_THRESHOLD', 0.05)
+config.setdefault('MODB_RIPPLE_WEIGHT', 1e2)
+MODB_RIPPLE_THRESHOLD = config['MODB_RIPPLE_THRESHOLD']
+MODB_RIPPLE_WEIGHT = Weight(config['MODB_RIPPLE_WEIGHT'])
+modB_ripples = [ModBRippleOnFieldLine(axis, BiotSavart(boozer_surface.biotsavart.coils), MODB_RIPPLE_THRESHOLD)
+                for axis, boozer_surface in zip(axes, boozer_surfaces)]
+J_modB_ripple = sum(modB_ripples)
+
 J_curr = None
 for boozer_surface in boozer_surfaces:
     for idx in base_curve_idx:
@@ -381,6 +392,7 @@ JF = (J_nonQSRatio
     + ARCLENGTH_WEIGHT * Jal
     + BOOZER_RESIDUAL_WEIGHT * Jbrs
     + MODB_WEIGHT * JmodB
+    + MODB_RIPPLE_WEIGHT * J_modB_ripple
     + PLASMA_VESSEL_MARGIN_WEIGHT * J_plasma_to_vessel_margin
     + COIL_ON_VESSEL_WEIGHT * J_coil_on_vessel
     + COIL_CLEARANCE_WEIGHT * J_coil_clearance
@@ -410,6 +422,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'arclength':ARCLENGTH_WEIGHT * Jal,
         'Boozer residual': BOOZER_RESIDUAL_WEIGHT * Jbrs,
         'modB': MODB_WEIGHT * JmodB,
+        'modB axis ripple': MODB_RIPPLE_WEIGHT * J_modB_ripple,
         'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT * J_plasma_to_vessel_margin,
         'coil-on-vessel': COIL_ON_VESSEL_WEIGHT * J_coil_on_vessel,
         'coil-clearance': COIL_CLEARANCE_WEIGHT * J_coil_clearance,
@@ -439,6 +452,7 @@ penalty_weights = {
         'arclength': ARCLENGTH_WEIGHT,
         'Boozer residual': BOOZER_RESIDUAL_WEIGHT,
         'modB': MODB_WEIGHT,
+        'modB axis ripple': MODB_RIPPLE_WEIGHT,
         'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT,
         'coil-on-vessel': COIL_ON_VESSEL_WEIGHT,
         'coil-clearance': COIL_CLEARANCE_WEIGHT,
@@ -1101,6 +1115,9 @@ for j in range(10):
     alen_err = np.max([ArclengthVariation(c).J() for c in base_curves])
 
     modB_err = max([np.abs(modB.J()-MODB_TARGET)/MODB_TARGET for modB in modBs])
+    # axis |B| ripple: max fractional deviation from the mean, relative to the band
+    modB_ripple_err = max([max(r.max_deviation() - MODB_RIPPLE_THRESHOLD, 0)/np.abs(MODB_RIPPLE_THRESHOLD)
+                           for r in modB_ripples])
 
     well_err = 0.
     if WELL_THRESHOLD != 0. and WELL_WEIGHT.value != 0.:
@@ -1143,6 +1160,9 @@ for j in range(10):
     if cc_err > 0.001 and COIL_TO_COIL_WEIGHT.value != 0.:
         COIL_TO_COIL_WEIGHT*=10
         print("COIL TO COIL ERROR", cc_err)
+    if modB_ripple_err > 0.001 and MODB_RIPPLE_WEIGHT.value != 0.:
+        MODB_RIPPLE_WEIGHT*=10
+        print("MODB AXIS RIPPLE ERROR", modB_ripple_err)
     if modB_err > 0.001 and MODB_WEIGHT.value != 0.:
         MODB_WEIGHT*=10
         print("MODB ERROR", modB_err)
@@ -1219,6 +1239,8 @@ for j in range(10):
     config['BOOZER_RESIDUAL_WEIGHT'] = BOOZER_RESIDUAL_WEIGHT.value
     config['PLASMA_VESSEL_MARGIN_WEIGHT'] = PLASMA_VESSEL_MARGIN_WEIGHT.value
     config['MODB_WEIGHT'] = MODB_WEIGHT.value
+    config['MODB_RIPPLE_WEIGHT'] = MODB_RIPPLE_WEIGHT.value
+    config['MODB_RIPPLE_THRESHOLD'] = MODB_RIPPLE_THRESHOLD
     config['ARCLENGTH_WEIGHT'] = ARCLENGTH_WEIGHT.value
     config['COIL_ON_VESSEL_WEIGHT'] = COIL_ON_VESSEL_WEIGHT.value
     config['COIL_CLEARANCE_WEIGHT'] = COIL_CLEARANCE_WEIGHT.value
@@ -1250,9 +1272,17 @@ save([boozer_surfaces, iota_Gs, axes, xpoints, sdf], OUT_DIR + f'design_opt_fina
 # ---- final summary of constraints, values, and relative errors ----
 final_nonqs_pct = 100. * J_nonQSRatio.J()**0.5
 
+# mirror ratio max|B|/min|B| on the magnetic (Boozer) surface, via a fresh
+# BiotSavart so the optimization field's point cache is left undisturbed.
+_bs_mirror = BiotSavart(boozer_surfaces[0].biotsavart.coils)
+_bs_mirror.set_points(boozer_surfaces[0].surface.gamma().reshape((-1, 3)))
+_modB_surf = _bs_mirror.AbsB()
+mirror_ratio = float(np.max(_modB_surf) / np.min(_modB_surf))
+
 # Recompute all error metrics one more time with final dofs
 final_metrics = {
     'nonQS_percent':              (final_nonqs_pct,                                None,                          None),
+    'mirror_ratio':               (mirror_ratio,                                   None,                          None),
     'current':                    (max(currents_list),                             CURRENT_THRESHOLD,             curr_err if CURRENT_WEIGHT.value != 0. else 0.0),
     'iotas':                      (max(IOTAS.J() for IOTAS in IOTAS_LIST),         max(IOTAS_TARGET),             iota_err if IOTAS_WEIGHT.value != 0. else 0.0),
     'major_radius':               (mr.J(),                                         MR_TARGET,                     mr_err if MAJOR_RADIUS_WEIGHT.value != 0. else 0.0),
@@ -1266,6 +1296,7 @@ final_metrics = {
     'curvature':                  (max(np.max(c.kappa()) for c in base_curves),    CURVATURE_THRESHOLD,           curv_err if CURVATURE_WEIGHT.value != 0. else 0.0),
     'arclength':                  (alen_err,                                       0.0,                           alen_err if ARCLENGTH_WEIGHT.value != 0. else 0.0),
     'modB':                       (max(modB.J() for modB in modBs),                MODB_TARGET,                   modB_err if MODB_WEIGHT.value != 0. else 0.0),
+    'modB_axis_ripple':           (max(r.max_deviation() for r in modB_ripples),   MODB_RIPPLE_THRESHOLD,         modB_ripple_err if MODB_RIPPLE_WEIGHT.value != 0. else 0.0),
     'well':                       (max(w.well().max() for w in magnetic_wells),    WELL_THRESHOLD,                well_err if WELL_WEIGHT.value != 0. else 0.0),
     'fieldline_meanz':            (max(Jfl.max_distance() for Jfl in meanzs),      FIELDLINE_MEANZ_THRESHOLD,     meanz_err if FIELDLINE_MEANZ_WEIGHT.value != 0. else 0.0),
     'fieldline_meandist':         (max_fieldline_mean_distance,                    FIELDLINE_MEANDIST_THRESHOLD,  fieldline_mean_distance_err if FIELDLINE_MEANDIST_WEIGHT.value != 0. else 0.0),
