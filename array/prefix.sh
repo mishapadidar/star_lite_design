@@ -11,7 +11,7 @@ set -uo pipefail
 # for a failed / out-of-spec device except the run log.
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                    <vessel_id> <mono> <attempt> <null(DN|SN)> [num_aux]
+#                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt]
 #
 # Flow: boozer_all -> gate. If it passes, render the num_aux=0 device and copy it to
 # ceph BEFORE polishing. Then (mono 1/2) polish at num_aux=NUM_AUX_POLISH; if the
@@ -26,17 +26,20 @@ on_vessel="$5"
 config="$6"
 vessel_id="$7"
 mono="$8"
-attempt="$9"
-null="${10}"
+null="$9"
 
 # Number of auxiliary planar coils for the polish (mono=1,2): devices have either
 # 0 (unpolished) or exactly this many aux coils.
-NUM_AUX_POLISH="${11:-10}"
+NUM_AUX_POLISH="${10:-10}"
 
 # Aspect-ratio knob forwarded to boozer_all.py (--AR): 0 = leave AR as-is, 1 = reduce
 # the plasma aspect ratio toward ~5. It is part of the device identity, so it also
 # goes into the folder name (task_name) below.
-AR="${12:-0}"
+AR="${11:-0}"
+
+# Attempt index (perturbation seed). LAST positional arg so the prefix args mirror
+# the folder-name tail (..._num_aux_AR_attempt).
+attempt="${12}"
 
 if [ "$well" = "OFF" ]; then
   well_str="OFF"

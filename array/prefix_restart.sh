@@ -20,7 +20,7 @@ set -uo pipefail
 # without recomputing the (expensive) num_aux=0 device when it already exists.
 #
 #   bash ./prefix_restart.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                            <vessel_id> <mono> <attempt> <null(DN|SN)> [num_aux]
+#                            <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt]
 #
 # mono=0 has no polish step, so the restart aborts immediately. A polished device that
 # fails or exceeds 0.1% is discarded (nothing to ceph but the log).
@@ -33,13 +33,16 @@ on_vessel="$5"
 config="$6"
 vessel_id="$7"
 mono="$8"
-attempt="$9"
-null="${10}"
+null="$9"
 
-NUM_AUX_POLISH="${11:-10}"
+NUM_AUX_POLISH="${10:-10}"
 # Aspect-ratio knob forwarded to boozer_all.py (--AR); part of the device identity,
 # so it is in the folder name (task_name) too. Must match prefix.sh.
-AR="${12:-0}"
+AR="${11:-0}"
+
+# Attempt index (perturbation seed). LAST positional arg so the prefix args mirror
+# the folder-name tail (..._num_aux_AR_attempt). Must match prefix.sh.
+attempt="${12}"
 
 if [ "$well" = "OFF" ]; then
   well_str="OFF"

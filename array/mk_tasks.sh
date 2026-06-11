@@ -21,7 +21,7 @@ vessel_values=(0 1 2)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)
-# Aspect-ratio knob (boozer_all.py --AR, prefix.sh's 12th arg): 0 = leave AR as-is,
+# Aspect-ratio knob (boozer_all.py --AR, prefix.sh's 11th arg): 0 = leave AR as-is,
 # 1 = reduce the plasma aspect ratio toward ~5. Each value is a DISTINCT device (AR
 # is in the folder name), so scanning {0,1} doubles the task count.
 AR_values=(0 1)
@@ -41,7 +41,7 @@ for margin in "${margins[@]}"; do
                 for null in "${null_values[@]}"; do
                   for ((attempt=0; attempt<ATTEMPTS; attempt++)); do
                     for AR in "${AR_values[@]}"; do
-                      echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${attempt} ${null} ${NUM_AUX} ${AR}" >> tasks.jobs
+                      echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${null} ${NUM_AUX} ${AR} ${attempt}" >> tasks.jobs
                     done
                   done
                 done
