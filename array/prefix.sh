@@ -33,6 +33,11 @@ null="${10}"
 # 0 (unpolished) or exactly this many aux coils.
 NUM_AUX_POLISH="${11:-10}"
 
+# Aspect-ratio knob forwarded to boozer_all.py (--AR): 0 = leave AR as-is, 1 = reduce
+# the plasma aspect ratio toward ~5. It is part of the device identity, so it also
+# goes into the folder name (task_name) below.
+AR="${12:-0}"
+
 if [ "$well" = "OFF" ]; then
   well_str="OFF"
 else
@@ -45,7 +50,7 @@ HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 # Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the device
 # IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}_AR=${AR}"
 }
 
 # Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
@@ -69,10 +74,10 @@ exec > >(tee "$LOG") 2>&1
 # Filter for what gets copied back from a kept device dir.
 SYNC_INCLUDES=(
   --include='*/'
-  --include='design_opt_final.json'
-  --include='design_opt_final.yaml'
-  --include='design_polished_final.json'
-  --include='design_polished_final.yaml'
+  --include='design_opt_final_*.json'
+  --include='design_opt_final_*.yaml'
+  --include='design_polished_final_*.json'
+  --include='design_polished_final_*.yaml'
   --include='singular.json'
   --include='singular.yaml'
   --include='summary.txt'
@@ -142,15 +147,17 @@ echo "Init task: $INIT_NAME"
 echo "mono=$mono attempt=$attempt"
 
 INIT_DIR="./output/$INIT_NAME"
-INIT_JSON="$INIT_DIR/design_opt_final.json"
 
 # ───────────────────── (1) initial optimization -> num_aux=0 ──────────────────
 bash run_boozer_all.sh \
   "$margin" "$well" "$Z" "$distance" "$on_vessel" \
-  "$config" "$vessel_id" "$mono" "$attempt" "$null"
+  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR"
 
-if [ ! -f "$INIT_JSON" ]; then
-  echo "ERROR: $INIT_JSON not produced — boozer_all.py failed"
+# boozer_all.py writes design_opt_final_<DEVICE_ID>.json (the device ID is in the
+# name); locate it by glob (one per device dir).
+INIT_JSON="$(ls "$INIT_DIR"/design_opt_final_*.json 2>/dev/null | head -1)"
+if [ -z "$INIT_JSON" ] || [ ! -f "$INIT_JSON" ]; then
+  echo "ERROR: design_opt_final_*.json not produced in $INIT_DIR — boozer_all.py failed"
   exit 1
 fi
 
@@ -194,15 +201,23 @@ if [ -n "$MONO_CONSTRAINT" ]; then
   mkdir -p "$POLISH_DIR"
 
   echo "--- polishing+optimizing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
-  # boozer_singular_opt.py reads ALL its parameters from the sibling yaml and writes
-  # design_polished_final.json (+ .yaml) IN PLACE in the polish dir.
-  cp "$INIT_JSON" "$POLISH_DIR/design_opt_final.json"
-  cp "$INIT_DIR/design_opt_final.yaml" "$POLISH_DIR/design_opt_final.yaml"
+  # boozer_singular_opt.py reads the input json + its sibling yaml and writes
+  # design_polished_final_<DEVICE_ID>.json (+ .yaml) IN PLACE in the polish dir.
+  # Copy the init json + paired yaml in, preserving their (ID-suffixed) basenames.
+  INIT_JSON_BASE="$(basename "$INIT_JSON")"
+  INIT_YAML="${INIT_JSON%.json}.yaml"
+  cp "$INIT_JSON" "$POLISH_DIR/$INIT_JSON_BASE"
+  cp "$INIT_YAML" "$POLISH_DIR/$(basename "$INIT_YAML")"
 
-  bash run_polish.sh "$POLISH_DIR/design_opt_final.json" "$num_aux" || true
+  bash run_polish.sh "$POLISH_DIR/$INIT_JSON_BASE" "$num_aux" || true
 
-  if [ ! -f "$POLISH_DIR/design_polished_final.json" ]; then
-    echo "singular optimization num_aux=$num_aux failed (no design_polished_final.json) — discarding (nothing to ceph)"
+  # The copied init design was only the polish INPUT; remove it (and its yaml) now
+  # the polish has finished, leaving only the polished design in the dir.
+  rm -f "$POLISH_DIR/$INIT_JSON_BASE" "$POLISH_DIR/$(basename "$INIT_YAML")"
+
+  POLISHED_JSON="$(ls "$POLISH_DIR"/design_polished_final_*.json 2>/dev/null | head -1)"
+  if [ -z "$POLISHED_JSON" ]; then
+    echo "singular optimization num_aux=$num_aux failed (no design_polished_final_*.json) — discarding (nothing to ceph)"
     rm -rf "$POLISH_DIR"
   else
     # Same gate as boozer_all: a polished device that exceeds 0.1% is discarded
@@ -214,7 +229,7 @@ if [ -n "$MONO_CONSTRAINT" ]; then
     else
       echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err") <= 0.1%)"
       echo "=== rendering polished device $POLISH_DIR ==="
-      if ! bash run_render.sh "$POLISH_DIR/design_polished_final.json" "$POLISH_DIR"; then
+      if ! bash run_render.sh "$POLISHED_JSON" "$POLISH_DIR"; then
         echo "ERROR: polished render failed"
         exit 1
       fi

@@ -177,6 +177,15 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
         if v.size:
             ax.plot(v[:, 0], v[:, 1], 'k--', lw=1.0, label='optimization surface')
 
+    # Red dots where the modular coils cross this phi-plane (written by
+    # mk_manifolds for every device), showing where the coils sit in the section.
+    f_c = p.parent / f"coil_cross_{i}.txt"
+    if os.path.exists(f_c):
+        v = np.atleast_2d(np.loadtxt(f_c, delimiter=',', skiprows=1))
+        if v.size:
+            ax.plot(v[:, 0], v[:, 1], 'o', color='red', ms=4, ls='none',
+                    zorder=6, label='coil')
+
     f_fp = p.parent / f"fixed_points_{i}.txt"
     if os.path.exists(f_fp):
         fp = np.atleast_2d(np.loadtxt(f_fp, delimiter=',', skiprows=1))

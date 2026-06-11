@@ -780,10 +780,43 @@ def save_fixed_points(axis_curve, xp_curve):
                    comments='', header='R,Z (row0=axis, row1=xpoint top, row2=xpoint bottom)')
 
 
+def coil_cross_sections(coils):
+    """(R, Z) points where the modular coils pierce each manifold phi-plane, saved
+    as coil_cross_{i}.txt. These mark where the coils sit relative to each cross
+    section (useful especially for on-vessel devices). A coil loop typically crosses
+    a given phi-plane at 0 or 2 points; all crossings are found from sign changes of
+    (phi(theta)-phi_target) along the coil and refined by linear interpolation
+    between quadpoints."""
+    gammas = [np.asarray(c.curve.gamma()) for c in coils]
+    for ii, phi in enumerate(PHIS):
+        pt = float(np.mod(phi, 1.0))
+        rows = []
+        for g in gammas:
+            ph = np.mod(np.arctan2(g[:, 1], g[:, 0]) / (2 * np.pi), 1.0)
+            # signed distance to the target plane, wrapped to (-0.5, 0.5]
+            d = np.mod(ph - pt + 0.5, 1.0) - 0.5
+            n = g.shape[0]
+            for i in range(n):
+                jx = (i + 1) % n
+                di, dj = d[i], d[jx]
+                if di == 0.0:
+                    rows.append((np.hypot(g[i, 0], g[i, 1]), g[i, 2]))
+                elif di * dj < 0.0 and abs(di - dj) < 0.5:   # crossing, not the antipodal wrap
+                    t = di / (di - dj)
+                    q = g[i] + t * (g[jx] - g[i])
+                    rows.append((np.hypot(q[0], q[1]), q[2]))
+        data = np.array(rows) if rows else np.zeros((0, 2))
+        np.savetxt(OUT_DIR + f'coil_cross_{ii}.txt', data, delimiter=',',
+                   comments='', header='R,Z (modular-coil intersections with this phi-plane)')
+
+
 if comm_world is None or comm_world.rank == 0:
     surface_cross_sections(boozer_surface.surface)
     extract_vessel_cross_sections(sdf)
     save_fixed_points(axes[0].curve, xpoint.curve)
+    # Record where the modular coils cross each phi-plane so plot_manifolds can mark
+    # (on every device) where the coils lie relative to the cross section.
+    coil_cross_sections(boozer_surface.biotsavart.coils)
 
 trace_fieldlines(boozer_surface.biotsavart, g0, res)
 trace_interior(boozer_surface.biotsavart, axes[0].curve.gamma()[0], g0)

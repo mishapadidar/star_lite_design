@@ -23,7 +23,7 @@ set -uo pipefail
 # folder: margin=0p12  well=0.0  Z=0  onvessel=1  distance=0  configID=1
 #         vesselID=0   mono=1 (-> identity)  null=SN
 NAME="margin=0p06_well=0.0_Z=0_onvessel=0_distance=0_configID=0_vesselID=2_mono=1_null=SN_num_aux=10_attempt=0"
-INPUT="./output/${NAME}/design_opt_final.json"
+# INPUT (design_opt_final_<DEVICE_ID>.json) is located by glob after the cd below.
 
 # ── singular-polish settings ───────────────────────────────────────────────
 NUM_AUX=10                 # planar circular aux coils (identity needs >= 3)
@@ -33,8 +33,9 @@ OUT_DIR="./output/${NAME}_singopt_numaux=${NUM_AUX}"
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p logs "$OUT_DIR"
 
-if [ ! -f "$INPUT" ]; then
-  echo "ERROR: $INPUT not found"
+INPUT="$(ls "./output/${NAME}"/design_opt_final_*.json 2>/dev/null | head -1)"
+if [ -z "$INPUT" ] || [ ! -f "$INPUT" ]; then
+  echo "ERROR: design_opt_final_*.json not found in ./output/${NAME}"
   exit 1
 fi
 if [ ! -f "${INPUT%.json}.yaml" ]; then

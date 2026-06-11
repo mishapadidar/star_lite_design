@@ -31,6 +31,7 @@ and its gradient lands on both the modular-coil dofs and the aux (mu) dofs.
 """
 import argparse
 import os
+import zlib
 
 import numpy as np
 import yaml
@@ -112,6 +113,9 @@ if num_aux < N_DEP_CURRENTS:
 # write outputs in place (next to the input design json)
 OUT_DIR = os.path.join(os.path.dirname(_in), '')
 TASK_NAME = os.path.basename(os.path.dirname(_in)) or os.path.basename(_in)
+# Device ID = crc32 of the folder name (matches boozer_all.py / device_browser.py),
+# embedded in the output json/yaml names: design_polished_final_<DEVICE_ID>.json.
+DEVICE_ID = zlib.crc32(TASK_NAME.encode())
 print(f"Task: {TASK_NAME}")
 print(f"Input: {_in}")
 print(f"Output dir: {OUT_DIR}")
@@ -410,6 +414,20 @@ aux_coil_distances = [AuxCoilDistance(fl, curves, AUX_COIL_DISTANCE_THRESHOLD) f
 J_aux_coil_distance = sum(aux_coil_distances)
 
 
+# AUX coil RADII: cap each planar circular aux coil's radius at AUX_RADIUS_MAX
+# metres. The radii r1..rN are free mu design vars (stage-2 fixes only the
+# dependent currents), so MuBound applies directly; MuBound penalizes |r| > max,
+# which for a (positive) radius enforces r <= AUX_RADIUS_MAX. They share one
+# escalating weight (AUX_RADIUS_WEIGHT) in J_aux_radius. NEW keys (boozer_all did
+# not write them); an existing yaml may override so escalation survives a restart.
+config.setdefault('AUX_RADIUS_MAX', 1.5)
+config.setdefault('AUX_RADIUS_WEIGHT', 1e2)
+AUX_RADIUS_MAX = config['AUX_RADIUS_MAX']
+AUX_RADIUS_WEIGHT = Weight(config['AUX_RADIUS_WEIGHT'])
+J_aux_radius = sum(MuBound(fl, f'r{k+1}', AUX_RADIUS_MAX)
+                   for fl in sing_fls for k in range(num_aux))
+
+
 
 
 
@@ -475,6 +493,7 @@ JF = (J_nonQSRatio
     + FIELDLINE_MEANDIST_WEIGHT * J_fieldline_mean_distance
     + AUX_CURRENT_WEIGHT * J_aux_current
     + AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance
+    + AUX_RADIUS_WEIGHT * J_aux_radius
     )
 
 
@@ -497,6 +516,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'major radius': MAJOR_RADIUS_WEIGHT * J_major_radius,
         'aux current': AUX_CURRENT_WEIGHT * J_aux_current,
         'aux coil distance': AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance,
+        'aux radius': AUX_RADIUS_WEIGHT * J_aux_radius,
         }
 
 # Weight object backing each penalty above, keyed identically. 'nonQS' has an
@@ -521,6 +541,7 @@ penalty_weights = {
         'major radius': MAJOR_RADIUS_WEIGHT,
         'aux current': AUX_CURRENT_WEIGHT,
         'aux coil distance': AUX_COIL_DISTANCE_WEIGHT,
+        'aux radius': AUX_RADIUS_WEIGHT,
         }
 
 states = {
@@ -918,6 +939,12 @@ for j in range(5):
     if aux_coil_dist_err > 0.001 and AUX_COIL_DISTANCE_WEIGHT.value != 0.:
         AUX_COIL_DISTANCE_WEIGHT*=10
         print("AUX COIL DISTANCE ERROR", aux_coil_dist_err)
+    # AUX coil radii must not exceed AUX_RADIUS_MAX (radii are mu[num_aux:2*num_aux])
+    aux_radius_err = max([max(abs(float(fl.mu[num_aux + k])) - AUX_RADIUS_MAX, 0.) / np.abs(AUX_RADIUS_MAX)
+                          for fl in sing_fls for k in range(num_aux)], default=0.)
+    if aux_radius_err > 0.001 and AUX_RADIUS_WEIGHT.value != 0.:
+        AUX_RADIUS_WEIGHT*=10
+        print("AUX RADIUS ERROR", aux_radius_err)
     if modB_err > 0.001 and MODB_WEIGHT.value != 0.:
         MODB_WEIGHT*=10
         print("MODB ERROR", modB_err)
@@ -972,6 +999,8 @@ for j in range(5):
     config['COIL_TO_COIL_WEIGHT'] = COIL_TO_COIL_WEIGHT.value
     config['AUX_COIL_DISTANCE_WEIGHT'] = AUX_COIL_DISTANCE_WEIGHT.value
     config['AUX_COIL_DISTANCE_THRESHOLD'] = AUX_COIL_DISTANCE_THRESHOLD
+    config['AUX_RADIUS_WEIGHT'] = AUX_RADIUS_WEIGHT.value
+    config['AUX_RADIUS_MAX'] = AUX_RADIUS_MAX
     config['CURVATURE_WEIGHT'] = CURVATURE_WEIGHT.value
     config['MEAN_SQUARED_CURVATURE_WEIGHT'] = MEAN_SQUARED_CURVATURE_WEIGHT.value
     config['LENGTH_WEIGHT'] = LENGTH_WEIGHT.value
@@ -998,9 +1027,9 @@ curves_to_vtk([fl.curve for fl in sing_fls], OUT_DIR + f"xpoint_singular_curves_
 curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_final")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_final")
-with open(OUT_DIR + f'design_polished_final.yaml', 'w') as f:
+with open(OUT_DIR + f'design_polished_final_{DEVICE_ID}.yaml', 'w') as f:
     yaml.dump(config, f, default_flow_style=False)
-# design_polished_final.json is written by the FINALIZE step at the end of the
+# design_polished_final_<DEVICE_ID>.json is written by the FINALIZE step at the end of the
 # script (boozer surfaces and axes re-solved on the COMBINED modular+aux coil
 # set), so downstream tracing (mk_manifolds.py) sees the polished field.
 
@@ -1018,6 +1047,7 @@ final_metrics = {
     'coil_to_coil':               (Jccdist.shortest_distance(),                    COIL_TO_COIL_THRESHOLD,        cc_err if COIL_TO_COIL_WEIGHT.value != 0. else 0.0),
     'aux_coil_distance':          (min(a.shortest_distance() for a in aux_coil_distances), AUX_COIL_DISTANCE_THRESHOLD, aux_coil_mod_err if AUX_COIL_DISTANCE_WEIGHT.value != 0. else 0.0),
     'aux_coil_to_aux_distance':   (min(a.shortest_aux_distance() for a in aux_coil_distances), AUX_COIL_DISTANCE_THRESHOLD, aux_coil_aux_err if AUX_COIL_DISTANCE_WEIGHT.value != 0. else 0.0),
+    'aux_radius':                 (max((abs(float(fl.mu[num_aux + k])) for fl in sing_fls for k in range(num_aux)), default=0.0), AUX_RADIUS_MAX, aux_radius_err if AUX_RADIUS_WEIGHT.value != 0. else 0.0),
     'plasma_vessel_margin':       (min(min_xpoint_to_vessel, min_boozer_surface_to_vessel),
                                                                                    PLASMA_VESSEL_MARGIN_THRESHOLD, plasma_vessel_margin_err if PLASMA_VESSEL_MARGIN_WEIGHT.value != 0. else 0.0),
     'coil_on_vessel':             (min_coil_on_vessel_distance,                    COIL_ON_VESSEL_THRESHOLD,      coil_on_vessel_err if COIL_ON_VESSEL_WEIGHT.value != 0. else 0.0),
@@ -1041,11 +1071,14 @@ for fi, fl in enumerate(sing_fls):
 
 # record the full 2x2 monodromy matrix of the SINGULAR POLISH per X-point so
 # the device browser can display it; entries are descriptive (no threshold/error).
+# Greene's residue R = (2 - tr(M))/4 is recorded for every X-point in all cases.
 for ti, fl in enumerate(sing_fls):
     Mm = np.asarray(fl.res['monodromy_matrix'])
     for a in range(2):
         for b in range(2):
             final_metrics[f'monodromy_M{a}{b}_idx{ti}'] = (float(Mm[a, b]), None, None)
+    final_metrics[f'greene_residue_idx{ti}'] = (
+        (2.0 - float(np.trace(Mm))) / 4.0, None, None)
 
 # write a human-readable summary
 with open(OUT_DIR + 'summary.txt', 'w') as f:
@@ -1106,14 +1139,14 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
     bs_res = bs_out.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
     if not bs_res['success'] or bs_out.surface.is_self_intersecting():
         print(f"ERROR: idx={idx}: BoozerSurface re-solve on the combined coil set failed")
-        print("ABORT: design_polished_final.json will not be written.")
+        print(f"ABORT: design_polished_final_{DEVICE_ID}.json will not be written.")
         raise SystemExit(1)
 
     new_ax = PeriodicFieldLine(field, ax.curve)
     ax_res = new_ax.run_code(CurveLength(ax.curve).J())
     if not ax_res['success']:
         print(f"ERROR: idx={idx}: magnetic-axis re-solve on the combined coil set failed")
-        print("ABORT: design_polished_final.json will not be written.")
+        print(f"ABORT: design_polished_final_{DEVICE_ID}.json will not be written.")
         raise SystemExit(1)
 
     out_boozer_surfaces.append(bs_out)
@@ -1125,5 +1158,5 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
 # standard 5-entry layout consumed by mk_manifolds.py: the boozer surfaces and
 # axes carry the COMBINED (modular + aux) coils, and the singular-polish field
 # lines sit in the x-point slot.
-save([out_boozer_surfaces, out_iota_Gs, out_axes, sing_fls, sdf], OUT_DIR + f'design_polished_final.json')
-print(f"wrote {OUT_DIR}design_polished_final.json (combined modular+aux coil set)")
+save([out_boozer_surfaces, out_iota_Gs, out_axes, sing_fls, sdf], OUT_DIR + f'design_polished_final_{DEVICE_ID}.json')
+print(f"wrote {OUT_DIR}design_polished_final_{DEVICE_ID}.json (combined modular+aux coil set)")

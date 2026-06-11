@@ -59,6 +59,7 @@ Run with::
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -69,6 +70,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 def device_id(name: str) -> int:
@@ -126,6 +128,7 @@ DEFAULT_MAX_REL_ERR = 0.10   # percent  (i.e. 0.001 in fraction)
 NUMERIC_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 FAVORITES_FILENAME = ".device_favorites.json"
+HIDDEN_FILENAME = ".device_hidden.json"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -256,6 +259,29 @@ def save_favorites(root: Path, favs: set[str]) -> None:
         st.warning(f"Could not save favorites to `{p}`: {e}")
 
 
+def load_hidden(root: Path) -> set[str]:
+    """Read hidden device keys from ``<root>/.device_hidden.json``."""
+    p = root / HIDDEN_FILENAME
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text())
+        if isinstance(data, list):
+            return {str(x) for x in data}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return set()
+
+
+def save_hidden(root: Path, keys: set[str]) -> None:
+    """Persist hidden device keys to ``<root>/.device_hidden.json``."""
+    p = root / HIDDEN_FILENAME
+    try:
+        p.write_text(json.dumps(sorted(keys), indent=2))
+    except OSError as e:
+        st.warning(f"Could not save hidden list to `{p}`: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Scanning
 # ─────────────────────────────────────────────────────────────────────────
@@ -356,6 +382,26 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Global font-size bump. Streamlit sizes most text in rem, so raising the root
+# html font-size scales the whole UI proportionally (markdown, captions, headers,
+# buttons, widgets, sidebar — and the rem-based metadata table). Bump BASE_FONT_PX
+# to taste. NOTE: st.dataframe renders on a canvas and is NOT affected by CSS.
+BASE_FONT_PX = 19
+st.markdown(
+    f"""
+    <style>
+    html {{ font-size: {BASE_FONT_PX}px; }}
+    /* Trim Streamlit's large default top padding and tighten vertical gaps so the
+       device name + Prev/Next + the two panes fit on screen without scrolling down
+       to the device list. */
+    .block-container, [data-testid="stMainBlockContainer"] {{
+        padding-top: 1.5rem;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ── Sidebar: root folder + filters ──────────────────────────────────────
 with st.sidebar:
@@ -396,15 +442,24 @@ if not records:
     st.stop()
 
 
-# ── Load favorites for this root (cached in session state) ─────────────
+# ── Load favorites + hidden list for this root (cached in session state) ─
 fav_state_key = f"favorites::{root_path}"
 if fav_state_key not in st.session_state:
     st.session_state[fav_state_key] = load_favorites(root_path)
 favorites: set[str] = st.session_state[fav_state_key]
 
+hidden_state_key = f"hidden::{root_path}"
+if hidden_state_key not in st.session_state:
+    st.session_state[hidden_state_key] = load_hidden(root_path)
+hidden: set[str] = st.session_state[hidden_state_key]
+
 
 # ── Sidebar: thresholds and parameter filters ───────────────────────────
 with st.sidebar:
+    # Filled once the filters are applied (the device count is only known then).
+    # Sits at the top of the filters so the "Showing X of Y devices" status no
+    # longer needs a title row in the main pane.
+    status_slot = st.empty()
     st.markdown("---")
     st.subheader("Thresholds")
 
@@ -420,6 +475,22 @@ with st.sidebar:
         f"⭐ Favorites only ({len(favorites)})",
         value=False,
         help=f"Stored in `{FAVORITES_FILENAME}` under the scan root.",
+    )
+
+    # Hidden devices are excluded by default; this shows ONLY the hidden ones (the
+    # "hidden section"), where Ctrl-D / the button unhides them again.
+    hidden_only = st.checkbox(
+        f"🚫 Hidden only ({len(hidden)})",
+        value=False,
+        help=f"Hidden devices are excluded normally; tick to review/unhide them. "
+             f"Stored in `{HIDDEN_FILENAME}` under the scan root.",
+    )
+
+    id_query = st.text_input(
+        "🔎 Find by device ID",
+        key="id_search",
+        placeholder="e.g. 2880890725",
+        help="Jump to the device with this ID (the crc32 in the ID column).",
     )
 
     st.markdown("---")
@@ -459,17 +530,54 @@ with st.sidebar:
 max_rerr_thr = None if show_all_rerr else float(max_rerr_pct) / 100.0
 
 def keep(r: Device) -> bool:
+    rk = device_key(r, root_path)
+    # Hidden handling: "Hidden only" shows just the hidden devices; otherwise hidden
+    # devices are excluded entirely.
+    if hidden_only:
+        if rk not in hidden:
+            return False
+    elif rk in hidden:
+        return False
     for k, choice in selections.items():
         if choice != "Any" and r.params.get(k) != choice:
             return False
     if (max_rerr_thr is not None and r.max_rel_error is not None
             and r.max_rel_error > max_rerr_thr):
         return False
-    if fav_only and device_key(r, root_path) not in favorites:
+    if fav_only and rk not in favorites:
         return False
     return True
 
+# Device-ID search over ALL devices: a fresh query reveals + selects the matching
+# device, even if the current filters/hidden would exclude it. The match persists
+# (revealed_key) so it stays in the list and selectable until the query changes or
+# is cleared.
+if id_query != st.session_state.get("last_search"):
+    st.session_state["last_search"] = id_query
+    _q = id_query.strip()
+    _match = None
+    if _q:
+        try:
+            _tid = int(_q)
+        except ValueError:
+            _tid = None
+        if _tid is not None:
+            _match = next((r for r in records if device_id(r.name) == _tid), None)
+    if _match is not None:
+        st.session_state["revealed_key"] = device_key(_match, root_path)
+        st.session_state["sel_key_nav"] = st.session_state["revealed_key"]
+    else:
+        st.session_state["revealed_key"] = None
+        if _q:
+            st.sidebar.caption(f"⚠️ No device with ID `{_q}`")
+revealed_key = st.session_state.get("revealed_key")
+
 filtered = [r for r in records if keep(r)]
+# Reveal the searched device even if the filters/hidden would have excluded it.
+if revealed_key is not None and all(device_key(r, root_path) != revealed_key for r in filtered):
+    _rev = next((r for r in records if device_key(r, root_path) == revealed_key), None)
+    if _rev is not None:
+        filtered.append(_rev)
 filtered.sort(key=lambda d: (
     d.nonqs_pct is None,
     d.nonqs_pct if d.nonqs_pct is not None else float("inf"),
@@ -477,16 +585,19 @@ filtered.sort(key=lambda d: (
 ))
 
 
-# ── Main header / status ───────────────────────────────────────────────
-st.title("Stellarator Device Browser")
+# ── Status ──────────────────────────────────────────────────────────────
+# No main-area title (saves vertical space); the root folder is already shown in
+# the sidebar. The "Showing X of Y devices" status is rendered into the sidebar
+# slot above the filters.
 notes = []
 if max_rerr_thr is not None:
     notes.append(f"max rel. err ≤ {max_rerr_thr*100:g}%")
 if fav_only:
     notes.append("favorites only")
+if hidden_only:
+    notes.append("hidden only")
 suffix = "  ·  " + ", ".join(notes) if notes else ""
-st.caption(
-    f"Root: `{root_path}`  ·  "
+status_slot.caption(
     f"Showing **{len(filtered)}** of **{len(records)}** devices{suffix}"
 )
 
@@ -511,65 +622,95 @@ def df_for_devices(records: list[Device]) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-df = df_for_devices(filtered)
+# ── Keyboard / button navigation + current-device resolution ───────────
+# The plotted device is pinned to the TOP of the table, so the displayed row order
+# differs from the underlying (stable) device order. We therefore track the
+# selection by device KEY (identity) rather than row index, so it survives both
+# filtering and the reordering. It is moved by the ◀/▶ buttons (and the ← / →
+# arrows bound to them), which step through the stable order, and by a row click.
+keys_list = [device_key(d, root_path) for d in filtered]
+n_dev = len(filtered)
+st.session_state["nav_keys"] = keys_list   # read by the button callbacks (run pre-script)
+if st.session_state.get("sel_key_nav") not in keys_list:
+    st.session_state["sel_key_nav"] = keys_list[0]
 
+def _nav_step(delta):
+    ks = st.session_state.get("nav_keys", [])
+    cur = st.session_state.get("sel_key_nav")
+    if cur in ks:
+        st.session_state["sel_key_nav"] = ks[max(0, min(len(ks) - 1, ks.index(cur) + delta))]
+
+def _nav_prev():
+    _nav_step(-1)
+
+def _nav_next():
+    _nav_step(1)
+
+def _table_selected_row():
+    """First selected row index from the device table's PRIOR widget state, or
+    None. Read before the table is (re)drawn so a click is reflected the same run;
+    handles both the attribute- and dict-shaped selection state."""
+    s = st.session_state.get("device_table")
+    sel = getattr(s, "selection", None)
+    if sel is None and isinstance(s, dict):
+        sel = s.get("selection")
+    rows = getattr(sel, "rows", None)
+    if rows is None and isinstance(sel, dict):
+        rows = sel.get("rows")
+    return rows[0] if rows else None
+
+# A FRESH click (selection row changed since last render) selects the device that
+# sat at that DISPLAY row last render — mapped through the previous render's order,
+# since the table is reordered. A stale, unchanged selection does NOT move us, so
+# arrow/button navigation isn't snapped back to the last-clicked row.
+_prev_display_keys = st.session_state.get("display_keys", [])
+_clicked = _table_selected_row()
+if (_clicked is not None and _clicked != st.session_state.get("last_clicked")
+        and 0 <= _clicked < len(_prev_display_keys)):
+    ck = _prev_display_keys[_clicked]
+    if ck in keys_list:
+        st.session_state["sel_key_nav"] = ck
+st.session_state["last_clicked"] = _clicked
+
+# (The device-ID search is handled before filtering — it reveals + selects the
+# match, so sel_key_nav already points at it and the device is in keys_list.)
+
+# resolve the plotted device, then build the table with it PINNED to the top row
+sel_idx = keys_list.index(st.session_state["sel_key_nav"])
+selected_device = filtered[sel_idx]
+display_order = [sel_idx] + [i for i in range(n_dev) if i != sel_idx]
+df = df_for_devices([filtered[i] for i in display_order])
+st.session_state["display_keys"] = [keys_list[i] for i in display_order]
+
+# Currently-plotted device name, spanning the full width (both columns) in a small
+# font (replaces the old per-column subheader).
+st.markdown(
+    f"<div style='font-size:0.95rem; font-weight:600; overflow-wrap:anywhere; "
+    f"margin-bottom:0.25rem;'>{html.escape(selected_device.name)}</div>",
+    unsafe_allow_html=True,
+)
+
+# ◀ Prev / Next ▶ navigation across the TOP, spanning the full width (both columns).
+_prev_col, _next_col = st.columns(2)
+_prev_col.button("◀ Prev", key="dev_prev", on_click=_nav_prev,
+                 use_container_width=True, help="Previous device (← arrow)")
+_next_col.button("Next ▶", key="dev_next", on_click=_nav_next,
+                 use_container_width=True, help="Next device (→ arrow)")
+
+# Shared height for the two top panes (metrics table on the left, images on the
+# right). Sized so the device name + Prev/Next + the panes fit on screen without
+# scrolling to reach the Devices row below; lower/raise it to suit your display.
+PANE_HEIGHT = 440
 left, right = st.columns([0.42, 0.58], gap="large")
 
 with left:
-    st.subheader("Devices")
-    # st.dataframe supports row selection in recent Streamlit (≥ 1.35).
-    # The Device column is forced narrow ("small") because device names
-    # are long; users can still see the full name by hovering or by
-    # expanding the column manually.
-    event = st.dataframe(
-        df.style.format({
-            "QS error (%)":     "{:.4g}",
-            "Max rel err (%)":  "{:.4g}",
-        }, na_rep="n/a").background_gradient(
-            subset=["QS error (%)"], cmap="RdYlGn_r", vmin=0, vmax=30,
-        ).background_gradient(
-            subset=["Max rel err (%)"], cmap="RdYlGn_r", vmin=0, vmax=20,
-        ),
-        use_container_width=True,
-        height=420,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key="device_table",
-        column_config={
-            "⭐": st.column_config.TextColumn(
-                "⭐",
-                width="small",
-                help="Favorited devices. Toggle in the right pane.",
-            ),
-            "ID": st.column_config.NumberColumn(
-                "ID",
-                format="%d",
-                width="small",
-                help="Deterministic crc32 of the folder name; also the "
-                     "seed used for that device's base-coil perturbation.",
-            ),
-            "Device": st.column_config.TextColumn(
-                "Device",
-                width="small",
-                help="Full folder name (truncated; hover to see all).",
-            ),
-        },
-    )
-
-    sel_rows = event.selection.rows if hasattr(event, "selection") else []
-    sel_idx = sel_rows[0] if sel_rows else 0
-    selected_device = filtered[sel_idx]
-
-    # Stats table — directly below the devices table
-    st.markdown("##### summary.txt")
+    # Device metrics (parsed from summary.txt). The metrics table is given the SAME
+    # fixed height as the images on the right (PANE_HEIGHT) so the two panes line up.
     if selected_device.summary_path is None:
         st.info("No `summary.txt` in this folder.")
     elif not selected_device.metrics:
         st.info("`summary.txt` could not be parsed.")
     else:
-        st.caption(f"`{selected_device.summary_path}`")
-
         # Monodromy (tangent) matrix per X-point, reconstructed from the
         # monodromy_Mab_idx* rows written by boozer_all.py / compute_summary.py.
         mono_entries: dict[int, dict[tuple[int, int], float]] = {}
@@ -608,63 +749,217 @@ with left:
             ),
             use_container_width=True,
             hide_index=True,
-            height=460,
+            height=PANE_HEIGHT,
         )
 
 
 # ── Right column: images ───────────────────────────────────────────────
 with right:
-    st.subheader(selected_device.name)
-    st.caption(f"ID: `{device_id(selected_device.name)}`")
-
-    # Favorite toggle for the currently selected device.  Using a per-device
-    # widget key so the toggle's visible state always matches the file-backed
-    # set when switching between devices.
+    # Favourite the currently selected device. A button (not a toggle) so the
+    # Ctrl-S shortcut can drive it without the toggle/value desync a keyed
+    # st.toggle suffers when its set is changed from outside the widget. The
+    # on_click callback flips the file-backed favorites set; Streamlit reruns
+    # automatically afterwards (no explicit st.rerun needed).
     sel_key = device_key(selected_device, root_path)
     is_fav = sel_key in favorites
-    new_fav = st.toggle(
-        "⭐ Favorite this device",
-        value=is_fav,
-        key=f"fav_toggle::{sel_key}",
-        help=f"Saved to `{root_path / FAVORITES_FILENAME}`",
+
+    def _toggle_fav(k):
+        favs = st.session_state[fav_state_key]
+        if k in favs:
+            favs.discard(k)
+        else:
+            favs.add(k)
+        save_favorites(root_path, favs)
+
+    st.button(
+        "★ Favourited  (Ctrl-S)" if is_fav else "☆ Favourite  (Ctrl-S)",
+        key="fav_btn",
+        on_click=_toggle_fav,
+        args=(sel_key,),
+        help=f"Toggle favourite (Ctrl-S) · saved to `{root_path / FAVORITES_FILENAME}`",
     )
-    if new_fav != is_fav:
-        if new_fav:
-            favorites.add(sel_key)
-        else:
-            favorites.discard(sel_key)
-        save_favorites(root_path, favorites)
-        st.rerun()
+    # Red highlight for the favourited button (targets it via its st-key-<key>
+    # class so no other button is affected). The <style> element is ALWAYS
+    # rendered — empty when not favourited — so it occupies the same slot in
+    # Streamlit's vertical layout either way and the spacing below the button stays
+    # consistent; only the CSS rules inside differ.
+    _fav_css = (
+        ".st-key-fav_btn button{background-color:#d62728!important;"
+        "border-color:#d62728!important;color:#ffffff!important;}"
+        ".st-key-fav_btn button:hover{background-color:#b01f1f!important;"
+        "border-color:#b01f1f!important;color:#ffffff!important;}"
+    ) if is_fav else ""
+    st.markdown(f"<style>{_fav_css}</style>", unsafe_allow_html=True)
 
-    m = selected_device.params.get("mono")
-    if m in MONO_LEGEND:
-        st.caption(f"`mono={m}`  ·  {MONO_LEGEND[m]}")
-    cid = selected_device.params.get("configID")
-    if cid in CONFIG_LEGEND:
-        st.caption(f"`configID={cid}`  ·  {CONFIG_LEGEND[cid]}")
-    vid = selected_device.params.get("vesselID")
-    if vid in VESSEL_LEGEND:
-        st.caption(f"`vesselID={vid}`  ·  {VESSEL_LEGEND[vid]}")
+    # Hide / unhide the current device (toggle). Ctrl-D drives this button (see the
+    # keydown JS); pressing it again on a hidden device unhides it. A hidden device
+    # is normally filtered out, so to unhide you tick "🚫 Hidden only" in the sidebar
+    # to view it, then Ctrl-D.
+    is_hidden = sel_key in hidden
 
-    # Images: xs taller on the left, scene_top / scene_left stacked on the right
-    img_left, img_right = st.columns([1.6, 1.0], gap="small")
-    with img_left:
-        if selected_device.xs_png and selected_device.xs_png.exists():
-            st.image(str(selected_device.xs_png),
-                     caption=selected_device.xs_png.name,
-                     use_container_width=True)
+    def _toggle_hidden(k):
+        h = st.session_state[hidden_state_key]
+        if k in h:
+            h.discard(k)
         else:
-            st.info("xs_*.png missing")
-    with img_right:
-        if selected_device.scene_top and selected_device.scene_top.exists():
-            st.image(str(selected_device.scene_top),
-                     caption="scene_top.png",
-                     use_container_width=True)
-        else:
-            st.info("scene_top.png missing")
-        if selected_device.scene_left and selected_device.scene_left.exists():
-            st.image(str(selected_device.scene_left),
-                     caption="scene_left.png",
-                     use_container_width=True)
-        else:
-            st.info("scene_left.png missing")
+            h.add(k)
+        save_hidden(root_path, h)
+
+    st.button(
+        "🚫 Unhide  (Ctrl-D)" if is_hidden else "🚫 Hide  (Ctrl-D)",
+        key="hide_btn",
+        on_click=_toggle_hidden,
+        args=(sel_key,),
+        help=f"Hide/unhide this device (Ctrl-D) · stored in `{root_path / HIDDEN_FILENAME}`",
+    )
+
+    # Device metadata as a 2-row × 2-column table (bigger font) above the images.
+    # st.table/st.dataframe have a small fixed font, so render an HTML table to
+    # control the size. Cell text is escaped (e.g. the '>' in "trace(M) > 2").
+    def _meta_cell(label, val, legend):
+        if val is None:
+            return f"{label}: —"
+        desc = legend.get(val)
+        return f"{label}={val} · {desc}" if desc else f"{label}={val}"
+
+    _meta = [
+        f"ID: {device_id(selected_device.name)}",
+        _meta_cell("mono", selected_device.params.get("mono"), MONO_LEGEND),
+        _meta_cell("configID", selected_device.params.get("configID"), CONFIG_LEGEND),
+        _meta_cell("vesselID", selected_device.params.get("vesselID"), VESSEL_LEGEND),
+    ]
+    _cell = ("padding:7px 12px; border:1px solid rgba(128,128,128,0.35); "
+             "font-size:1.2rem;")
+    _td = lambda s: f'<td style="{_cell}">{html.escape(str(s))}</td>'
+    st.markdown(
+        '<table style="width:100%; border-collapse:collapse; margin-bottom:0.6rem;">'
+        f"<tr>{_td(_meta[0])}{_td(_meta[1])}</tr>"
+        f"<tr>{_td(_meta[2])}{_td(_meta[3])}</tr>"
+        "</table>",
+        unsafe_allow_html=True,
+    )
+
+    # Images in a fixed-height container so this pane matches the list height
+    # (it scrolls if the images are taller). xs taller on the left, scene_top /
+    # scene_left stacked on the right.
+    with st.container(height=PANE_HEIGHT, border=False):
+        img_left, img_right = st.columns([1.6, 1.0], gap="small")
+        with img_left:
+            if selected_device.xs_png and selected_device.xs_png.exists():
+                st.image(str(selected_device.xs_png),
+                         caption=selected_device.xs_png.name,
+                         use_container_width=True)
+            else:
+                st.info("xs_*.png missing")
+        with img_right:
+            if selected_device.scene_top and selected_device.scene_top.exists():
+                st.image(str(selected_device.scene_top),
+                         caption="scene_top.png",
+                         use_container_width=True)
+            else:
+                st.info("scene_top.png missing")
+            if selected_device.scene_left and selected_device.scene_left.exists():
+                st.image(str(selected_device.scene_left),
+                         caption="scene_left.png",
+                         use_container_width=True)
+            else:
+                st.info("scene_left.png missing")
+
+
+# ── Device list (full window width, bottom row) ─────────────────────────
+st.subheader("Devices")
+
+# st.dataframe row selection (Streamlit ≥ 1.35) is the click INPUT; the click is
+# read back above before this is drawn. The plotted device is pinned to the TOP
+# (row 0) by display_order, and that row is highlighted via the Styler, applied
+# AFTER the gradients so the highlight wins on that row.
+def _highlight_plotted(row):
+    if row.name == 0:
+        return ["background-color: rgba(31, 119, 180, 0.45); font-weight: 600"] * len(row)
+    return [""] * len(row)
+
+st.dataframe(
+    df.style.format({
+        "QS error (%)":     "{:.4g}",
+        "Max rel err (%)":  "{:.4g}",
+    }, na_rep="n/a").background_gradient(
+        subset=["QS error (%)"], cmap="RdYlGn_r", vmin=0, vmax=30,
+    ).background_gradient(
+        subset=["Max rel err (%)"], cmap="RdYlGn_r", vmin=0, vmax=20,
+    ).apply(_highlight_plotted, axis=1),
+    use_container_width=True,
+    height=PANE_HEIGHT,
+    hide_index=True,
+    on_select="rerun",
+    selection_mode="single-row",
+    key="device_table",
+    column_config={
+        "⭐": st.column_config.TextColumn(
+            "⭐",
+            width="small",
+            help="Favorited devices. Toggle in the right pane.",
+        ),
+        "ID": st.column_config.NumberColumn(
+            "ID",
+            format="%d",
+            width="small",
+            help="Deterministic crc32 of the folder name; also the "
+                 "seed used for that device's base-coil perturbation.",
+        ),
+        "Device": st.column_config.TextColumn(
+            "Device",
+            width="small",
+            help="Full folder name (truncated; hover to see all).",
+        ),
+    },
+)
+
+st.caption(f"Device {sel_idx + 1} of {n_dev}  ·  use ← / → to navigate")
+
+# Bind Left/Right arrow keys to the ◀/▶ buttons. This component runs in an iframe;
+# it reaches into the parent Streamlit document and, on an arrow key (unless the
+# user is typing in a field or a dropdown is focused), clicks the matching button —
+# which fires its on_click callback and reruns. Bound once per document (guard
+# flag) so reruns don't stack listeners; buttons are looked up at click time so
+# they always resolve to the freshly-rendered nodes.
+components.html(
+    """
+    <script>
+    const doc = window.parent.document;
+    if (!doc._devArrowNavBound) {
+      doc._devArrowNavBound = true;
+      doc.addEventListener('keydown', function (e) {
+        const t = e.target || {};
+        const tag = (t.tagName || '').toLowerCase();
+        // Ctrl-S / Cmd-S: (un)favourite the currently plotted device. Handled
+        // before the input guard (and preventDefault'd) so it works anywhere
+        // and suppresses the browser's Save dialog.
+        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+          const fb = Array.from(doc.querySelectorAll('button'))
+                          .find(b => (b.innerText || '').includes('Favourite'));
+          if (fb) { e.preventDefault(); fb.click(); }
+          return;
+        }
+        // Ctrl-D / Cmd-D: hide (or unhide) the current device. preventDefault'd to
+        // suppress the browser's bookmark dialog. Matched by the "Ctrl-D" label.
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+          const hb = Array.from(doc.querySelectorAll('button'))
+                          .find(b => (b.innerText || '').includes('Ctrl-D'));
+          if (hb) { e.preventDefault(); hb.click(); }
+          return;
+        }
+        if (tag === 'input' || tag === 'textarea' || t.isContentEditable) return;
+        if (t.closest && t.closest('[data-baseweb="select"],[data-baseweb="popover"],[role="listbox"],[role="combobox"]')) return;
+        let mark = null;
+        if (e.key === 'ArrowLeft')       mark = '◀';  /* ◀ */
+        else if (e.key === 'ArrowRight') mark = '▶';  /* ▶ */
+        if (!mark) return;
+        const btn = Array.from(doc.querySelectorAll('button'))
+                         .find(b => (b.innerText || '').includes(mark));
+        if (btn) { e.preventDefault(); btn.click(); }
+      });
+    }
+    </script>
+    """,
+    height=0,
+)

@@ -37,6 +37,9 @@ attempt="$9"
 null="${10}"
 
 NUM_AUX_POLISH="${11:-10}"
+# Aspect-ratio knob forwarded to boozer_all.py (--AR); part of the device identity,
+# so it is in the folder name (task_name) too. Must match prefix.sh.
+AR="${12:-0}"
 
 if [ "$well" = "OFF" ]; then
   well_str="OFF"
@@ -48,7 +51,7 @@ margin_str=$(printf "%.2f" "$margin" | sed 's/\./p/')
 HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_attempt=${attempt}_AR=${AR}"
 }
 
 # Shard helper -- identical to prefix.sh so the reused device is read from exactly
@@ -67,10 +70,10 @@ exec > >(tee "$LOG") 2>&1
 
 SYNC_INCLUDES=(
   --include='*/'
-  --include='design_opt_final.json'
-  --include='design_opt_final.yaml'
-  --include='design_polished_final.json'
-  --include='design_polished_final.yaml'
+  --include='design_opt_final_*.json'
+  --include='design_opt_final_*.yaml'
+  --include='design_polished_final_*.json'
+  --include='design_polished_final_*.yaml'
   --include='singular.json'
   --include='singular.yaml'
   --include='summary.txt'
@@ -142,28 +145,31 @@ echo "Init task: $INIT_NAME"
 echo "mono=$mono attempt=$attempt (RESTART from boozer_singular_opt.py)"
 
 INIT_DIR="./output/$INIT_NAME"
-INIT_JSON="$INIT_DIR/design_opt_final.json"
 
 # ──── (1) num_aux=0 device: REUSE from ceph if present, else RECOMPUTE, then gate ─
-# If a previous prefix.sh run left design_opt_final.{json,yaml} in the persistent ceph
-# shard dir, copy them into local scratch (where run_polish.sh reads the json) and skip
-# boozer_all.py. Otherwise fall back to prefix.sh's init path and recompute the device.
+# If a previous prefix.sh run left design_opt_final_<ID>.{json,yaml} in the persistent
+# ceph shard dir, copy them into local scratch (where run_polish.sh reads the json,
+# located by glob since the device ID is in the name) and skip boozer_all.py.
+# Otherwise fall back to prefix.sh's init path and recompute the device.
 SRC_INIT_DIR="$HOME_DIR/output/$(shard "$INIT_NAME")/$INIT_NAME"
-if [ -f "$SRC_INIT_DIR/design_opt_final.json" ] && [ -f "$SRC_INIT_DIR/design_opt_final.yaml" ]; then
+SRC_INIT_JSON="$(ls "$SRC_INIT_DIR"/design_opt_final_*.json 2>/dev/null | head -1)"
+if [ -n "$SRC_INIT_JSON" ] && [ -f "${SRC_INIT_JSON%.json}.yaml" ]; then
   reused_init=1
   mkdir -p "$INIT_DIR"
-  cp "$SRC_INIT_DIR/design_opt_final.json" "$INIT_JSON"
-  cp "$SRC_INIT_DIR/design_opt_final.yaml" "$INIT_DIR/design_opt_final.yaml"
+  cp "$SRC_INIT_JSON" "$INIT_DIR/$(basename "$SRC_INIT_JSON")"
+  cp "${SRC_INIT_JSON%.json}.yaml" "$INIT_DIR/$(basename "${SRC_INIT_JSON%.json}.yaml")"
   [ -f "$SRC_INIT_DIR/max_rel_error.txt" ] && cp "$SRC_INIT_DIR/max_rel_error.txt" "$INIT_DIR/max_rel_error.txt"
-  echo "restart: reused design_opt_final.{json,yaml}(+max_rel_error.txt) from $SRC_INIT_DIR (skipping boozer_all)"
+  INIT_JSON="$INIT_DIR/$(basename "$SRC_INIT_JSON")"
+  echo "restart: reused $(basename "$SRC_INIT_JSON") (+yaml,+max_rel_error.txt) from $SRC_INIT_DIR (skipping boozer_all)"
 else
   reused_init=0
-  echo "restart: $SRC_INIT_DIR/design_opt_final.json not on ceph — recomputing the num_aux=0 device with boozer_all.py"
+  echo "restart: design_opt_final_*.json not on ceph in $SRC_INIT_DIR — recomputing the num_aux=0 device with boozer_all.py"
   bash run_boozer_all.sh \
     "$margin" "$well" "$Z" "$distance" "$on_vessel" \
-    "$config" "$vessel_id" "$mono" "$attempt" "$null"
-  if [ ! -f "$INIT_JSON" ]; then
-    echo "ERROR: $INIT_JSON not produced — boozer_all.py failed"
+    "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR"
+  INIT_JSON="$(ls "$INIT_DIR"/design_opt_final_*.json 2>/dev/null | head -1)"
+  if [ -z "$INIT_JSON" ] || [ ! -f "$INIT_JSON" ]; then
+    echo "ERROR: design_opt_final_*.json not produced in $INIT_DIR — boozer_all.py failed"
     exit 1
   fi
 fi
@@ -215,13 +221,23 @@ POLISH_DIR="./output/$POLISH_NAME"
 mkdir -p "$POLISH_DIR"
 
 echo "--- polishing+optimizing num_aux=$num_aux ($MONO_CONSTRAINT) ---"
-cp "$INIT_JSON" "$POLISH_DIR/design_opt_final.json"
-cp "$INIT_DIR/design_opt_final.yaml" "$POLISH_DIR/design_opt_final.yaml"
+# Copy the init json + paired yaml in, preserving their (ID-suffixed) basenames;
+# boozer_singular_opt.py reads the json + its sibling yaml and writes
+# design_polished_final_<ID>.json (+ .yaml) in place.
+INIT_JSON_BASE="$(basename "$INIT_JSON")"
+INIT_YAML="${INIT_JSON%.json}.yaml"
+cp "$INIT_JSON" "$POLISH_DIR/$INIT_JSON_BASE"
+cp "$INIT_YAML" "$POLISH_DIR/$(basename "$INIT_YAML")"
 
-bash run_polish.sh "$POLISH_DIR/design_opt_final.json" "$num_aux" || true
+bash run_polish.sh "$POLISH_DIR/$INIT_JSON_BASE" "$num_aux" || true
 
-if [ ! -f "$POLISH_DIR/design_polished_final.json" ]; then
-  echo "singular optimization num_aux=$num_aux failed (no design_polished_final.json) — discarding (nothing to ceph)"
+# The copied init design was only the polish INPUT; remove it (and its yaml) now the
+# polish has finished, leaving only the polished design in the dir.
+rm -f "$POLISH_DIR/$INIT_JSON_BASE" "$POLISH_DIR/$(basename "$INIT_YAML")"
+
+POLISHED_JSON="$(ls "$POLISH_DIR"/design_polished_final_*.json 2>/dev/null | head -1)"
+if [ -z "$POLISHED_JSON" ]; then
+  echo "singular optimization num_aux=$num_aux failed (no design_polished_final_*.json) — discarding (nothing to ceph)"
   rm -rf "$POLISH_DIR"
 else
   polish_err="$POLISH_DIR/max_rel_error.txt"
@@ -231,7 +247,7 @@ else
   else
     echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err") <= 0.1%)"
     echo "=== rendering polished device $POLISH_DIR ==="
-    if ! bash run_render.sh "$POLISH_DIR/design_polished_final.json" "$POLISH_DIR"; then
+    if ! bash run_render.sh "$POLISHED_JSON" "$POLISH_DIR"; then
       echo "ERROR: polished render failed"
       exit 1
     fi

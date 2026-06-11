@@ -60,8 +60,19 @@ parser.add_argument("--attempt", type=int, default=0)
 # (drop stellsym, rebuild as nfp=2/stellsym=False, push the bottom X-point to
 # the lower wall).
 parser.add_argument("--null", type=str, default='DN', choices=['DN', 'SN'])
+# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is. 1 = after each BFGS
+# run, try to lower the plasma aspect ratio to ~5 by retargeting the Boozer-surface
+# volume (torus estimate V = 2*pi^2*R*r^2 with r = R/5); see the AR block in the
+# optimization loop. Reverts if the re-solve fails / self-intersects; stops once it
+# succeeds once.
+parser.add_argument("--AR", type=int, default=0, choices=[0, 1])
 
 args = parser.parse_args()
+
+# aspect-ratio reduction enabled? (ar_done flips True once a lower-AR surface has
+# converged, so it is only attempted until it first succeeds.)
+ar_enabled = bool(args.AR)
+ar_done = False
 
 if args.well == "OFF":
     well_target = 0.0
@@ -94,7 +105,8 @@ else:
 # same ID from the folder name (it uses the identical zlib.crc32 convention).
 TASK_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_vessel}"
              f"_distance={distance_weight}_configID={config_id}_vesselID={vessel_id}"
-             f"_mono={mono}_null={null_type}_num_aux={num_aux}_attempt={attempt}")
+             f"_mono={mono}_null={null_type}_num_aux={num_aux}_attempt={attempt}"
+             f"_AR={args.AR}")
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
 print(f"Task: {TASK_NAME}")
@@ -479,7 +491,7 @@ if null_type == 'DN':
 # fresh perturbation is drawn, repeating until all three converge to a
 # non-self-intersecting state. A generous cap turns a pathological case into a
 # task failure rather than an indefinite hang.
-PERTURB_STD = 0.003   # metres (3 mm, both DN and SN)
+PERTURB_STD = 0.01   # metres (2 cm, both DN and SN)
 PERTURB_ORDERS = (0, 1, 2)   # Fourier harmonics to perturb
 MAX_PERTURB_TRIES = 10
 pert_rng = np.random.default_rng(DEVICE_ID)
@@ -926,8 +938,102 @@ except _XpointSurfaceSatisfied:
     print('XpointSurfaceDistance already 0 at initialization: dropped bottom '
           'X-point penalties, switched to base objective')
 
+
+def _attempt_ar_reduction(j, dofs):
+    """Aspect-ratio reduction (--AR 1), run before each BFGS step (see the call site).
+    Raise the Boozer-surface target volume toward the AR=5 torus estimate
+    V = 2*pi^2*R*r^2 (R = current major radius, r = R/5). If the full AR=5 target
+    converges with no self-intersection, adopt it and return True (caller then stops
+    retrying). Otherwise BISECT (at most 5 times) between the current known-good
+    volume and the AR=5 target, adopt the LARGEST volume that still converges without
+    self-intersecting, and return False (retry next outer iteration once BFGS has
+    adapted the coils). On any adopted volume change, refresh the _restore_state
+    snapshot, downweight any penalty whose weighted value exceeds 1, and refresh the
+    failed-evaluation barrier anchor (dat_dict)."""
+    bs = boozer_surfaces[0]
+    R_cur = mr.J()
+    V_new = 2.0 * np.pi**2 * R_cur * (R_cur / 5.0)**2   # AR=5 torus volume
+    V_old = bs.targetlabel
+    # the current (known-good) surface is the fallback "best".
+    best = {'V': V_old, 'sdofs': bs.surface.x.copy(),
+            'iota': bs.res['iota'], 'G': bs.res['G']}
+
+    def _try_volume(V):
+        """Warm-start from the best working surface, retarget to V, re-solve;
+        True iff it converges with no self-intersection."""
+        bs.surface.x = best['sdofs']
+        bs.res['iota'], bs.res['G'] = best['iota'], best['G']
+        bs.targetlabel = V
+        bs.need_to_run_code = True
+        rr = bs.run_code(best['iota'], best['G'])
+        return bool(rr['success']) and not bs.surface.is_self_intersecting()
+
+    def _snapshot(V):
+        return {'V': V, 'sdofs': bs.surface.x.copy(),
+                'iota': bs.res['iota'], 'G': bs.res['G']}
+
+    done = False
+    if V_new <= V_old:
+        # current volume already >= AR=5 volume (AR already <= 5): nothing to do.
+        print(f"[AR] j={j}: current AR already <= 5 (V={V_old:.6e} >= V_AR5={V_new:.6e}); done")
+        done = True
+    elif _try_volume(V_new):
+        best = _snapshot(V_new)
+        done = True
+        print(f"[AR] j={j}: AR=5 reached on first try (V {V_old:.6e} -> {V_new:.6e}); won't retry")
+    else:
+        # bisect for the LARGEST working volume in (V_old, V_new]; lo works, hi fails.
+        lo, hi = V_old, V_new
+        for _bi in range(5):
+            mid = 0.5 * (lo + hi)
+            if _try_volume(mid):
+                best = _snapshot(mid)
+                lo = mid
+            else:
+                hi = mid
+        _ar_best = R_cur / (best['V'] / (2.0 * np.pi**2 * R_cur))**0.5
+        print(f"[AR] j={j}: AR=5 (V={V_new:.6e}) did not converge; bisected (<=5x) to "
+              f"largest working volume V={best['V']:.6e} (AR~{_ar_best:.3f}); retry next iteration")
+
+    # adopt the chosen volume: restore that surface state, retarget, re-solve.
+    bs.surface.x = best['sdofs']
+    bs.res['iota'], bs.res['G'] = best['iota'], best['G']
+    bs.targetlabel = best['V']
+    bs.need_to_run_code = True
+    bs.run_code(best['iota'], best['G'])
+    if best['V'] != V_old:
+        print("[AR] adopting new volume; re-scaling penalty weights so none start above 1:")
+        # refresh the _restore_state warm-start snapshot to the adopted surface
+        for _res, _bs in zip(res_list, boozer_surfaces):
+            _res['sdofs'] = _bs.surface.x.copy()
+            _res['iota'] = _bs.res['iota']
+            _res['G'] = _bs.res['G']
+        # downweight any penalty whose CURRENT weighted contribution exceeds 1
+        for _name, _scaled in penalties.items():
+            _w = penalty_weights.get(_name)
+            if _w is None or _w.value == 0.:
+                continue
+            _prod = _scaled.J()
+            if not np.isfinite(_prod) or _prod <= 1.0:
+                continue
+            _bare = _prod / _w.value
+            while _w.value * _bare > 1.0:
+                _w *= 0.1
+            print(f"  {_name}: weight -> {_w.value:.3e}  (product was {_prod:.3e})")
+        J0, dJ0 = fun(dofs)
+        dat_dict['x'] = dofs.copy()
+        dat_dict['J'] = J0
+        dat_dict['dJ'] = dJ0.copy()
+    return done
+
+
 for j in range(10):
     dat_dict["iter"] = 0
+
+    # Aspect-ratio reduction (--AR 1): before the BFGS run, push the volume toward
+    # AR=5 (bisecting for the largest feasible volume). See _attempt_ar_reduction.
+    if ar_enabled and not ar_done:
+        ar_done = _attempt_ar_reduction(j, dofs)
 
     try:
         res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)
@@ -1134,9 +1240,12 @@ curves_to_vtk([xpoint.curve for xpoint in xpoints] + [bx.curve for bx in (bottom
 curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_final")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_final")
-with open(OUT_DIR + f'design_opt_final.yaml', 'w') as f:
+# The final design json (and its paired weights yaml) carry the device ID in the
+# name: design_opt_final_<DEVICE_ID>.json. The yaml shares the basename because the
+# polish step reads it as the json's sibling (splitext(json)[0] + '.yaml').
+with open(OUT_DIR + f'design_opt_final_{DEVICE_ID}.yaml', 'w') as f:
     yaml.dump(config, f, default_flow_style=False)
-save([boozer_surfaces, iota_Gs, axes, xpoints, sdf], OUT_DIR + f'design_opt_final.json')
+save([boozer_surfaces, iota_Gs, axes, xpoints, sdf], OUT_DIR + f'design_opt_final_{DEVICE_ID}.json')
 
 # ---- final summary of constraints, values, and relative errors ----
 final_nonqs_pct = 100. * J_nonQSRatio.J()**0.5
@@ -1167,11 +1276,14 @@ final_metrics = {
 
 # also record the full 2x2 monodromy (tangent) matrix per X-point so the
 # device browser can display it; entries are descriptive (no threshold/error).
+# Greene's residue R = (2 - tr(M))/4 is recorded for every X-point in all cases.
 for ti, d in enumerate(tmos):
     Mm = np.asarray(d.matrix)
     for a in range(2):
         for b in range(2):
             final_metrics[f'monodromy_M{a}{b}_idx{ti}'] = (float(Mm[a, b]), None, None)
+    final_metrics[f'greene_residue_idx{ti}'] = (
+        (2.0 - float(np.trace(Mm))) / 4.0, None, None)
 
 # X-point-to-surface distance (SN only): bottom beyond threshold (closest
 # approach), with relative violation.
