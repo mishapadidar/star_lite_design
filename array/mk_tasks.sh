@@ -11,7 +11,7 @@
 # Each parameter combination is attempted ATTEMPTS times; each attempt perturbs
 # the base modular coils with a different (device-ID-seeded) jitter so the
 # optimizer starts from a different point.
-NUM_AUX=6
+NUM_AUX=5
 margins=(0.06 0.08 0.10 0.12)
 wells=(OFF 100 0 -100)
 binary_values=(0 1)
@@ -25,7 +25,7 @@ null_values=(DN SN)
 # 1 = reduce the plasma aspect ratio toward ~5. Each value is a DISTINCT device (AR
 # is in the folder name), so scanning {0,1} doubles the task count.
 AR_values=(0 1)
-ATTEMPTS=5
+ATTEMPTS=3
 
 mkdir -p logs
 : > tasks.jobs
