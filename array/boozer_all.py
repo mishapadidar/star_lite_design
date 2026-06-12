@@ -60,13 +60,14 @@ parser.add_argument("--attempt", type=int, default=0)
 # (drop stellsym, rebuild as nfp=2/stellsym=False, push the bottom X-point to
 # the lower wall).
 parser.add_argument("--null", type=str, default='DN', choices=['DN', 'SN'])
-# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is. 1 = before each BFGS
-# run, lower the plasma aspect ratio toward ~5 by retargeting the Boozer-surface
-# volume (torus estimate V = 2*pi^2*R*r^2 with r = R/5) via CONTINUATION in 10
-# increments; see the AR block in the optimization loop. Stops at the first step
-# that fails / self-intersects (reverting to the last converged, non-self-intersecting
-# surface) and retries next iteration; stops adjusting once the volume reaches AR=5.
-parser.add_argument("--AR", type=int, default=0, choices=[0, 1])
+# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is; 1 = lower the plasma
+# aspect ratio toward ~5; 2 = lower it toward ~4. For 1/2, before each BFGS run the
+# Boozer-surface volume is retargeted toward the AR torus estimate V = 2*pi^2*R*r^2
+# (r = R/AR_target) via CONTINUATION in 10 increments; see the AR block in the
+# optimization loop. Stops at the first step that fails / self-intersects (reverting
+# to the last converged, non-self-intersecting surface) and retries next iteration;
+# stops adjusting once the volume reaches the target AR.
+parser.add_argument("--AR", type=int, default=0, choices=[0, 1, 2])
 
 args = parser.parse_args()
 
@@ -74,6 +75,9 @@ args = parser.parse_args()
 # converged, so it is only attempted until it first succeeds.)
 ar_enabled = bool(args.AR)
 ar_done = False
+# target aspect ratio for the continuation: --AR 1 -> 5, --AR 2 -> 4. Unused when
+# ar_enabled is False.
+ar_target = {1: 5.0, 2: 4.0}.get(args.AR, 5.0)
 
 if args.well == "OFF":
     well_target = 0.0
@@ -957,30 +961,31 @@ except _XpointSurfaceSatisfied:
 
 
 def _attempt_ar_reduction(j, dofs):
-    """Aspect-ratio reduction (--AR 1), run before each BFGS step (see the call site).
-    Drive the Boozer-surface target-volume MAGNITUDE toward the AR=5 torus estimate
-    |V| = 2*pi^2*R*r^2 (R = target major radius, r = R/5), keeping the surface's
-    existing volume sign (it is negative for some devices). Uses CONTINUATION: step
-    the target |volume| from the current value to the AR=5 target in 10 equal
-    increments, re-solving (warm-started from the previous converged surface) at each
-    step. Stop at the first step whose solve fails OR self-intersects, revert to the
-    last surface that converged AND is non-self-intersecting, and return False (retry
-    next outer iteration once BFGS has adapted the coils). If the final increment
-    converges (the volume now corresponds to AR=5) adopt it and return True so the
-    caller stops adjusting the volume. On any adopted volume change, refresh the
-    _restore_state snapshot, downweight any penalty whose weighted value exceeds 1,
-    and refresh the failed-evaluation barrier anchor (dat_dict)."""
+    """Aspect-ratio reduction (--AR 1 -> target 5, --AR 2 -> target 4), run before each
+    BFGS step (see the call site). Drive the Boozer-surface target-volume MAGNITUDE
+    toward the target-AR torus estimate |V| = 2*pi^2*R*r^2 (R = target major radius,
+    r = R/ar_target), keeping the surface's existing volume sign (it is negative for
+    some devices). Uses CONTINUATION: step the target |volume| from the current value
+    to the target-AR volume in 10 equal increments, re-solving (warm-started from the
+    previous converged surface) at each step. Stop at the first step whose solve fails
+    OR self-intersects, revert to the last surface that converged AND is
+    non-self-intersecting, and return False (retry next outer iteration once BFGS has
+    adapted the coils). If the final increment converges (the volume now corresponds to
+    the target AR) adopt it and return True so the caller stops adjusting the volume.
+    On any adopted volume change, refresh the _restore_state snapshot, downweight any
+    penalty whose weighted value exceeds 1, and refresh the failed-evaluation barrier
+    anchor (dat_dict)."""
     bs = boozer_surfaces[0]
     R_target = MR_TARGET   # target major radius (R is driven here by J_major_radius)
     V_old = bs.targetlabel
     # The Boozer-surface volume is SIGNED (it depends on the surface orientation and
     # is negative for some devices); preserve that sign and reason about MAGNITUDES.
-    # AR=5 -> minor radius r = R/5 -> |V| = 2*pi^2*R*r^2, which is LARGER than the
-    # current |V| (a smaller aspect ratio means a larger volume).
+    # AR=ar_target -> minor radius r = R/ar_target -> |V| = 2*pi^2*R*r^2, which is
+    # LARGER than the current |V| (a smaller aspect ratio means a larger volume).
     sgn = 1.0 if V_old >= 0.0 else -1.0
     Vmag_old = abs(V_old)
-    Vmag_new = 2.0 * np.pi**2 * R_target * (R_target / 5.0)**2   # |volume| at AR=5
-    V_new = sgn * Vmag_new                                  # AR=5 target, same orientation
+    Vmag_new = 2.0 * np.pi**2 * R_target * (R_target / ar_target)**2   # |volume| at AR=ar_target
+    V_new = sgn * Vmag_new                                  # target-AR volume, same orientation
     AR_old = bs.surface.aspect_ratio()                      # actual AR of the current surface
 
     # the current (known-good) surface is the fallback "best".
@@ -1003,13 +1008,13 @@ def _attempt_ar_reduction(j, dofs):
 
     done = False
     if Vmag_new <= Vmag_old:
-        # current |volume| already >= AR=5 |volume| (AR already <= 5): nothing to do.
-        print(f"[AR] j={j}: current AR already <= 5 (AR~{AR_old:.3f}, "
-              f"|V|={Vmag_old:.6e} >= AR5 |V|={Vmag_new:.6e}); done")
+        # current |volume| already >= target-AR |volume| (AR already <= target): nothing to do.
+        print(f"[AR] j={j}: current AR already <= {ar_target:g} (AR~{AR_old:.3f}, "
+              f"|V|={Vmag_old:.6e} >= target |V|={Vmag_new:.6e}); done")
         done = True
     else:
-        # CONTINUATION: step the target |volume| from the current value to the AR=5
-        # target in 10 equal increments, re-solving (warm-started from the previous
+        # CONTINUATION: step the target |volume| from the current value to the target-AR
+        # volume in 10 equal increments, re-solving (warm-started from the previous
         # converged surface) at each step. Stop at the first step that fails to
         # converge or self-intersects; `best` holds the last surface that converged
         # AND is non-self-intersecting (the revert target).
@@ -1023,9 +1028,9 @@ def _attempt_ar_reduction(j, dofs):
             else:
                 break
         if reached == n_steps:
-            # final increment converged: volume now corresponds to AR=5.
+            # final increment converged: volume now corresponds to the target AR.
             done = True
-            print(f"[AR] j={j}: AR=5 reached by continuation in {n_steps} steps "
+            print(f"[AR] j={j}: AR={ar_target:g} reached by continuation in {n_steps} steps "
                   f"(AR~{AR_old:.3f} -> {bs.surface.aspect_ratio():.3f}, "
                   f"|V| {Vmag_old:.6e} -> {Vmag_new:.6e}); won't retry")
         else:
@@ -1072,8 +1077,8 @@ def _attempt_ar_reduction(j, dofs):
 for j in range(10):
     dat_dict["iter"] = 0
 
-    # Aspect-ratio reduction (--AR 1): before the BFGS run, step the volume toward
-    # AR=5 by continuation (10 increments). See _attempt_ar_reduction.
+    # Aspect-ratio reduction (--AR 1/2): before the BFGS run, step the volume toward
+    # the target AR (5 or 4) by continuation (10 increments). See _attempt_ar_reduction.
     if ar_enabled and not ar_done:
         ar_done = _attempt_ar_reduction(j, dofs)
 

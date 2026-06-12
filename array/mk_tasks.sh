@@ -22,9 +22,9 @@ vessel_values=(0 1 2)
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)
 # Aspect-ratio knob (boozer_all.py --AR, prefix.sh's 11th arg): 0 = leave AR as-is,
-# 1 = reduce the plasma aspect ratio toward ~5. Each value is a DISTINCT device (AR
-# is in the folder name), so scanning {0,1} doubles the task count.
-AR_values=(0 1)
+# 1 = reduce the plasma aspect ratio toward ~5, 2 = reduce it toward ~4. Each value is
+# a DISTINCT device (AR is in the folder name), so scanning {0,1,2} triples the count.
+AR_values=(0 1 2)
 ATTEMPTS=3
 
 mkdir -p logs
