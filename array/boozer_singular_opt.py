@@ -1071,6 +1071,7 @@ mirror_ratio = float(np.max(_modB_surf) / np.min(_modB_surf))
 final_metrics = {
     'nonQS_percent':              (final_nonqs_pct,                                None,                          None),
     'mirror_ratio':               (mirror_ratio,                                   None,                          None),
+    'aspect_ratio':               (boozer_surfaces[0].surface.aspect_ratio(),      None,                          None),
     'current':                    (max(modular_currents),                          CURRENT_THRESHOLD,             curr_err if CURRENT_WEIGHT.value != 0. else 0.0),
     'aux_current_A':              (max(aux_amps) if aux_amps else 0.0,             AUX_CURRENT_EPS,               aux_err if AUX_CURRENT_WEIGHT.value != 0. else 0.0),
     'iotas':                      (max(IOTAS.J() for IOTAS in IOTAS_LIST),         max(IOTAS_TARGET),             iota_err if IOTAS_WEIGHT.value != 0. else 0.0),

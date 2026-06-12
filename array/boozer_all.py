@@ -1323,6 +1323,7 @@ mirror_ratio = float(np.max(_modB_surf) / np.min(_modB_surf))
 final_metrics = {
     'nonQS_percent':              (final_nonqs_pct,                                None,                          None),
     'mirror_ratio':               (mirror_ratio,                                   None,                          None),
+    'aspect_ratio':               (boozer_surfaces[0].surface.aspect_ratio(),      None,                          None),
     'current':                    (max(currents_list),                             CURRENT_THRESHOLD,             curr_err if CURRENT_WEIGHT.value != 0. else 0.0),
     'iotas':                      (max(IOTAS.J() for IOTAS in IOTAS_LIST),         max(IOTAS_TARGET),             iota_err if IOTAS_WEIGHT.value != 0. else 0.0),
     'major_radius':               (mr.J(),                                         MR_TARGET,                     mr_err if MAJOR_RADIUS_WEIGHT.value != 0. else 0.0),
