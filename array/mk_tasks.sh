@@ -12,7 +12,7 @@
 # the base modular coils with a different (device-ID-seeded) jitter so the
 # optimizer starts from a different point.
 NUM_AUX=5
-margins=(0.06 0.08 0.10 0.12)
+margins=(0.06 0.08 0.10 0.12 0.14 0.16)
 wells=(OFF 100 0 -100)
 binary_values=(0 1)
 mono_values=(0 1 2)
