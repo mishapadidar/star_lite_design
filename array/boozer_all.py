@@ -993,14 +993,21 @@ def _attempt_ar_reduction(j, dofs):
             'iota': bs.res['iota'], 'G': bs.res['G']}
 
     def _try_volume(V):
-        """Warm-start from the best working surface, retarget to V, re-solve;
-        True iff it converges with no self-intersection."""
+        """Warm-start from the best working surface, retarget to V, re-solve; True iff
+        it converges with no self-intersection. A degenerate surface can make the
+        Newton solve OR is_self_intersecting() itself RAISE (at very low AR the
+        cross-section 'goes back on itself', so the cylindrical angle is no longer
+        monotonic) -- treat any such failure as 'did not converge' (return False) so
+        the continuation simply reverts to the last good surface instead of crashing."""
         bs.surface.x = best['sdofs']
         bs.res['iota'], bs.res['G'] = best['iota'], best['G']
         bs.targetlabel = V
         bs.need_to_run_code = True
-        rr = bs.run_code(best['iota'], best['G'])
-        return bool(rr['success']) and not bs.surface.is_self_intersecting()
+        try:
+            rr = bs.run_code(best['iota'], best['G'])
+            return bool(rr['success']) and not bs.surface.is_self_intersecting()
+        except Exception:
+            return False
 
     def _snapshot(V):
         return {'V': V, 'sdofs': bs.surface.x.copy(),
