@@ -128,7 +128,7 @@ def _line_file(ax, path, color=None, label=None, alpha=None, lw=0.6, leg_k=0, zo
     ax.plot(R, Z, color=c, lw=lw, label=label, alpha=alpha, rasterized=True, zorder=zorder)
 
 
-def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zorder=0, dot_alpha=None, manif_lw=1.5, do_print=False):
+def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zorder=0, dot_alpha=None, manif_lw=1.5, do_print=False, show_coils=True):
     """Draw all overlays (manifolds, interior, vessel, surface, fixed points,
     invariant lines) for phi index i onto ax. The invariant-line style
     (leg_alpha/leg_lw/leg_zorder) is faint+behind by default; the zoom inset
@@ -177,13 +177,15 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
         if v.size:
             ax.plot(v[:, 0], v[:, 1], 'k--', lw=1.0, label='optimization surface')
 
-    # Red dots where the modular coils cross this phi-plane (written by
+    # Magenta dots where the modular coils cross this phi-plane (written by
     # mk_manifolds for every device), showing where the coils sit in the section.
+    # Skipped in the zoom insets (show_coils=False) so they don't clutter / sit on
+    # top of the X-point zoom.
     f_c = p.parent / f"coil_cross_{i}.txt"
-    if os.path.exists(f_c):
+    if show_coils and os.path.exists(f_c):
         v = np.atleast_2d(np.loadtxt(f_c, delimiter=',', skiprows=1))
         if v.size:
-            ax.plot(v[:, 0], v[:, 1], 'o', color='red', ms=4, ls='none',
+            ax.plot(v[:, 0], v[:, 1], 'o', color='magenta', ms=4, ls='none',
                     zorder=6, label='coil')
 
     f_fp = p.parent / f"fixed_points_{i}.txt"
@@ -301,8 +303,10 @@ print(f"X-point type: {_xpoint_type or '(unknown: xpoint_type.txt missing — re
 def _add_zoom(ax, i, center, rect):
     R0, Z0 = center
     axins = ax.inset_axes(rect)
-    # In the zoom, draw the invariant lines + manifold dots prominently and on top.
-    draw_panel(axins, i, leg_zorder=5, dot_alpha=0.5)
+    axins.set_zorder(7)   # above the main-panel coil dots (zorder=6) so the inset occludes them
+    # In the zoom, draw the invariant lines + manifold dots prominently and on top;
+    # omit the coil cross-section dots (show_coils=False) so they don't show up here.
+    draw_panel(axins, i, leg_zorder=5, dot_alpha=0.5, show_coils=False)
     axins.set_xlim(R0 - ZOOM_HALF, R0 + ZOOM_HALF)
     axins.set_ylim(Z0 - ZOOM_HALF, Z0 + ZOOM_HALF)
     axins.set_aspect('equal')

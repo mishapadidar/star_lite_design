@@ -60,14 +60,14 @@ parser.add_argument("--attempt", type=int, default=0)
 # (drop stellsym, rebuild as nfp=2/stellsym=False, push the bottom X-point to
 # the lower wall).
 parser.add_argument("--null", type=str, default='DN', choices=['DN', 'SN'])
-# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is; 1 = lower the plasma
-# aspect ratio toward ~5; 2 = lower it toward ~4. For 1/2, before each BFGS run the
-# Boozer-surface volume is retargeted toward the AR torus estimate V = 2*pi^2*R*r^2
+# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is; 1/2/3/4 = lower the plasma
+# aspect ratio toward ~5 / ~4 / ~3.5 / ~3 respectively. For 1-4, before each BFGS run
+# the Boozer-surface volume is retargeted toward the AR torus estimate V = 2*pi^2*R*r^2
 # (r = R/AR_target) via CONTINUATION in 10 increments; see the AR block in the
 # optimization loop. Stops at the first step that fails / self-intersects (reverting
 # to the last converged, non-self-intersecting surface) and retries next iteration;
 # stops adjusting once the volume reaches the target AR.
-parser.add_argument("--AR", type=int, default=0, choices=[0, 1, 2])
+parser.add_argument("--AR", type=int, default=0, choices=[0, 1, 2, 3, 4])
 
 args = parser.parse_args()
 
@@ -75,9 +75,9 @@ args = parser.parse_args()
 # converged, so it is only attempted until it first succeeds.)
 ar_enabled = bool(args.AR)
 ar_done = False
-# target aspect ratio for the continuation: --AR 1 -> 5, --AR 2 -> 4. Unused when
-# ar_enabled is False.
-ar_target = {1: 5.0, 2: 4.0}.get(args.AR, 5.0)
+# target aspect ratio for the continuation: --AR 1 -> 5, 2 -> 4, 3 -> 3.5, 4 -> 3.
+# Unused when ar_enabled is False.
+ar_target = {1: 5.0, 2: 4.0, 3: 3.5, 4: 3.0}.get(args.AR, 5.0)
 
 if args.well == "OFF":
     well_target = 0.0
