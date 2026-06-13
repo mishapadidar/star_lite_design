@@ -96,6 +96,7 @@ SYNC_INCLUDES=(
   --include='snowflake_discriminant.txt'
   --include='vessel_cross_*.txt'
   --include='surface_cross_*.txt'
+  --include='LCFS_cross_*.txt'
   --include='fixed_points_*.txt'
   --include='sc*.vts'
   --include='aux_coils_*.vtu'
@@ -182,14 +183,15 @@ echo "max relative error = $(cat "$maxerr_file") (<= 0.1%, OK)"
 # ─────────── (2) boozer_all passed: render the num_aux=0 device, copy to ceph ──
 # Render BEFORE polishing so the init device is secured on ceph independently of
 # whatever happens to the polished device.
+# Last closed flux surface for the init device (best-effort, non-fatal). Runs BEFORE the
+# render so mk_manifolds can slice it into LCFS_cross_*.txt for the xs figure; writes
+# LCFS_<ID>.json and appends LCFS_aspect_ratio to summary.txt.
+bash run_LCFS.sh "$INIT_JSON" || echo "WARNING: LCFS computation failed for init device"
 echo "=== rendering init device $INIT_DIR ==="
 if ! bash run_render.sh "$INIT_JSON" "$INIT_DIR"; then
   echo "ERROR: init render failed"
   exit 1
 fi
-# Last closed flux surface for the init device. Best-effort: a failure here must not
-# discard an otherwise-good device, so it is non-fatal. Writes LCFS_<ID>.json in INIT_DIR.
-bash run_LCFS.sh "$INIT_JSON" || echo "WARNING: LCFS computation failed for init device"
 # Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
 bash run_elongation.sh "$INIT_JSON" || echo "WARNING: elongation computation failed for init device"
 sync_dir "$INIT_DIR"
@@ -237,14 +239,15 @@ if [ -n "$MONO_CONSTRAINT" ]; then
       rm -rf "$POLISH_DIR"
     else
       echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err") <= 0.1%)"
+      # LCFS for the polished device (best-effort, non-fatal). Runs BEFORE the render so
+      # mk_manifolds can slice it into LCFS_cross_*.txt for the xs figure; writes
+      # LCFS_<ID>.json + appends LCFS_aspect_ratio to summary.txt.
+      bash run_LCFS.sh "$POLISHED_JSON" || echo "WARNING: LCFS computation failed for polished device"
       echo "=== rendering polished device $POLISH_DIR ==="
       if ! bash run_render.sh "$POLISHED_JSON" "$POLISH_DIR"; then
         echo "ERROR: polished render failed"
         exit 1
       fi
-      # Last closed flux surface for the polished device (best-effort, non-fatal;
-      # writes LCFS_<ID>.json into POLISH_DIR).
-      bash run_LCFS.sh "$POLISHED_JSON" || echo "WARNING: LCFS computation failed for polished device"
       # Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
       bash run_elongation.sh "$POLISHED_JSON" || echo "WARNING: elongation computation failed for polished device"
       sync_dir "$POLISH_DIR"

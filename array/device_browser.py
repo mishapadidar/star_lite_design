@@ -637,8 +637,21 @@ if not filtered:
 
 # ── Device list (selectable dataframe) ─────────────────────────────────
 def df_for_devices(records: list[Device]) -> pd.DataFrame:
+    # Every summary.txt metric becomes its own column (value only) so the table can be
+    # sorted by it via header-click. Union the metric names across these devices in
+    # first-seen order; a device missing a metric gets NaN ("n/a"). Namespace any name
+    # that collides with a fixed/parameter column (e.g. the achieved 'well' metric vs
+    # the 'well' folder-parameter) so neither is clobbered.
+    fixed_cols = {"⭐", "ID", "Device", "QS error (%)", "Max rel err (%)"} | set(keys)
+    metric_col: dict[str, str] = {}   # summary metric name -> (collision-free) column header
+    for r in records:
+        for m in r.metrics:
+            if m.name not in metric_col:
+                metric_col[m.name] = (m.name if m.name not in fixed_cols
+                                      else f"{m.name} (summary)")
     rows = []
     for r in records:
+        mvals = {m.name: m.value for m in r.metrics}
         is_fav = device_key(r, root_path) in favorites
         rows.append({
             "⭐":              "★" if is_fav else "",
@@ -648,8 +661,10 @@ def df_for_devices(records: list[Device]) -> pd.DataFrame:
             "Max rel err (%)": (r.max_rel_error * 100.0
                                 if r.max_rel_error is not None else None),
             **{k: r.params.get(k, "") for k in keys},
+            **{col: mvals.get(name) for name, col in metric_col.items()},
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=(["⭐", "ID", "Device", "QS error (%)", "Max rel err (%)"]
+                                       + list(keys) + list(metric_col.values())))
 
 # ── Keyboard / button navigation + current-device resolution ───────────
 # The plotted device is pinned to the TOP of the table, so the displayed row order
@@ -907,11 +922,14 @@ def _highlight_plotted(row):
         return ["background-color: rgba(31, 119, 180, 0.45); font-weight: 600"] * len(row)
     return [""] * len(row)
 
+# Compact numeric formatting for QS error, max rel err, AND every summary.txt metric
+# column (everything that is not the ⭐/ID/Device cells or a folder-parameter column).
+# Header-click sorting in st.dataframe acts on the underlying numeric values regardless.
+_num_cols = [c for c in df.columns if c not in ({"⭐", "ID", "Device"} | set(keys))]
+_fmt = {c: "{:.4g}" for c in _num_cols}
+
 st.dataframe(
-    df.style.format({
-        "QS error (%)":     "{:.4g}",
-        "Max rel err (%)":  "{:.4g}",
-    }, na_rep="n/a").background_gradient(
+    df.style.format(_fmt, na_rep="n/a").background_gradient(
         subset=["QS error (%)"], cmap="RdYlGn_r", vmin=0, vmax=30,
     ).background_gradient(
         subset=["Max rel err (%)"], cmap="RdYlGn_r", vmin=0, vmax=20,

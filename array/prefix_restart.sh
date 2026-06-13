@@ -77,6 +77,7 @@ SYNC_INCLUDES=(
   --include='design_opt_final_*.yaml'
   --include='design_polished_final_*.json'
   --include='design_polished_final_*.yaml'
+  --include='LCFS_*.json'
   --include='singular.json'
   --include='singular.yaml'
   --include='summary.txt'
@@ -91,6 +92,7 @@ SYNC_INCLUDES=(
   --include='snowflake_discriminant.txt'
   --include='vessel_cross_*.txt'
   --include='surface_cross_*.txt'
+  --include='LCFS_cross_*.txt'
   --include='fixed_points_*.txt'
   --include='sc*.vts'
   --include='aux_coils_*.vtu'
@@ -162,8 +164,12 @@ if [ -n "$SRC_INIT_JSON" ] && [ -f "${SRC_INIT_JSON%.json}.yaml" ]; then
   cp "$SRC_INIT_JSON" "$INIT_DIR/$(basename "$SRC_INIT_JSON")"
   cp "${SRC_INIT_JSON%.json}.yaml" "$INIT_DIR/$(basename "${SRC_INIT_JSON%.json}.yaml")"
   [ -f "$SRC_INIT_DIR/max_rel_error.txt" ] && cp "$SRC_INIT_DIR/max_rel_error.txt" "$INIT_DIR/max_rel_error.txt"
+  # Bring summary.txt too: if the init device is re-rendered below, mk_manifolds.py and
+  # run_elongation.sh APPEND to it, so the local copy must be the COMPLETE one from ceph
+  # (otherwise a partial summary.txt would be synced back, clobbering the full one).
+  [ -f "$SRC_INIT_DIR/summary.txt" ] && cp "$SRC_INIT_DIR/summary.txt" "$INIT_DIR/summary.txt"
   INIT_JSON="$INIT_DIR/$(basename "$SRC_INIT_JSON")"
-  echo "restart: reused $(basename "$SRC_INIT_JSON") (+yaml,+max_rel_error.txt) from $SRC_INIT_DIR (skipping boozer_all)"
+  echo "restart: reused $(basename "$SRC_INIT_JSON") (+yaml,+max_rel_error.txt,+summary.txt) from $SRC_INIT_DIR (skipping boozer_all)"
 else
   reused_init=0
   echo "restart: design_opt_final_*.json not on ceph in $SRC_INIT_DIR — recomputing the num_aux=0 device with boozer_all.py"
@@ -204,10 +210,15 @@ else
   else
     echo "=== rendering recomputed init device $INIT_DIR ==="
   fi
+  # LCFS BEFORE the render so mk_manifolds slices it into LCFS_cross_*.txt for the xs
+  # figure; writes LCFS_<ID>.json + appends LCFS_aspect_ratio to summary.txt (best-effort).
+  bash run_LCFS.sh "$INIT_JSON" || echo "WARNING: LCFS computation failed for init device"
   if ! bash run_render.sh "$INIT_JSON" "$INIT_DIR"; then
     echo "ERROR: init poincare+render failed"
     exit 1
   fi
+  # Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
+  bash run_elongation.sh "$INIT_JSON" || echo "WARNING: elongation computation failed for init device"
   sync_dir "$INIT_DIR"
 fi
 
@@ -249,11 +260,16 @@ else
     rm -rf "$POLISH_DIR"
   else
     echo "singular optimization num_aux=$num_aux succeeded (max rel err = $(cat "$polish_err") <= 0.1%)"
+    # LCFS BEFORE the render so mk_manifolds slices it into LCFS_cross_*.txt for the xs
+    # figure; writes LCFS_<ID>.json + appends LCFS_aspect_ratio to summary.txt (best-effort).
+    bash run_LCFS.sh "$POLISHED_JSON" || echo "WARNING: LCFS computation failed for polished device"
     echo "=== rendering polished device $POLISH_DIR ==="
     if ! bash run_render.sh "$POLISHED_JSON" "$POLISH_DIR"; then
       echo "ERROR: polished render failed"
       exit 1
     fi
+    # Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
+    bash run_elongation.sh "$POLISHED_JSON" || echo "WARNING: elongation computation failed for polished device"
     sync_dir "$POLISH_DIR"
   fi
 fi

@@ -118,3 +118,11 @@ print(f"LCFS {device_id}: accepted {n_accept} continuation steps, "
 out = p.parent / f'LCFS_{device_id}.json'
 save([boozer_surfaces, iota_Gs, axes, fourth, sdf], str(out))
 print(f"wrote {out}")
+
+# Append the LCFS aspect ratio to summary.txt (same 4-column "metric value threshold
+# rel_error" format as the rest, so device_browser.py parses it as a metric). summary.txt
+# was written by the optimizer; this runs before the render's mk_manifolds append.
+summary = p.parent / 'summary.txt'
+with open(summary, 'a') as f:
+    f.write(f"  {'LCFS_aspect_ratio':<30s} {ar:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
+print(f"appended LCFS_aspect_ratio to {summary}")

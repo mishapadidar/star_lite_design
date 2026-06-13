@@ -735,14 +735,34 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
                        _phi_plane_rows(fieldlines_phi_hits, i), comments='', delimiter=',')
 
 
-def surface_cross_sections(surface):
-    """Optimization-surface (R, Z) cross sections at the manifold phi values.
-    surface.cross_section takes the normalized angle phi/(2*pi)."""
+def surface_cross_sections(surface, prefix='surface'):
+    """(R, Z) cross sections of a surface at the manifold phi values, written as
+    <prefix>_cross_<i>.txt. surface.cross_section takes the normalized angle phi/(2*pi)."""
     for ii, phi in enumerate(PHIS):
         XYZ = surface.cross_section(phi, thetas=100)
         R, Z = np.hypot(XYZ[:, 0], XYZ[:, 1]), XYZ[:, 2]
         RZ = np.concatenate((R[:, None], Z[:, None]), axis=1)
-        np.savetxt(OUT_DIR + f'surface_cross_{ii}.txt', RZ, delimiter=',')
+        np.savetxt(OUT_DIR + f'{prefix}_cross_{ii}.txt', RZ, delimiter=',')
+
+
+def lcfs_cross_sections():
+    """If an LCFS_<ID>.json (written by mk_LCFS.py, which runs before this) sits next to
+    the design json, slice its Boozer surface at the manifold phi values into
+    LCFS_cross_<i>.txt so plot_manifolds.py can overlay the last closed flux surface on
+    the xs figure. The saved LCFS surface already carries its (solved) dofs, so the
+    cross section is a pure geometric slice -- no re-solve needed."""
+    matches = sorted(p.parent.glob('LCFS_*.json'))
+    if not matches:
+        proc0_print("  LCFS: no LCFS_*.json found; skipping LCFS cross sections")
+        return
+    # The LCFS sits at the feasibility boundary, so a cross_section can occasionally
+    # fail ("goes back on itself"); never let that take down the rest of the render.
+    try:
+        lcfs_surface = load(str(matches[0]))[0][0].surface
+        surface_cross_sections(lcfs_surface, prefix='LCFS')
+        proc0_print(f"  LCFS: wrote LCFS_cross_*.txt from {matches[0].name}")
+    except Exception as e:
+        proc0_print(f"  LCFS: failed to write cross sections ({e}); skipping overlay")
 
 
 def extract_vessel_cross_sections(sdf, nR=200, nZ=200, pad=0.05):
@@ -848,6 +868,7 @@ def coil_cross_sections(coils):
 
 if comm_world is None or comm_world.rank == 0:
     surface_cross_sections(boozer_surface.surface)
+    lcfs_cross_sections()   # overlay the LCFS (if LCFS_*.json was written before render)
     extract_vessel_cross_sections(sdf)
     save_fixed_points(axes[0].curve, xpoint.curve)
     # Record where the modular coils cross each phi-plane so plot_manifolds can mark

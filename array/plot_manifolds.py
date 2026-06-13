@@ -177,6 +177,15 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
         if v.size:
             ax.plot(v[:, 0], v[:, 1], 'k--', lw=1.0, label='optimization surface')
 
+    # Last closed flux surface (written by mk_manifolds from LCFS_*.json when present):
+    # the largest converging, non-self-intersecting flux surface for this device.
+    f_lcfs = p.parent / f"LCFS_cross_{i}.txt"
+    if os.path.exists(f_lcfs):
+        v = np.atleast_2d(np.loadtxt(f_lcfs, delimiter=',', skiprows=1))
+        if v.size:
+            ax.plot(v[:, 0], v[:, 1], '-', color='tab:purple', lw=1.2,
+                    label='LCFS', zorder=5)
+
     # Magenta dots where the modular coils cross this phi-plane (written by
     # mk_manifolds for every device), showing where the coils sit in the section.
     # Skipped in the zoom insets (show_coils=False) so they don't clutter / sit on
