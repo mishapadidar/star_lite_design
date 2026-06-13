@@ -207,6 +207,19 @@ def parse_summary(path: Path) -> list[Metric]:
     return metrics
 
 
+# summary.txt metric (written by mk_manifolds.py): 1 = at least one inward
+# (plasma-pointing) X-point manifold leg reaches the vacuum vessel, 0 = none.
+INTERSECT_METRIC = "inward_manifold_hits_vessel"
+
+
+def metric_value(device: "Device", name: str) -> Optional[float]:
+    """Look up a parsed summary.txt metric value by name (None if absent)."""
+    for m in device.metrics:
+        if m.name == name:
+            return m.value
+    return None
+
+
 def read_first_float(path: Path) -> Optional[float]:
     try:
         m = NUMERIC_RE.search(path.read_text())
@@ -493,6 +506,14 @@ with st.sidebar:
         help="Jump to the device with this ID (the crc32 in the ID column).",
     )
 
+    intersect_choice = st.selectbox(
+        "Inward manifold ↔ vessel",
+        ["Any", "Intersects", "No intersection", "Unknown"],
+        help="summary.txt `inward_manifold_hits_vessel` (from mk_manifolds.py): does "
+             "any inward-pointing (plasma-side) X-point manifold leg reach the vacuum "
+             "vessel? 'Unknown' = not computed (no manifold render in this folder).",
+    )
+
     st.markdown("---")
     st.subheader("Parameter filters")
 
@@ -546,6 +567,14 @@ def keep(r: Device) -> bool:
         return False
     if fav_only and rk not in favorites:
         return False
+    if intersect_choice != "Any":
+        v = metric_value(r, INTERSECT_METRIC)
+        if intersect_choice == "Intersects" and not (v is not None and v >= 0.5):
+            return False
+        if intersect_choice == "No intersection" and not (v is not None and v < 0.5):
+            return False
+        if intersect_choice == "Unknown" and v is not None:
+            return False
     return True
 
 # Device-ID search over ALL devices: a fresh query reveals + selects the matching
