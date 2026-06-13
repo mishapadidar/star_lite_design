@@ -607,13 +607,43 @@ def grow_manifold(signed_bfield, R0, Z0, t_seed):
     return [rows for (_, rows) in trimmed], trimmed[0][0]
 
 
+def _leg_crosses_vessel(combined, inside_sign):
+    """True if any recorded point of this manifold leg lies OUTSIDE the vessel, i.e.
+    the leg crossed the vessel wall. `combined` is a list (length NPHI) of
+    [seed_id, s, x, y, z] arrays; a point is outside when its signed distance to the
+    vessel has the opposite sign to `inside_sign` (the sign at the X-point, which is
+    inside). Only the phi-plane crossing points are stored, so this samples the leg at
+    the panels -- adequate for a coarse 'does this inward leg reach the wall' flag."""
+    if inside_sign == 0.0:
+        return False
+    for rows in combined:
+        if rows.shape[0] == 0:
+            continue
+        d = np.asarray(sdf.eval(rows[:, 2], rows[:, 3], rows[:, 4]), dtype=float)
+        if np.any(inside_sign * d < 0.0):
+            return True
+    return False
+
+
 def trace_fieldlines(bfield, g0, res):
     t1 = time.time()
     nmanif = 30
     nmanif_hyper = 30   # more seeds for the hyperbolic fundamental domain
     R_xp = np.sqrt(g0[0]**2 + g0[1]**2)
+    Z_xp = g0[2]
+    # "Inward" legs point from the X-point toward the magnetic axis, i.e. toward the
+    # plasma / Boozer surfaces. axis_dir is that (R, Z) vector at phi=0; a leg is
+    # inward iff its eigendirection ray has a positive projection onto it.
+    _axis_pt = axes[0].curve.gamma()[0]
+    axis_dir = np.array([np.hypot(_axis_pt[0], _axis_pt[1]) - R_xp, _axis_pt[2] - Z_xp])
+    # The X-point sits inside the vessel; record which sdf sign that is so an inward
+    # leg that reaches the OUTSIDE (opposite sign) can be detected.
+    inside_sign = float(np.sign(sdf.eval(np.array([g0[0]]), np.array([g0[1]]),
+                                         np.array([g0[2]]))[0]))
+    inward_hits = False   # does any inward (plasma-pointing) leg cross the vessel wall?
     dirs = [] if res['directions'] is None else res['directions']
     for k, v2 in enumerate(dirs):
+        is_inward = float(np.dot(v2, axis_dir)) > 0.0
         if res['type'] == 'hyperbolic':
             speed = res['eigenvalues'][0 if k < 2 else 1]   # rays [u+, u-, s+, s-]
             stable = k >= 2
@@ -671,6 +701,12 @@ def trace_fieldlines(bfield, g0, res):
                     for i in range(NPHI):
                         np.savetxt(OUT_DIR + f'poincare_{xp}_{i}_{k_out}.txt',
                                    combined[i], comments='', delimiter=',')
+                # Flag inward (plasma-pointing) legs that reach the vessel. By
+                # stellarator symmetry the DN 'bot' legs mirror the 'top' ones, so
+                # testing 'top' determines the flag (SN traces only 'top' anyway).
+                if is_inward and xp == 'top' and _leg_crosses_vessel(combined, inside_sign):
+                    inward_hits = True
+    return inward_hits
 
 
 def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
@@ -818,5 +854,16 @@ if comm_world is None or comm_world.rank == 0:
     # (on every device) where the coils lie relative to the cross section.
     coil_cross_sections(boozer_surface.biotsavart.coils)
 
-trace_fieldlines(boozer_surface.biotsavart, g0, res)
+inward_hits = trace_fieldlines(boozer_surface.biotsavart, g0, res)
 trace_interior(boozer_surface.biotsavart, axes[0].curve.gamma()[0], g0)
+
+# Append the inward-manifold / vessel-intersection flag to summary.txt (written
+# earlier by boozer_all.py / boozer_singular_opt.py, in this same device dir). Value
+# 1 = at least one inward (plasma-pointing) X-point manifold leg reaches the vacuum
+# vessel; 0 = none do. Same 4-column "metric value threshold rel_error" format the
+# rest of summary.txt uses, so device_browser.py parses it like any other metric.
+if comm_world is None or comm_world.rank == 0:
+    _val = 1.0 if inward_hits else 0.0
+    with open(OUT_DIR + 'summary.txt', 'a') as _f:
+        _f.write(f"  {'inward_manifold_hits_vessel':<30s} {_val:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
+    proc0_print(f"inward_manifold_hits_vessel = {int(_val)}")
