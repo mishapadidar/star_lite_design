@@ -1081,7 +1081,7 @@ def _attempt_ar_reduction(j, dofs):
     return done
 
 
-for j in range(10):
+for j in range(15):
     dat_dict["iter"] = 0
 
     # Aspect-ratio reduction (--AR 1/2): before the BFGS run, step the volume toward
