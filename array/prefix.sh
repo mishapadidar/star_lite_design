@@ -81,6 +81,7 @@ SYNC_INCLUDES=(
   --include='design_opt_final_*.yaml'
   --include='design_polished_final_*.json'
   --include='design_polished_final_*.yaml'
+  --include='LCFS_*.json'
   --include='singular.json'
   --include='singular.yaml'
   --include='summary.txt'
@@ -186,6 +187,11 @@ if ! bash run_render.sh "$INIT_JSON" "$INIT_DIR"; then
   echo "ERROR: init render failed"
   exit 1
 fi
+# Last closed flux surface for the init device. Best-effort: a failure here must not
+# discard an otherwise-good device, so it is non-fatal. Writes LCFS_<ID>.json in INIT_DIR.
+bash run_LCFS.sh "$INIT_JSON" || echo "WARNING: LCFS computation failed for init device"
+# Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
+bash run_elongation.sh "$INIT_JSON" || echo "WARNING: elongation computation failed for init device"
 sync_dir "$INIT_DIR"
 
 # ───────────────────────────── (3) polish (mono 1/2) ──────────────────────────
@@ -236,6 +242,11 @@ if [ -n "$MONO_CONSTRAINT" ]; then
         echo "ERROR: polished render failed"
         exit 1
       fi
+      # Last closed flux surface for the polished device (best-effort, non-fatal;
+      # writes LCFS_<ID>.json into POLISH_DIR).
+      bash run_LCFS.sh "$POLISHED_JSON" || echo "WARNING: LCFS computation failed for polished device"
+      # Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
+      bash run_elongation.sh "$POLISHED_JSON" || echo "WARNING: elongation computation failed for polished device"
       sync_dir "$POLISH_DIR"
     fi
   fi

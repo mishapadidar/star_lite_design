@@ -306,13 +306,25 @@ def cheb(Npts, a, b):
     D = np.outer(c, np.array([1] * (N + 1)) / c) / (dX + np.identity(N + 1))
     D = D - np.diag(np.sum(D, axis=1))
 
-    n = np.arange(0, N // 2 + 1)[:, None]
-    k = np.arange(0, N // 2 + 1)[None, :]
-    DD = 2 * np.cos(2 * np.pi * n * k / N) / N
-    DD[0, :] *= 0.5
-    d = np.concatenate(([1.0], 2.0 / (1.0 - np.square(np.arange(2, N + 1, 2)))))
-    w = DD @ d
-    w = np.concatenate((w, np.flip(w[:-1])))
+    # Clenshaw-Curtis quadrature weights on the Chebyshev points x = cos(pi*j/N),
+    # j=0..N (Trefethen, "Spectral Methods in MATLAB", clencurt.m). The previous
+    # half-and-mirror construction was only correct for EVEN N: for odd N the
+    # reflection np.flip(w[:-1]) yielded N weights instead of N+1 (wrong quadrature),
+    # so the even/odd cases are handled explicitly here.
+    theta = np.pi * np.arange(N + 1) / N
+    w = np.zeros(N + 1)
+    ii = np.arange(1, N)            # interior nodes 1..N-1
+    v = np.ones(N - 1)
+    if N % 2 == 0:
+        w[0] = w[N] = 1.0 / (N ** 2 - 1)
+        for kk in range(1, N // 2):
+            v -= 2.0 * np.cos(2.0 * kk * theta[ii]) / (4.0 * kk ** 2 - 1)
+        v -= np.cos(N * theta[ii]) / (N ** 2 - 1)
+    else:
+        w[0] = w[N] = 1.0 / N ** 2
+        for kk in range(1, (N - 1) // 2 + 1):
+            v -= 2.0 * np.cos(2.0 * kk * theta[ii]) / (4.0 * kk ** 2 - 1)
+    w[ii] = 2.0 * v / N
 
     x = 0.5 * (x + 1) * (b - a) + a
     D = D / (0.5 * (b - a))

@@ -24,15 +24,25 @@ def cheb(Npts, a, b):
     D = np.outer(c, np.array([1]*(N+1))/c) / (dX + np.identity(N+1))
     D = D - np.diag(np.sum(D,axis=1))
    
-    n = np.arange(0, N//2 + 1)[:, None]  # column vector
-    k = np.arange(0, N//2 + 1)[None, :]  # row vector
-
-    DD = 2 * np.cos(2 * np.pi * n * k / N) / N
-    DD[0, :] *= 0.5
-
-    d = np.concatenate(([1.0], 2.0 / (1.0 - np.square(np.arange(2, N + 1, 2)))))
-    w = DD @ d
-    w = np.concatenate((w, np.flip(w[:-1])))
+    # Clenshaw-Curtis quadrature weights on the Chebyshev points x = cos(pi*j/N),
+    # j=0..N (Trefethen, "Spectral Methods in MATLAB", clencurt.m). The previous
+    # half-and-mirror construction was only correct for EVEN N: for odd N the
+    # reflection np.flip(w[:-1]) yielded N weights instead of N+1 (wrong quadrature),
+    # so the even/odd cases are handled explicitly here.
+    theta = np.pi * np.arange(N + 1) / N
+    w = np.zeros(N + 1)
+    ii = np.arange(1, N)            # interior nodes 1..N-1
+    v = np.ones(N - 1)
+    if N % 2 == 0:
+        w[0] = w[N] = 1.0 / (N**2 - 1)
+        for kk in range(1, N // 2):
+            v -= 2.0 * np.cos(2.0 * kk * theta[ii]) / (4.0 * kk**2 - 1)
+        v -= np.cos(N * theta[ii]) / (N**2 - 1)
+    else:
+        w[0] = w[N] = 1.0 / N**2
+        for kk in range(1, (N - 1) // 2 + 1):
+            v -= 2.0 * np.cos(2.0 * kk * theta[ii]) / (4.0 * kk**2 - 1)
+    w[ii] = 2.0 * v / N
     
     x = 0.5*(x+1)*(b-a) + a
     D = D/(0.5*(b-a))
@@ -285,17 +295,27 @@ def elongation_pure(B, gradB, L, gamma, D):
     v1 = jnp.array([-b, a-eig1])
     S = jnp.concatenate([v1[:, None].real, v1[:, None].imag], axis=1)
 
+    # Elongation = aspect ratio of the invariant ellipse S(unit circle) = ratio of
+    # the SINGULAR values of S, NOT its eigenvalues (S is generally non-symmetric, so
+    # its eigenvalues are not the ellipse semi-axes). sigma^2 are the eigenvalues of
+    # the SPD matrix S^T S.
     a, b = S[0]
     c, d = S[1]
-    eig1 = ((a+d) + jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
-    eig2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
-    elong = jnp.abs(eig1/eig2)
-    return jnp.max(jnp.array([elong, 1/elong]))
+    p = a*a + c*c          # (S^T S)_00
+    q = b*b + d*d          # (S^T S)_11
+    r = a*b + c*d          # (S^T S)_01 = (S^T S)_10
+    disc = jnp.sqrt(jnp.maximum((p - q)**2 + 4.0*r*r, 0.0))
+    s1 = jnp.sqrt((p + q + disc) / 2.)   # largest singular value
+    s2 = jnp.sqrt((p + q - disc) / 2.)   # smallest singular value
+    return s1 / s2
 
 class TangentMap(Optimizable):
-    def __init__(self, axis, biotsavart, threshold, mtype='identity'):
+    def __init__(self, axis, biotsavart, threshold, mtype='identity', phi=0.0):
         """
-        Evaluate the the tangent map on a fieldline
+        Evaluate the tangent map on a fieldline over ONE field period starting at the
+        toroidal angle `phi` (in units of phi/2pi). The return map / monodromy /
+        elongation are therefore anchored at `phi`, and sweeping `phi` traces out their
+        toroidal profile; phi=0 reproduces the original [0, 1/nfp] window.
 
         Args:
         """
@@ -303,10 +323,10 @@ class TangentMap(Optimizable):
         self.biotsavart = biotsavart
         
         nfp = axis.curve.nfp
-        #print("when integrating from 0 to 0.5, check the eigenvectors are correct")
-        # Example usage:
+        # Integrate over one field period [phi, phi+1/nfp]; phi shifts the window so the
+        # return map (and hence the elongation) is anchored at that toroidal angle.
         N = 5*axis.curve.order+1  # Number of intervals (N+1 grid points)
-        D, xh, wh = cheb(N, 0, 1./nfp)
+        D, xh, wh = cheb(N, phi, phi + 1./nfp)
         self.D = D
         self.xh = xh
         self.wh = wh
@@ -482,6 +502,25 @@ class TangentMap(Optimizable):
                     _add(res.x)
     
         return np.sort(np.asarray(roots))
+
+    @property
+    def elongation(self):
+        """Return-map elongation at this tangent map's starting phi: the aspect ratio of
+        the invariant ellipse of the one-field-period monodromy R[-1] (i.e. the
+        flux-surface cross-section elongation at phi). Built only from the return map
+        R[-1] -- see elongation_pure. Non-differentiable (evaluation only). Sweep `phi`
+        (see __init__) to obtain the toroidal elongation profile."""
+        axis = self.axis
+        curve = self.curve
+        biotsavart = self.biotsavart
+        if axis.need_to_run_code:
+            axis.run_code(axis.res['length'])
+        biotsavart.set_points(curve.gamma())
+        B = biotsavart.B()
+        gradB = biotsavart.dB_by_dX()
+        L = axis.res['length']
+        gamma = curve.gamma()
+        return float(elongation_pure(B, gradB, L, gamma, self.D))
 
 class Monodromy(Optimizable):
     def __init__(self, tangent_map):
