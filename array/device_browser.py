@@ -207,9 +207,13 @@ def parse_summary(path: Path) -> list[Metric]:
     return metrics
 
 
-# summary.txt metric (written by mk_manifolds.py): 1 = at least one inward
-# (plasma-pointing) X-point manifold leg reaches the vacuum vessel, 0 = none.
-INTERSECT_METRIC = "inward_manifold_hits_vessel"
+# summary.txt vessel-intersection flags (1 = intersects the vacuum vessel, 0 = not):
+#   - inward_manifold_hits_vessel: any inward (plasma-pointing) X-point manifold leg
+#     reaches the vessel (written by mk_manifolds.py).
+#   - LCFS_hits_vessel: the last closed flux surface pokes outside the vessel
+#     (written by mk_LCFS.py).
+MANIFOLD_INTERSECT_METRIC = "inward_manifold_hits_vessel"
+LCFS_INTERSECT_METRIC = "LCFS_hits_vessel"
 
 
 def metric_value(device: "Device", name: str) -> Optional[float]:
@@ -218,6 +222,23 @@ def metric_value(device: "Device", name: str) -> Optional[float]:
         if m.name == name:
             return m.value
     return None
+
+
+def vessel_hit_state(device: "Device", source: str) -> tuple[bool, bool]:
+    """(hit, known) for the chosen vessel-intersection source.
+    hit   = the selected condition(s) intersect the vessel.
+    known = enough metrics are present to decide 'no intersection' (vs 'unknown').
+    source is 'manifolds', 'LCFS', or 'either' (intersects if EITHER does)."""
+    vm = metric_value(device, MANIFOLD_INTERSECT_METRIC)
+    vl = metric_value(device, LCFS_INTERSECT_METRIC)
+    hm = vm is not None and vm >= 0.5
+    hl = vl is not None and vl >= 0.5
+    if source == "manifolds":
+        return hm, (vm is not None)
+    if source == "LCFS":
+        return hl, (vl is not None)
+    # "either": intersects if either hits; only fully known when BOTH are present.
+    return (hm or hl), (vm is not None and vl is not None)
 
 
 def read_first_float(path: Path) -> Optional[float]:
@@ -506,12 +527,20 @@ with st.sidebar:
         help="Jump to the device with this ID (the crc32 in the ID column).",
     )
 
+    intersect_source = st.selectbox(
+        "Vessel intersection — source",
+        ["either", "manifolds", "LCFS"],
+        help="Which condition counts as 'intersecting the vessel': the inward "
+             "(plasma-pointing) X-point manifold legs (`inward_manifold_hits_vessel`, "
+             "mk_manifolds.py), the LCFS surface (`LCFS_hits_vessel`, mk_LCFS.py), or "
+             "EITHER of them.",
+    )
     intersect_choice = st.selectbox(
-        "Inward manifold ↔ vessel",
+        "Vessel intersection",
         ["Any", "Intersects", "No intersection", "Unknown"],
-        help="summary.txt `inward_manifold_hits_vessel` (from mk_manifolds.py): does "
-             "any inward-pointing (plasma-side) X-point manifold leg reach the vacuum "
-             "vessel? 'Unknown' = not computed (no manifold render in this folder).",
+        help="Filter on the chosen source. 'Intersects' = the source hits the vessel; "
+             "'No intersection' = it does not (and is known — for 'either', both flags "
+             "present); 'Unknown' = not computed (no LCFS/manifold render yet).",
     )
 
     st.markdown("---")
@@ -568,12 +597,12 @@ def keep(r: Device) -> bool:
     if fav_only and rk not in favorites:
         return False
     if intersect_choice != "Any":
-        v = metric_value(r, INTERSECT_METRIC)
-        if intersect_choice == "Intersects" and not (v is not None and v >= 0.5):
+        hit, known = vessel_hit_state(r, intersect_source)
+        if intersect_choice == "Intersects" and not hit:
             return False
-        if intersect_choice == "No intersection" and not (v is not None and v < 0.5):
+        if intersect_choice == "No intersection" and not ((not hit) and known):
             return False
-        if intersect_choice == "Unknown" and v is not None:
+        if intersect_choice == "Unknown" and not ((not hit) and (not known)):
             return False
     return True
 
