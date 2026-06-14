@@ -264,6 +264,18 @@ def monodromy_matrix_pure(B, gradB, L, gamma, D):
     return Rf
 
 
+def iota_pure(B, gradB, L, gamma, D, nfp):
+    """On-axis rotational transform from the one-field-period return map R[-1]. For an
+    area-preserving elliptic 2x2 map tr(R[-1]) = 2*cos(theta), so
+    theta = arctan2(sqrt(4 - tr^2), tr) is the rotation over one field period and
+    iota = nfp*theta/(2*pi). Smooth in R[-1] (hence in B, gradB, L, gamma), so jax can
+    differentiate it for the on-axis-iota penalty."""
+    Rf = monodromy_matrix_pure(B, gradB, L, gamma, D)
+    tr = Rf[0, 0] + Rf[1, 1]
+    theta = jnp.arctan2(jnp.sqrt(jnp.maximum(4.0 - tr * tr, 0.0)), tr)
+    return nfp * theta / (2.0 * jnp.pi)
+
+
 
 def eigenvalues_pure(B, gradB, L, gamma, D):
     R = monodromy_pure(B, gradB, L, gamma, D).astype(complex)
@@ -338,6 +350,13 @@ class TangentMap(Optimizable):
         self.monodromy_dL        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=2)(B, gradB, L, gamma)
         self.monodromy_dgamma    = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=3)(B, gradB, L, gamma)
 
+        # on-axis iota (and its partials) from the same field-period return map.
+        self.iota_jax    = lambda B, gradB, L, gamma: iota_pure(B, gradB, L, gamma, self.D, nfp)
+        self.iota_dB     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=0)(B, gradB, L, gamma)
+        self.iota_dgradB = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=1)(B, gradB, L, gamma)
+        self.iota_dL     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=2)(B, gradB, L, gamma)
+        self.iota_dgamma = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=3)(B, gradB, L, gamma)
+
         self.quadratic_jet_matrix = lambda B, gradB, gradgradB, L, gamma: quadratic_jet_matrix_pure(B, gradB, gradgradB, L, gamma, self.D)
 
         self.axis = axis
@@ -348,7 +367,9 @@ class TangentMap(Optimizable):
         self._monodromy = None
         self._dmonodromy_dcoils = None
         self._matrix = None
-        self._jet2 = None 
+        self._jet2 = None
+        self._iota = None
+        self._diota_dcoils = None
     
     @property
     def jet2(self):
@@ -440,7 +461,59 @@ class TangentMap(Optimizable):
         adj = forward_backward(Pc, Lc, Uc, dJ_ds)
         dmonodromy_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
         self._dmonodromy_dcoils = dmonodromy_dcoils
-        
+
+    @property
+    def iota(self):
+        if self._iota is None:
+            self.compute_iota()
+        return self._iota
+
+    @property
+    def diota_dcoils(self):
+        if self._diota_dcoils is None:
+            self.compute_iota()
+        return self._diota_dcoils
+
+    def compute_iota(self):
+        """On-axis iota and its derivative w.r.t. the coil dofs. Mirrors compute() (the
+        monodromy adjoint): partials of iota_pure w.r.t. B/gradB/L/gamma, chained through
+        the field's B_and_dB_vjp and the field-line solve adjoint (PLU + vjp)."""
+        axis = self.axis
+        curve = self.curve
+        biotsavart = self.biotsavart
+
+        if axis.need_to_run_code:
+            res = axis.res
+            axis.run_code(res['length'])
+
+        biotsavart.set_points(curve.gamma())
+        B = biotsavart.B()
+        gradB = biotsavart.dB_by_dX()
+        gradgradB = biotsavart.d2B_by_dXdX()
+        L = axis.res['length']
+        gamma = curve.gamma()
+        self._iota = float(self.iota_jax(B, gradB, L, gamma))
+
+        diota_dB = self.iota_dB(B, gradB, L, gamma)
+        diota_dgradB = self.iota_dgradB(B, gradB, L, gamma)
+        diota_dL = self.iota_dL(B, gradB, L, gamma)
+        diota_dgamma_partial = self.iota_dgamma(B, gradB, L, gamma)
+
+        Pc, Lc, Uc = axis.res['PLU']
+        diota_dcoils = sum(biotsavart.B_and_dB_vjp(diota_dB, diota_dgradB))
+
+        dgamma_da = curve.dgamma_by_dcoeff()
+        dB_da = np.einsum('ikl,ikm->ilm', gradB, dgamma_da, optimize=True)
+        dgradB_da = np.einsum('ijkl,ikm->ijlm', gradgradB, dgamma_da, optimize=True)
+        diota_dgamma = np.einsum('ij,ijm->m', diota_dB, dB_da, optimize=True) + \
+                       np.einsum('ijk,ijkm->m', diota_dgradB, dgradB_da, optimize=True) + \
+                       np.einsum('ik,ikm->m', diota_dgamma_partial, dgamma_da)
+        dJ_ds = np.concatenate([diota_dgamma, [diota_dL]])
+
+        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
+        diota_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
+        self._diota_dcoils = diota_dcoils
+
 
     def snowflake_angles_from_jet2(self, ntheta=512, xtol=1e-12, tangent_tol=1e-6):
         """
