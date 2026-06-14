@@ -30,7 +30,7 @@ from simsopt.geo import (
 )
 from simsopt.objectives import QuadraticPenalty, Weight
 
-from star_lite_design.utils.tangent_map import TangentMap, Monodromy
+from star_lite_design.utils.tangent_map import TangentMap, Monodromy, AxisIota
 from star_lite_design.utils.lcfs import grow_to_lcfs, continue_to_flux, toroidal_flux
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual
 from star_lite_design.utils.current_bound import CurrentBound
@@ -242,6 +242,9 @@ CURVATURE_WEIGHT = Weight(config['CURVATURE_WEIGHT'])
 MEAN_SQUARED_CURVATURE_WEIGHT = Weight(config['MEAN_SQUARED_CURVATURE_WEIGHT'])
 LENGTH_WEIGHT = Weight(config['LENGTH_WEIGHT'])
 IOTAS_WEIGHT=Weight(config['IOTAS_WEIGHT'])
+# on-axis iota constraint weight; defaults to the surface-iota weight.
+config.setdefault('AXIS_IOTA_WEIGHT', config['IOTAS_WEIGHT'])
+AXIS_IOTA_WEIGHT = Weight(config['AXIS_IOTA_WEIGHT'])
 MAJOR_RADIUS_WEIGHT=Weight(config['MAJOR_RADIUS_WEIGHT']/1000.)
 
 BOOZER_RESIDUAL_WEIGHT=Weight(config['BOOZER_RESIDUAL_WEIGHT'])
@@ -258,7 +261,25 @@ brs = [BoozerResidual(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils
 J_major_radius = QuadraticPenalty(mr, MR_TARGET, 'identity')  # target major radius is that computed on the initial surface
 
 IOTAS_LIST = [Iotas(boozer_surface) for boozer_surface in boozer_surfaces]
-J_iotas = sum([QuadraticPenalty(IOTAS, IOT_TARGET, 'identity') for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)]) # target rotational transform is that computed on the initial surface
+# Keep references to the per-surface iota penalties so the AR step can retarget them when
+# it changes the optimization surface (see _attempt_ar_reduction).
+iota_penalties = [QuadraticPenalty(IOTAS, IOT_TARGET, 'identity') for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)]
+J_iotas = sum(iota_penalties)  # target rotational transform is that computed on the initial surface
+
+# On-axis rotational transform via the tangent map on the magnetic axis: AxisIota.J()/dJ()
+# return the on-axis iota and its coil gradient (utils/tangent_map.py). Constrain it to the
+# value of the ORIGINAL UNPERTURBED config -- this runs before the per-attempt coil
+# perturbation below, so AXIS_IOTA_TARGET is the unperturbed on-axis iota, and it is stored
+# in the config so every attempt / restart targets the same value. threshold/mtype are
+# unused by the iota path.
+axis_tmos = [TangentMap(axis, BiotSavart(boozer_surface.biotsavart.coils), 0.0, mtype='identity')
+             for axis, boozer_surface in zip(axes, boozer_surfaces)]
+AXIS_IOTA_LIST = [AxisIota(tmo) for tmo in axis_tmos]
+if 'AXIS_IOTA_TARGET' not in config:
+    config['AXIS_IOTA_TARGET'] = [float(aio.J()) for aio in AXIS_IOTA_LIST]
+AXIS_IOTA_TARGET = config['AXIS_IOTA_TARGET']
+J_axis_iota = sum([QuadraticPenalty(aio, tgt, 'identity')
+                   for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
 nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
@@ -386,7 +407,8 @@ else:
 # sum the objectives together
 JF = (J_nonQSRatio 
     + MONODROMY_WEIGHT * J_monodromy 
-    + IOTAS_WEIGHT * J_iotas 
+    + IOTAS_WEIGHT * J_iotas
+    + AXIS_IOTA_WEIGHT * J_axis_iota
     + MAJOR_RADIUS_WEIGHT * J_major_radius
     + LENGTH_WEIGHT * length_penalty
     + COIL_TO_COIL_WEIGHT * Jccdist
@@ -418,6 +440,7 @@ if track_bottom:
 penalties = {'nonQS': J_nonQSRatio,
         'monodromy' : MONODROMY_WEIGHT * J_monodromy,
         'iotas':IOTAS_WEIGHT * J_iotas,
+        'on-axis iota': AXIS_IOTA_WEIGHT * J_axis_iota,
         'length':LENGTH_WEIGHT * length_penalty,
         'coil-to-coil': COIL_TO_COIL_WEIGHT * Jccdist,
         'curvature':CURVATURE_WEIGHT * curvature_penalty,
@@ -448,6 +471,7 @@ if J_bot_coil is not None:
 penalty_weights = {
         'monodromy': MONODROMY_WEIGHT,
         'iotas': IOTAS_WEIGHT,
+        'on-axis iota': AXIS_IOTA_WEIGHT,
         'length': LENGTH_WEIGHT,
         'coil-to-coil': COIL_TO_COIL_WEIGHT,
         'curvature': CURVATURE_WEIGHT,
@@ -468,6 +492,7 @@ penalty_weights = {
 
 states = {
         'iotas': IOTAS_LIST,
+        'on-axis iota': AXIS_IOTA_LIST,
         'modB': modBs,
         'lengths':Jls,
         'major radius': [MajorRadius(boozer_surface) for boozer_surface in boozer_surfaces],
@@ -1032,6 +1057,13 @@ def _attempt_ar_reduction(j, dofs):
     print(f"[AR] j={j}: lowered AR {AR_old:.3f} -> {opt_bs.surface.aspect_ratio():.3f} "
           f"(tf/tf_LCFS = {toroidal_flux(opt_bs)/tf_lcfs:.3f}, reached 80% = {reached}); "
           f"re-scaling penalty weights so none start above 1:")
+    # The surface volume changed, so its rotational transform changed; set the surface-iota
+    # TARGET to the newly-computed iota (retarget both the penalty and the escalation /
+    # summary value) so the iota constraint does not fight the lowered-AR surface.
+    new_iota = opt_bs.res['iota']
+    IOTAS_TARGET[0] = new_iota
+    iota_penalties[0].cons = new_iota   # QuadraticPenalty stores its target as .cons
+    print(f"[AR] j={j}: surface iota target -> {new_iota:.4f}")
     # refresh the _restore_state warm-start snapshots to the adopted surface
     for _res, _bs in zip(res_list, boozer_surfaces):
         _res['sdofs'] = _bs.surface.x.copy()
@@ -1099,6 +1131,7 @@ for j in range(15):
     currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     curr_err = max([max([c-CURRENT_THRESHOLD, 0.])/CURRENT_THRESHOLD for c in currents_list])
     iota_err = max([np.abs(IOTAS.J() - IOT_TARGET)/np.abs(IOT_TARGET) for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
+    axis_iota_err = max([np.abs(aio.J() - tgt)/np.abs(tgt) for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
     mr_err = np.abs(mr.J()-MR_TARGET)/MR_TARGET
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
@@ -1166,6 +1199,9 @@ for j in range(15):
     if iota_err > 0.001 and IOTAS_WEIGHT.value != 0.:
         IOTAS_WEIGHT*=10
         print("IOTA ERROR", iota_err)
+    if axis_iota_err > 0.001 and AXIS_IOTA_WEIGHT.value != 0.:
+        AXIS_IOTA_WEIGHT*=10
+        print("ON-AXIS IOTA ERROR", axis_iota_err)
     if mr_err > 0.001 and MAJOR_RADIUS_WEIGHT.value !=0.:
         MAJOR_RADIUS_WEIGHT*=10
         print("MR ERROR", mr_err)
@@ -1250,6 +1286,11 @@ for j in range(15):
     config['MEAN_SQUARED_CURVATURE_WEIGHT'] = MEAN_SQUARED_CURVATURE_WEIGHT.value
     config['LENGTH_WEIGHT'] = LENGTH_WEIGHT.value
     config['IOTAS_WEIGHT'] = IOTAS_WEIGHT.value
+    config['AXIS_IOTA_WEIGHT'] = AXIS_IOTA_WEIGHT.value
+    config['AXIS_IOTA_TARGET'] = list(AXIS_IOTA_TARGET)
+    # IOTAS_TARGET is a slice copy of config['IOTAS_TARGET']; the AR step may have retargeted
+    # it to the lowered-AR surface's iota, so write it back so the polish/restart sees it.
+    config['IOTAS_TARGET'][config_id] = float(IOTAS_TARGET[0])
     config['MAJOR_RADIUS_WEIGHT'] = MAJOR_RADIUS_WEIGHT.value
     config['BOOZER_RESIDUAL_WEIGHT'] = BOOZER_RESIDUAL_WEIGHT.value
     config['PLASMA_VESSEL_MARGIN_WEIGHT'] = PLASMA_VESSEL_MARGIN_WEIGHT.value
@@ -1301,6 +1342,7 @@ final_metrics = {
     'aspect_ratio':               (boozer_surfaces[0].surface.aspect_ratio(),      None,                          None),
     'current':                    (max(currents_list),                             CURRENT_THRESHOLD,             curr_err if CURRENT_WEIGHT.value != 0. else 0.0),
     'iotas':                      (max(IOTAS.J() for IOTAS in IOTAS_LIST),         max(IOTAS_TARGET),             iota_err if IOTAS_WEIGHT.value != 0. else 0.0),
+    'on_axis_iota':               (max(aio.J() for aio in AXIS_IOTA_LIST),         max(AXIS_IOTA_TARGET),         axis_iota_err if AXIS_IOTA_WEIGHT.value != 0. else 0.0),
     'major_radius':               (mr.J(),                                         MR_TARGET,                     mr_err if MAJOR_RADIUS_WEIGHT.value != 0. else 0.0),
     'coil_length':                (max(Jl.J() for Jl in Jls),                      LENGTH_THRESHOLD,              clen_err if LENGTH_WEIGHT.value != 0. else 0.0),
     'coil_to_coil':               (Jccdist.shortest_distance(),                    COIL_TO_COIL_THRESHOLD,        cc_err if COIL_TO_COIL_WEIGHT.value != 0. else 0.0),
