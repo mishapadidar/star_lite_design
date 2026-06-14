@@ -1000,6 +1000,13 @@ def _attempt_ar_reduction(j, dofs):
               f"optimization surface (|tf|={abs(tf_opt):.3e}, AR~{AR_old:.3f}); leaving it alone")
         return
 
+    # Only act if reaching the 80% flux would MOVE the toroidal flux by more than 0.1% --
+    # otherwise the optimization surface is already essentially there, so leave it alone.
+    if abs(tf_target - tf_opt) <= 1e-3 * abs(tf_opt):
+        print(f"[AR] j={j}: optimization surface already within 0.1% of the 80% LCFS flux "
+              f"(|tf|={abs(tf_opt):.3e}, AR~{AR_old:.3f}); leaving it alone")
+        return
+
     # Continue the OPTIMIZATION surface outward to 0.8*tf_LCFS (lowering AR), with
     # backtracking + a self-intersection check. continue_to_flux returns the
     # furthest-advanced surface that converged AND is non-self-intersecting (== opt_start
@@ -1009,9 +1016,16 @@ def _attempt_ar_reduction(j, dofs):
                  'iota': opt_bs.res['iota'], 'G': opt_bs.res['G']}
     state, reached = continue_to_flux(opt_bs, 0.8, tf_lcfs, opt_start)
     if state['V'] == opt_start['V']:
-        # nothing past the optimization surface converged/stayed simple -> unchanged.
+        # The attempt failed entirely (every continuation step failed to converge or
+        # self-intersected). Restore the optimization surface EXACTLY to where it started
+        # and leave it alone.
+        opt_bs.surface.x = opt_start['sdofs']
+        opt_bs.res['iota'], opt_bs.res['G'] = opt_start['iota'], opt_start['G']
+        opt_bs.targetlabel = opt_start['V']
+        opt_bs.need_to_run_code = True
+        opt_bs.run_code(opt_start['iota'], opt_start['G'])
         print(f"[AR] j={j}: could not lower AR toward 80% LCFS flux without self-"
-              f"intersection / non-convergence; optimization surface unchanged")
+              f"intersection / non-convergence; optimization surface left unchanged")
         return
 
     # opt_bs is left solved at `state` by continue_to_flux; adopt it + do the bookkeeping.
