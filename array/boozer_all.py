@@ -24,11 +24,14 @@ from simsopt.geo import (
     NonQuasiSymmetricRatio,
     Iotas,
     RotatedCurve,
+    SurfaceXYZTensorFourier,
+    Volume,
     curves_to_vtk,
 )
 from simsopt.objectives import QuadraticPenalty, Weight
 
 from star_lite_design.utils.tangent_map import TangentMap, Monodromy
+from star_lite_design.utils.lcfs import grow_to_lcfs, continue_to_flux, toroidal_flux
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.displacement import FieldLineMeanZ
@@ -36,7 +39,7 @@ from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 
-import sn_setup
+from star_lite_design.utils import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
 from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
 
@@ -60,24 +63,19 @@ parser.add_argument("--attempt", type=int, default=0)
 # (drop stellsym, rebuild as nfp=2/stellsym=False, push the bottom X-point to
 # the lower wall).
 parser.add_argument("--null", type=str, default='DN', choices=['DN', 'SN'])
-# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is; 1/2/3/4 = lower the plasma
-# aspect ratio toward ~5 / ~4 / ~3.5 / ~3 respectively. For 1-4, before each BFGS run
-# the Boozer-surface volume is retargeted toward the AR torus estimate V = 2*pi^2*R*r^2
-# (r = R/AR_target) via CONTINUATION in 10 increments; see the AR block in the
-# optimization loop. Stops at the first step that fails / self-intersects (reverting
-# to the last converged, non-self-intersecting surface) and retries next iteration;
-# stops adjusting once the volume reaches the target AR.
-parser.add_argument("--AR", type=int, default=0, choices=[0, 1, 2, 3, 4])
+# --AR: aspect-ratio knob. 0 = leave the aspect ratio as-is. 1 = for the FIRST 5 outer
+# BFGS iterations, lower the optimization-surface aspect ratio toward the 80%-toroidal-
+# flux surface of the LCFS. The LCFS is computed on a SEPARATE BoozerSurface (a copy of
+# the optimization surface, so the optimization surface is untouched) by robust volume
+# continuation; the optimization surface is then continued out to that 80% flux (or as
+# close as converges without self-intersecting). Skipped if the 80% surface would not
+# lower the AR. See star_lite_design.utils.lcfs and the AR block in the optimization loop.
+parser.add_argument("--AR", type=int, default=0, choices=[0, 1])
 
 args = parser.parse_args()
 
-# aspect-ratio reduction enabled? (ar_done flips True once a lower-AR surface has
-# converged, so it is only attempted until it first succeeds.)
+# aspect-ratio reduction enabled? (--AR 1). Only attempted in the first 5 outer iterations.
 ar_enabled = bool(args.AR)
-ar_done = False
-# target aspect ratio for the continuation: --AR 1 -> 5, 2 -> 4, 3 -> 3.5, 4 -> 3.
-# Unused when ar_enabled is False.
-ar_target = {1: 5.0, 2: 4.0, 3: 3.5, 4: 3.0}.get(args.AR, 5.0)
 
 if args.well == "OFF":
     well_target = 0.0
@@ -961,133 +959,96 @@ except _XpointSurfaceSatisfied:
 
 
 def _attempt_ar_reduction(j, dofs):
-    """Aspect-ratio reduction (--AR 1 -> target 5, --AR 2 -> target 4), run before each
-    BFGS step (see the call site). Drive the Boozer-surface target-volume MAGNITUDE
-    toward the target-AR torus estimate |V| = 2*pi^2*R*r^2 (R = target major radius,
-    r = R/ar_target), keeping the surface's existing volume sign (it is negative for
-    some devices). Uses CONTINUATION: step the target |volume| from the current value
-    to the target-AR volume in 10 equal increments, re-solving (warm-started from the
-    previous converged surface) at each step. Stop at the first step whose solve fails
-    OR self-intersects, revert to the last surface that converged AND is
-    non-self-intersecting, and return False (retry next outer iteration once BFGS has
-    adapted the coils). If the final increment converges (the volume now corresponds to
-    the target AR) adopt it and return True so the caller stops adjusting the volume.
-    On any adopted volume change, refresh the _restore_state snapshot, downweight any
-    penalty whose weighted value exceeds 1, and refresh the failed-evaluation barrier
-    anchor (dat_dict)."""
-    bs = boozer_surfaces[0]
-    R_target = MR_TARGET   # target major radius (R is driven here by J_major_radius)
-    V_old = bs.targetlabel
-    # The Boozer-surface volume is SIGNED (it depends on the surface orientation and
-    # is negative for some devices); preserve that sign and reason about MAGNITUDES.
-    # AR=ar_target -> minor radius r = R/ar_target -> |V| = 2*pi^2*R*r^2, which is
-    # LARGER than the current |V| (a smaller aspect ratio means a larger volume).
-    sgn = 1.0 if V_old >= 0.0 else -1.0
-    Vmag_old = abs(V_old)
-    Vmag_new = 2.0 * np.pi**2 * R_target * (R_target / ar_target)**2   # |volume| at AR=ar_target
-    V_new = sgn * Vmag_new                                  # target-AR volume, same orientation
-    AR_old = bs.surface.aspect_ratio()                      # actual AR of the current surface
+    """Aspect-ratio reduction (--AR 1), run before each of the FIRST 5 outer BFGS
+    iterations (see the call site). Compute the last closed flux surface (LCFS) on a
+    SEPARATE BoozerSurface -- a copy of the optimization surface on a fresh field over the
+    SAME (current) coils, so the optimization surface itself is never disturbed -- via the
+    robust volume continuation in star_lite_design.utils.lcfs. Take the 80%-toroidal-flux
+    surface of that LCFS; if its flux is NOT outside the optimization surface (i.e. it
+    would not lower the AR), leave the optimization surface alone. Otherwise CONTINUE the
+    optimization surface outward to that 80% flux (or as close as converges without
+    self-intersecting), lowering its AR. On any adopted change, refresh the _restore_state
+    warm-start snapshots, downweight any penalty whose weighted value exceeds 1, and
+    refresh the failed-evaluation barrier anchor (dat_dict)."""
+    opt_bs = boozer_surfaces[0]
+    AR_old = opt_bs.surface.aspect_ratio()
+    V_old = opt_bs.targetlabel
 
-    # the current (known-good) surface is the fallback "best".
-    best = {'V': V_old, 'sdofs': bs.surface.x.copy(),
-            'iota': bs.res['iota'], 'G': bs.res['G']}
+    # --- LCFS on a fresh, independent BoozerSurface (a copy of the opt surface) ---------
+    old_surf = opt_bs.surface
+    new_surf = SurfaceXYZTensorFourier(
+        mpol=old_surf.mpol, ntor=old_surf.ntor, nfp=old_surf.nfp, stellsym=old_surf.stellsym,
+        quadpoints_phi=old_surf.quadpoints_phi, quadpoints_theta=old_surf.quadpoints_theta)
+    new_surf.x = old_surf.x.copy()
+    try:
+        lcfs_bs = BoozerSurface(BiotSavart(opt_bs.biotsavart.coils), new_surf,
+                                Volume(new_surf), opt_bs.targetlabel,
+                                constraint_weight=opt_bs.constraint_weight,
+                                options=opt_bs.options)
+        grow_to_lcfs(lcfs_bs, opt_bs.res['iota'], opt_bs.res['G'])
+        tf_lcfs = toroidal_flux(lcfs_bs)
+        tf_opt = toroidal_flux(opt_bs)
+    except Exception as e:
+        print(f"[AR] j={j}: LCFS computation failed ({e}); leaving optimization surface alone")
+        return
 
-    def _try_volume(V):
-        """Warm-start from the best working surface, retarget to V, re-solve; True iff
-        it converges with no self-intersection. A degenerate surface can make the
-        Newton solve OR is_self_intersecting() itself RAISE (at very low AR the
-        cross-section 'goes back on itself', so the cylindrical angle is no longer
-        monotonic) -- treat any such failure as 'did not converge' (return False) so
-        the continuation simply reverts to the last good surface instead of crashing."""
-        bs.surface.x = best['sdofs']
-        bs.res['iota'], bs.res['G'] = best['iota'], best['G']
-        bs.targetlabel = V
-        bs.need_to_run_code = True
-        try:
-            rr = bs.run_code(best['iota'], best['G'])
-            return bool(rr['success']) and not bs.surface.is_self_intersecting()
-        except Exception:
-            return False
+    tf_target = 0.8 * tf_lcfs
+    # The 80%-flux surface is at/inside the optimization surface -> it would NOT lower the
+    # AR (smaller surface == higher AR), so leave the optimization surface alone.
+    if abs(tf_target) <= abs(tf_opt):
+        print(f"[AR] j={j}: 80% LCFS flux (|tf|={abs(tf_target):.3e}) not outside the "
+              f"optimization surface (|tf|={abs(tf_opt):.3e}, AR~{AR_old:.3f}); leaving it alone")
+        return
 
-    def _snapshot(V):
-        return {'V': V, 'sdofs': bs.surface.x.copy(),
-                'iota': bs.res['iota'], 'G': bs.res['G']}
+    # Continue the OPTIMIZATION surface outward to 0.8*tf_LCFS (lowering AR), with
+    # backtracking + a self-intersection check. continue_to_flux returns the
+    # furthest-advanced surface that converged AND is non-self-intersecting (== opt_start
+    # if none advanced); since it advances OUTWARD it necessarily has lower AR than the
+    # optimization surface, matching the spec's fallback.
+    opt_start = {'V': opt_bs.targetlabel, 'sdofs': opt_bs.surface.x.copy(),
+                 'iota': opt_bs.res['iota'], 'G': opt_bs.res['G']}
+    state, reached = continue_to_flux(opt_bs, 0.8, tf_lcfs, opt_start)
+    if state['V'] == opt_start['V']:
+        # nothing past the optimization surface converged/stayed simple -> unchanged.
+        print(f"[AR] j={j}: could not lower AR toward 80% LCFS flux without self-"
+              f"intersection / non-convergence; optimization surface unchanged")
+        return
 
-    done = False
-    if Vmag_new <= Vmag_old:
-        # current |volume| already >= target-AR |volume| (AR already <= target): nothing to do.
-        print(f"[AR] j={j}: current AR already <= {ar_target:g} (AR~{AR_old:.3f}, "
-              f"|V|={Vmag_old:.6e} >= target |V|={Vmag_new:.6e}); done")
-        done = True
-    else:
-        # CONTINUATION: step the target |volume| from the current value to the target-AR
-        # volume in 10 equal increments, re-solving (warm-started from the previous
-        # converged surface) at each step. Stop at the first step that fails to
-        # converge or self-intersects; `best` holds the last surface that converged
-        # AND is non-self-intersecting (the revert target).
-        n_steps = 10
-        step = (Vmag_new - Vmag_old) / n_steps
-        reached = 0
-        for k in range(1, n_steps + 1):
-            if _try_volume(sgn * (Vmag_old + k * step)):
-                best = _snapshot(sgn * (Vmag_old + k * step))
-                reached = k
-            else:
-                break
-        if reached == n_steps:
-            # final increment converged: volume now corresponds to the target AR.
-            done = True
-            print(f"[AR] j={j}: AR={ar_target:g} reached by continuation in {n_steps} steps "
-                  f"(AR~{AR_old:.3f} -> {bs.surface.aspect_ratio():.3f}, "
-                  f"|V| {Vmag_old:.6e} -> {Vmag_new:.6e}); won't retry")
-        else:
-            print(f"[AR] j={j}: continuation stopped after {reached}/{n_steps} steps "
-                  f"(solve failed or self-intersected); reverting to last converged "
-                  f"|V|={abs(best['V']):.6e}; retry next iteration")
-
-    # adopt the chosen volume: restore that surface state, retarget, re-solve.
-    bs.surface.x = best['sdofs']
-    bs.res['iota'], bs.res['G'] = best['iota'], best['G']
-    bs.targetlabel = best['V']
-    bs.need_to_run_code = True
-    bs.run_code(best['iota'], best['G'])
-    if best['V'] != V_old:
-        print("[AR] adopting new volume; re-scaling penalty weights so none start above 1:")
-        # refresh the _restore_state warm-start snapshot to the adopted surface
-        for _res, _bs in zip(res_list, boozer_surfaces):
-            _res['sdofs'] = _bs.surface.x.copy()
-            _res['iota'] = _bs.res['iota']
-            _res['G'] = _bs.res['G']
-        # downweight any penalty whose CURRENT weighted contribution exceeds 1
-        for _name, _scaled in penalties.items():
-            _w = penalty_weights.get(_name)
-            if _w is None or _w.value == 0.:
-                continue
-            _prod = _scaled.J()
-            if not np.isfinite(_prod) or _prod <= 1.0:
-                continue
-            _bare = _prod / _w.value
-            while _w.value * _bare > 1.0:
-                _w *= 0.1
-            print(f"  {_name}: weight -> {_w.value:.3e}  (product was {_prod:.3e})")
-        J0, dJ0 = fun(dofs)
-        dat_dict['x'] = dofs.copy()
-        dat_dict['J'] = J0
-        dat_dict['dJ'] = dJ0.copy()
-    # surface has been restored + re-solved at best['V'] above, so this is the
-    # actual aspect ratio of the adopted surface.
-    print(f"[AR] j={j}: updated aspect ratio AR~{bs.surface.aspect_ratio():.3f} "
-          f"(target |V|={abs(best['V']):.6e})")
-    return done
+    # opt_bs is left solved at `state` by continue_to_flux; adopt it + do the bookkeeping.
+    print(f"[AR] j={j}: lowered AR {AR_old:.3f} -> {opt_bs.surface.aspect_ratio():.3f} "
+          f"(tf/tf_LCFS = {toroidal_flux(opt_bs)/tf_lcfs:.3f}, reached 80% = {reached}); "
+          f"re-scaling penalty weights so none start above 1:")
+    # refresh the _restore_state warm-start snapshots to the adopted surface
+    for _res, _bs in zip(res_list, boozer_surfaces):
+        _res['sdofs'] = _bs.surface.x.copy()
+        _res['iota'] = _bs.res['iota']
+        _res['G'] = _bs.res['G']
+    # downweight any penalty whose CURRENT weighted contribution exceeds 1
+    for _name, _scaled in penalties.items():
+        _w = penalty_weights.get(_name)
+        if _w is None or _w.value == 0.:
+            continue
+        _prod = _scaled.J()
+        if not np.isfinite(_prod) or _prod <= 1.0:
+            continue
+        _bare = _prod / _w.value
+        while _w.value * _bare > 1.0:
+            _w *= 0.1
+        print(f"  {_name}: weight -> {_w.value:.3e}  (product was {_prod:.3e})")
+    J0, dJ0 = fun(dofs)
+    dat_dict['x'] = dofs.copy()
+    dat_dict['J'] = J0
+    dat_dict['dJ'] = dJ0.copy()
 
 
 for j in range(15):
     dat_dict["iter"] = 0
 
-    # Aspect-ratio reduction (--AR 1/2): before the BFGS run, step the volume toward
-    # the target AR (5 or 4) by continuation (10 increments). See _attempt_ar_reduction.
-    if ar_enabled and not ar_done:
-        ar_done = _attempt_ar_reduction(j, dofs)
+    # Aspect-ratio reduction (--AR 1): for the FIRST 5 outer iterations, lower the
+    # optimization-surface AR toward the 80% LCFS toroidal-flux surface (the LCFS is
+    # computed on a separate BoozerSurface). See _attempt_ar_reduction.
+    if ar_enabled and j < 5:
+        _attempt_ar_reduction(j, dofs)
 
     try:
         res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15, callback=callback)

@@ -21,10 +21,11 @@ vessel_values=(0 1 2)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)
-# Aspect-ratio knob (boozer_all.py --AR, prefix.sh's 11th arg): 0 = leave AR as-is,
-# 1/2/3/4 = reduce the plasma aspect ratio toward ~5 / ~4 / ~3.5 / ~3. Each value is a
-# DISTINCT device (AR is in the folder name), so scanning {0..4} 5x's the task count.
-AR_values=(0 1 2 3 4)
+# Aspect-ratio knob (boozer_all.py --AR, prefix.sh's 11th arg): 0 = leave AR as-is, 1 =
+# for the first 5 outer BFGS iterations lower the AR toward the 80% LCFS toroidal-flux
+# surface. Each value is a DISTINCT device (AR is in the folder name), so scanning {0,1}
+# doubles the task count.
+AR_values=(0 1)
 ATTEMPTS=2
 
 mkdir -p logs

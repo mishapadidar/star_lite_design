@@ -735,34 +735,47 @@ def trace_interior(bfield, axis_pt, xp_pt, n_seeds=12, tmax_fl=2e5):
                        _phi_plane_rows(fieldlines_phi_hits, i), comments='', delimiter=',')
 
 
+# Theta resolution for the plotted cross sections. Kept equal to
+# star_lite_design.utils.lcfs.N_SI_THETA so the surfaces are DRAWN at the same fine
+# resolution the LCFS self-intersection check uses -- a curve that passes that check looks
+# identically clean here (keep the two in sync if either changes).
+NTHETA_CROSS = 1024
+
+
 def surface_cross_sections(surface, prefix='surface'):
     """(R, Z) cross sections of a surface at the manifold phi values, written as
     <prefix>_cross_<i>.txt. surface.cross_section takes the normalized angle phi/(2*pi)."""
     for ii, phi in enumerate(PHIS):
-        XYZ = surface.cross_section(phi, thetas=100)
+        XYZ = surface.cross_section(phi, thetas=NTHETA_CROSS)
         R, Z = np.hypot(XYZ[:, 0], XYZ[:, 1]), XYZ[:, 2]
         RZ = np.concatenate((R[:, None], Z[:, None]), axis=1)
         np.savetxt(OUT_DIR + f'{prefix}_cross_{ii}.txt', RZ, delimiter=',')
 
 
 def lcfs_cross_sections():
-    """If an LCFS_<ID>.json (written by mk_LCFS.py, which runs before this) sits next to
-    the design json, slice its Boozer surface at the manifold phi values into
-    LCFS_cross_<i>.txt so plot_manifolds.py can overlay the last closed flux surface on
-    the xs figure. The saved LCFS surface already carries its (solved) dofs, so the
-    cross section is a pure geometric slice -- no re-solve needed."""
-    matches = sorted(p.parent.glob('LCFS_*.json'))
-    if not matches:
-        proc0_print("  LCFS: no LCFS_*.json found; skipping LCFS cross sections")
-        return
-    # The LCFS sits at the feasibility boundary, so a cross_section can occasionally
-    # fail ("goes back on itself"); never let that take down the rest of the render.
-    try:
-        lcfs_surface = load(str(matches[0]))[0][0].surface
-        surface_cross_sections(lcfs_surface, prefix='LCFS')
-        proc0_print(f"  LCFS: wrote LCFS_cross_*.txt from {matches[0].name}")
-    except Exception as e:
-        proc0_print(f"  LCFS: failed to write cross sections ({e}); skipping overlay")
+    """If mk_LCFS.py (which runs before this) wrote LCFS_<ID>.json (the last closed flux
+    surface) and/or LCFS{90,80,70}_<ID>.json (the 90/80/70%-toroidal-flux surfaces) next
+    to the design json, slice each Boozer surface at the manifold phi values into
+    <prefix>_cross_<i>.txt so plot_manifolds.py can overlay them on the xs figure. The
+    saved surfaces already carry their (solved) dofs, so the cross section is a pure
+    geometric slice -- no re-solve needed. (`LCFS_*.json` does NOT match the
+    `LCFS<NN>_*.json`, so all are handled separately.)"""
+    for pattern, prefix in (('LCFS_*.json', 'LCFS'),
+                            ('LCFS90_*.json', 'LCFS90'),
+                            ('LCFS80_*.json', 'LCFS80'),
+                            ('LCFS70_*.json', 'LCFS70')):
+        matches = sorted(p.parent.glob(pattern))
+        if not matches:
+            proc0_print(f"  {prefix}: no {pattern} found; skipping {prefix} cross sections")
+            continue
+        # These surfaces sit at/near the feasibility boundary, so a cross_section can
+        # occasionally fail ("goes back on itself"); never let that take down the render.
+        try:
+            surf = load(str(matches[0]))[0][0].surface
+            surface_cross_sections(surf, prefix=prefix)
+            proc0_print(f"  {prefix}: wrote {prefix}_cross_*.txt from {matches[0].name}")
+        except Exception as e:
+            proc0_print(f"  {prefix}: failed to write cross sections ({e}); skipping overlay")
 
 
 def extract_vessel_cross_sections(sdf, nR=200, nZ=200, pad=0.05):

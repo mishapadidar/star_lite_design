@@ -186,6 +186,17 @@ def draw_panel(ax, i, interior_dot_size=1.0, leg_alpha=1.0, leg_lw=0.5, leg_zord
             ax.plot(v[:, 0], v[:, 1], '-', color='tab:purple', lw=1.2,
                     label='LCFS', zorder=5)
 
+    # Nested 90 / 80 / 70 %-toroidal-flux surfaces (written by mk_manifolds from
+    # LCFS{90,80,70}_*.json): same LCFS family (purple), drawn with distinct dashes so the
+    # successively inner surfaces are distinguishable.
+    for _tag, _ls in (('LCFS90', '--'), ('LCFS80', '-.'), ('LCFS70', (0, (1, 1)))):
+        f_n = p.parent / f"{_tag}_cross_{i}.txt"
+        if os.path.exists(f_n):
+            v = np.atleast_2d(np.loadtxt(f_n, delimiter=',', skiprows=1))
+            if v.size:
+                ax.plot(v[:, 0], v[:, 1], color='tab:purple', lw=1.0, ls=_ls,
+                        label=f'{_tag[4:]}% tor. flux', zorder=5)
+
     # Magenta dots where the modular coils cross this phi-plane (written by
     # mk_manifolds for every device), showing where the coils sit in the section.
     # Skipped in the zoom insets (show_coils=False) so they don't clutter / sit on
