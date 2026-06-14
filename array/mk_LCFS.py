@@ -49,6 +49,16 @@ dat = load(p)
 boozer_surfaces, iota_Gs, axes, fourth, sdf = dat
 bs = boozer_surfaces[0]
 
+# Self-intersection check for the continuation: test cross-sections on a FINE theta grid
+# at several phi planes. The default is_self_intersecting() checks a SINGLE angle on the
+# surface's own (coarse) theta grid, which can miss a fold that appears between
+# quadpoints or at a different toroidal angle. Half a field period [0, 0.5/nfp) suffices
+# when stellarator-symmetric (the other half is its mirror); the full field period
+# [0, 1/nfp) otherwise (SN / non-stellsym).
+N_SI_THETA = 1024                                                  # theta points per cross-section
+_si_max = (0.5 if bs.surface.stellsym else 1.0) / bs.surface.nfp
+SI_PHIS = np.linspace(0.0, _si_max, 8, endpoint=False)             # phi/2pi planes to check
+
 # Re-solve the loaded surface at its saved target volume so res (iota, G) is populated.
 # The (iota, G) initial guess is the saved iota_Gs[0] -- exactly how boozer_all.py and
 # boozer_singular_opt.py re-solve a freshly loaded surface.
@@ -81,7 +91,12 @@ def _try_volume(V):
     bs.need_to_run_code = True
     try:
         rr = bs.run_code(best['iota'], best['G'])
-        return bool(rr['success']) and not bs.surface.is_self_intersecting()
+        if not bool(rr['success']):
+            return False
+        # No cross-section may self-intersect, checked on a fine theta grid at each of
+        # the SI_PHIS planes (a degenerate cross-section here raises -> caught below).
+        return not any(bs.surface.is_self_intersecting(angle=float(phi), thetas=N_SI_THETA)
+                       for phi in SI_PHIS)
     except Exception:
         return False
 
