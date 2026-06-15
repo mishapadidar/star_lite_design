@@ -63,7 +63,8 @@ orig = snapshot(bs)
 grow_to_lcfs(bs, iota0, G0)               # leaves bs solved AT the LCFS
 ar = bs.surface.aspect_ratio()
 tf_lcfs = toroidal_flux(bs)
-print(f"LCFS {device_id}: aspect ratio {ar0:.4f} -> {ar:.4f}")
+iota_lcfs = float(bs.res['iota'])         # rotational transform on the LCFS
+print(f"LCFS {device_id}: aspect ratio {ar0:.4f} -> {ar:.4f}, iota = {iota_lcfs:.6f}")
 
 out = p.parent / f'LCFS_{device_id}.json'
 save([boozer_surfaces, iota_Gs, axes, fourth, sdf], str(out))
@@ -84,7 +85,9 @@ print(f"LCFS {device_id}: hits vessel = {int(lcfs_hits_vessel)}")
 # Nested frac*tf_LCFS surfaces (90/80/70%): each by continuation from the OPTIMIZATION
 # surface (`orig`). continue_to_flux returns (state, reached) and leaves bs at `state`; we
 # only save when the target flux was actually reached to 0.1%. Best-effort -- a failure on
-# one fraction just skips that surface.
+# one fraction just skips that surface. frac_iotas records the rotational transform on each
+# surface that was reached, for summary.txt.
+frac_iotas = {}
 for frac in TF_FRACS:
     tag = f"LCFS{int(round(frac * 100))}"
     try:
@@ -96,8 +99,9 @@ for frac in TF_FRACS:
         print(f"{tag} {device_id}: continuation did not reach {frac:.2f}*tf_LCFS to 0.1%; "
               f"{tag} not written.")
         continue
+    frac_iotas[tag] = float(bs.res['iota'])
     print(f"{tag} {device_id}: tf/tf_LCFS = {toroidal_flux(bs)/tf_lcfs:.4f}, "
-          f"aspect ratio {bs.surface.aspect_ratio():.4f}")
+          f"aspect ratio {bs.surface.aspect_ratio():.4f}, iota = {frac_iotas[tag]:.6f}")
     out_f = p.parent / f'{tag}_{device_id}.json'
     save([boozer_surfaces, iota_Gs, axes, fourth, sdf], str(out_f))
     print(f"wrote {out_f}")
@@ -111,4 +115,11 @@ with open(summary, 'a') as f:
     f.write(f"  {'LCFS_aspect_ratio':<30s} {ar:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
     f.write(f"  {'LCFS_hits_vessel':<30s} "
             f"{(1.0 if lcfs_hits_vessel else 0.0):.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
-print(f"appended LCFS_aspect_ratio + LCFS_hits_vessel to {summary}")
+    # Rotational transform on the LCFS and on each nested toroidal-flux-fraction surface
+    # that was reached (90/80/70%). Surfaces that the continuation did not reach are omitted.
+    f.write(f"  {'LCFS_iota':<30s} {iota_lcfs:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
+    for frac in TF_FRACS:
+        tag = f"LCFS{int(round(frac * 100))}"
+        if tag in frac_iotas:
+            f.write(f"  {tag + '_iota':<30s} {frac_iotas[tag]:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
+print(f"appended LCFS_aspect_ratio + LCFS_hits_vessel + LCFS/90/80/70 iota to {summary}")

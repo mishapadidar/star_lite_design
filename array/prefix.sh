@@ -32,9 +32,10 @@ null="$9"
 # 0 (unpolished) or exactly this many aux coils.
 NUM_AUX_POLISH="${10:-10}"
 
-# Aspect-ratio knob forwarded to boozer_all.py (--AR): 0 = leave AR as-is, 1 = reduce
-# the plasma aspect ratio toward ~5. It is part of the device identity, so it also
-# goes into the folder name (task_name) below.
+# Aspect-ratio / on-axis-iota knob forwarded to boozer_all.py (--AR): 0 = leave AR as-is and
+# do NOT pin the on-axis iota; 1 = leave AR as-is but pin the on-axis iota; 2 = reduce the
+# plasma aspect ratio toward ~5 AND pin the on-axis iota. It is part of the device identity,
+# so it also goes into the folder name (task_name) below.
 AR="${11:-0}"
 
 # Attempt index (perturbation seed). LAST positional arg so the prefix args mirror
