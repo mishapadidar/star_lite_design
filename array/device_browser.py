@@ -123,8 +123,6 @@ PARAM_HELP = {
     "null":     "DN = double-null (stellsym); SN = single-null (bottom X-point pushed to the lower wall).",
 }
 
-DEFAULT_MAX_REL_ERR = 0.10   # percent  (i.e. 0.001 in fraction)
-
 NUMERIC_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 FAVORITES_FILENAME = ".device_favorites.json"
@@ -497,14 +495,6 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Thresholds")
 
-    show_all_rerr = st.checkbox("Show all (ignore rel-err threshold)", value=False)
-    max_rerr_pct = st.number_input(
-        "Max constraint relative error (%)",
-        min_value=0.0, value=DEFAULT_MAX_REL_ERR, step=0.01,
-        format="%.3f",
-        disabled=show_all_rerr,
-    )
-
     fav_only = st.checkbox(
         f"⭐ Favorites only ({len(favorites)})",
         value=False,
@@ -544,6 +534,27 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.subheader("Sort")
+    # Server-side sort: this is what the device table AND the ← / → navigation follow. (The
+    # table's header-click sorting only reorders the view client-side -- Streamlit doesn't report
+    # it to Python, so navigation can't follow it; this control makes the order explicit so the
+    # arrows always step through devices in the order you chose.)
+    SORT_QS = "QS error (%)"
+    _metric_names, _seen = [], set()
+    for _r in records:
+        for _m in _r.metrics:
+            if _m.name not in _seen:
+                _seen.add(_m.name)
+                _metric_names.append(_m.name)
+    sort_options = [SORT_QS] + sorted(_metric_names)
+    sort_by = st.selectbox(
+        "Sort devices by", sort_options, index=0,
+        help="Orders the table and the ← / → navigation (e.g. pick 'aspect_ratio' to step "
+             "through devices by aspect ratio).",
+    )
+    sort_desc = st.checkbox("Descending", value=False)
+
+    st.markdown("---")
     st.subheader("Parameter filters")
 
     available_keys = [k for k in PARAM_ORDER
@@ -577,8 +588,6 @@ with st.sidebar:
 
 
 # ── Apply filters ───────────────────────────────────────────────────────
-max_rerr_thr = None if show_all_rerr else float(max_rerr_pct) / 100.0
-
 def keep(r: Device) -> bool:
     rk = device_key(r, root_path)
     # Hidden handling: "Hidden only" shows just the hidden devices; otherwise hidden
@@ -591,9 +600,6 @@ def keep(r: Device) -> bool:
     for k, choice in selections.items():
         if choice != "Any" and r.params.get(k) != choice:
             return False
-    if (max_rerr_thr is not None and r.max_rel_error is not None
-            and r.max_rel_error > max_rerr_thr):
-        return False
     if fav_only and rk not in favorites:
         return False
     if intersect_choice != "Any":
@@ -636,9 +642,17 @@ if revealed_key is not None and all(device_key(r, root_path) != revealed_key for
     _rev = next((r for r in records if device_key(r, root_path) == revealed_key), None)
     if _rev is not None:
         filtered.append(_rev)
+def _sort_value(d: Device) -> Optional[float]:
+    if sort_by == SORT_QS:
+        return d.nonqs_pct
+    return next((m.value for m in d.metrics if m.name == sort_by), None)
+
+# Order the device list by the chosen column; this is the order BOTH the table and the ← / →
+# navigation follow. Missing values always sort to the END (regardless of direction); ties are
+# broken by name (ascending) for a stable order.
 filtered.sort(key=lambda d: (
-    d.nonqs_pct is None,
-    d.nonqs_pct if d.nonqs_pct is not None else float("inf"),
+    _sort_value(d) is None,
+    -(_sort_value(d) or 0.0) if sort_desc else (_sort_value(d) or 0.0),
     d.name,
 ))
 
@@ -648,8 +662,6 @@ filtered.sort(key=lambda d: (
 # the sidebar. The "Showing X of Y devices" status is rendered into the sidebar
 # slot above the filters.
 notes = []
-if max_rerr_thr is not None:
-    notes.append(f"max rel. err ≤ {max_rerr_thr*100:g}%")
 if fav_only:
     notes.append("favorites only")
 if hidden_only:
@@ -696,11 +708,10 @@ def df_for_devices(records: list[Device]) -> pd.DataFrame:
                                        + list(keys) + list(metric_col.values())))
 
 # ── Keyboard / button navigation + current-device resolution ───────────
-# The plotted device is pinned to the TOP of the table, so the displayed row order
-# differs from the underlying (stable) device order. We therefore track the
-# selection by device KEY (identity) rather than row index, so it survives both
-# filtering and the reordering. It is moved by the ◀/▶ buttons (and the ← / →
-# arrows bound to them), which step through the stable order, and by a row click.
+# The table is shown in the navigation (sorted) order and the selection is tracked by device
+# KEY (identity), not row index, so it survives filtering/sorting. It is moved by the ◀/▶
+# buttons (and the ← / → arrows bound to them), which step through this same order, and by a
+# row click. Because the displayed order IS the navigation order, → / ← load the adjacent row.
 keys_list = [device_key(d, root_path) for d in filtered]
 n_dev = len(filtered)
 st.session_state["nav_keys"] = keys_list   # read by the button callbacks (run pre-script)
@@ -732,10 +743,12 @@ def _table_selected_row():
         rows = sel.get("rows")
     return rows[0] if rows else None
 
-# A FRESH click (selection row changed since last render) selects the device that
-# sat at that DISPLAY row last render — mapped through the previous render's order,
-# since the table is reordered. A stale, unchanged selection does NOT move us, so
-# arrow/button navigation isn't snapped back to the last-clicked row.
+# A FRESH click (selection row changed since last render) selects the device at that row. A
+# stale, unchanged selection does NOT move us, so arrow/button navigation isn't snapped back to
+# the last-clicked row. The table is shown in the SAME (sorted) order the ← / → navigation uses
+# (no pin-to-top), so a click maps straight to keys_list[row] and pressing → / ← loads the very
+# next / previous row. A FIXED widget key is used so Streamlit re-sends the data and the list
+# updates in place each step (a per-step key would remount and not repaint reliably).
 _prev_display_keys = st.session_state.get("display_keys", [])
 _clicked = _table_selected_row()
 if (_clicked is not None and _clicked != st.session_state.get("last_clicked")
@@ -748,12 +761,13 @@ st.session_state["last_clicked"] = _clicked
 # (The device-ID search is handled before filtering — it reveals + selects the
 # match, so sel_key_nav already points at it and the device is in keys_list.)
 
-# resolve the plotted device, then build the table with it PINNED to the top row
+# Resolve the plotted device. The table is drawn in the navigation (sorted) order, with the
+# selected row highlighted in place (see _highlight_plotted) -- NOT pinned to the top -- so the
+# displayed row order matches the ← / → order exactly.
 sel_idx = keys_list.index(st.session_state["sel_key_nav"])
 selected_device = filtered[sel_idx]
-display_order = [sel_idx] + [i for i in range(n_dev) if i != sel_idx]
-df = df_for_devices([filtered[i] for i in display_order])
-st.session_state["display_keys"] = [keys_list[i] for i in display_order]
+df = df_for_devices(filtered)
+st.session_state["display_keys"] = list(keys_list)
 
 # Currently-plotted device name, spanning the full width (both columns) in a small
 # font (replaces the old per-column subheader).
@@ -942,12 +956,12 @@ with right:
 # ── Device list (full window width, bottom row) ─────────────────────────
 st.subheader("Devices")
 
-# st.dataframe row selection (Streamlit ≥ 1.35) is the click INPUT; the click is
-# read back above before this is drawn. The plotted device is pinned to the TOP
-# (row 0) by display_order, and that row is highlighted via the Styler, applied
-# AFTER the gradients so the highlight wins on that row.
+# st.dataframe row selection (Streamlit ≥ 1.35) is the click INPUT; the click is read back
+# above before this is drawn. The table is in navigation (sorted) order; the plotted device's
+# row (sel_idx) is highlighted IN PLACE via the Styler, applied AFTER the gradients so the
+# highlight wins on that row.
 def _highlight_plotted(row):
-    if row.name == 0:
+    if row.name == sel_idx:
         return ["background-color: rgba(31, 119, 180, 0.45); font-weight: 600"] * len(row)
     return [""] * len(row)
 
@@ -1002,39 +1016,44 @@ components.html(
     """
     <script>
     const doc = window.parent.document;
-    if (!doc._devArrowNavBound) {
-      doc._devArrowNavBound = true;
-      doc.addEventListener('keydown', function (e) {
-        const t = e.target || {};
-        const tag = (t.tagName || '').toLowerCase();
-        // Ctrl-S / Cmd-S: (un)favourite the currently plotted device. Handled
-        // before the input guard (and preventDefault'd) so it works anywhere
-        // and suppresses the browser's Save dialog.
-        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
-          const fb = Array.from(doc.querySelectorAll('button'))
-                          .find(b => (b.innerText || '').includes('Favourite'));
-          if (fb) { e.preventDefault(); fb.click(); }
-          return;
-        }
-        // Ctrl-D / Cmd-D: hide (or unhide) the current device. preventDefault'd to
-        // suppress the browser's bookmark dialog. Matched by the "Ctrl-D" label.
-        if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
-          const hb = Array.from(doc.querySelectorAll('button'))
-                          .find(b => (b.innerText || '').includes('Ctrl-D'));
-          if (hb) { e.preventDefault(); hb.click(); }
-          return;
-        }
-        if (tag === 'input' || tag === 'textarea' || t.isContentEditable) return;
-        if (t.closest && t.closest('[data-baseweb="select"],[data-baseweb="popover"],[role="listbox"],[role="combobox"]')) return;
-        let mark = null;
-        if (e.key === 'ArrowLeft')       mark = '◀';  /* ◀ */
-        else if (e.key === 'ArrowRight') mark = '▶';  /* ▶ */
-        if (!mark) return;
-        const btn = Array.from(doc.querySelectorAll('button'))
-                         .find(b => (b.innerText || '').includes(mark));
-        if (btn) { e.preventDefault(); btn.click(); }
-      });
+    // Re-bind every run (remove the previously-stored handler, add a fresh one) instead of a
+    // persistent guard: a one-shot guard survives reruns AND code edits on the already-open
+    // page, leaving a stale listener bound. CAPTURE phase + stopPropagation so the keys win
+    // even when the data-grid (after a row click) or a button has focus.
+    if (doc._devKeyNav) {
+      doc.removeEventListener('keydown', doc._devKeyNav, true);
+      doc.removeEventListener('keydown', doc._devKeyNav, false);
     }
+    doc._devKeyNav = function (e) {
+      const t = e.target || {};
+      const tag = (t.tagName || '').toLowerCase();
+      // Ctrl-S / Cmd-S: (un)favourite the currently plotted device. Handled before the input
+      // guard (and preventDefault'd) so it works anywhere and suppresses the Save dialog.
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        const fb = Array.from(doc.querySelectorAll('button'))
+                        .find(b => (b.innerText || '').includes('Favourite'));
+        if (fb) { e.preventDefault(); e.stopPropagation(); fb.click(); }
+        return;
+      }
+      // Ctrl-D / Cmd-D: hide (or unhide) the current device. preventDefault'd to suppress the
+      // browser's bookmark dialog. Matched by the "Ctrl-D" label.
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+        const hb = Array.from(doc.querySelectorAll('button'))
+                        .find(b => (b.innerText || '').includes('Ctrl-D'));
+        if (hb) { e.preventDefault(); e.stopPropagation(); hb.click(); }
+        return;
+      }
+      if (tag === 'input' || tag === 'textarea' || t.isContentEditable) return;
+      if (t.closest && t.closest('[data-baseweb="select"],[data-baseweb="popover"],[role="listbox"],[role="combobox"]')) return;
+      let mark = null;
+      if (e.key === 'ArrowLeft')       mark = '◀';  /* ◀ */
+      else if (e.key === 'ArrowRight') mark = '▶';  /* ▶ */
+      if (!mark) return;
+      const btn = Array.from(doc.querySelectorAll('button'))
+                       .find(b => (b.innerText || '').includes(mark));
+      if (btn) { e.preventDefault(); e.stopPropagation(); btn.click(); }
+    };
+    doc.addEventListener('keydown', doc._devKeyNav, true);
     </script>
     """,
     height=0,
