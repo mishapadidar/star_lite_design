@@ -959,6 +959,15 @@ for j in range(5):
         vessel_shape_err = (max(sdf.max_kappa_radius() - 1.0, 0.0)
                             + max(sdf.max_dr_ds() - 1.0, 0.0)
                             + sdf.arclength_variation())
+    elif isinstance(sdf, PillPipeSDF):
+        # rounded-rect validity (corner radius r <= half-dimensions) AND the
+        # pipe-radius regime rr < r (corner curvature 1/r, so rr*kappa < 1).
+        bx, by, r, rr = sdf.local_full_x
+        vessel_shape_err = max([r - bx, r - by, rr - r, 0.])
+    elif isinstance(sdf, TorusSDF):
+        # torus regime: minor radius < major radius (r*kappa = r/R < 1).
+        r, R = sdf.local_full_x
+        vessel_shape_err = max(r - R, 0.)
 
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     coil_on_vessel_err = (

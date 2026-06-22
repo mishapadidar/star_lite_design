@@ -63,7 +63,11 @@ def quadratic_threshold_pill_pipe(pts, params, sign, threshold):
     bx, by, r, rr = params
     cons1 = jnp.maximum(r-bx, 0)**2
     cons2 = jnp.maximum(r-by, 0)**2
-    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons1 + cons2
+    # valid-tube regime: the pipe radius rr must be smaller than the rounded-corner
+    # radius r (the corner curvature is 1/r, so rr*kappa = rr/r < 1), else the pipe
+    # self-intersects at a corner and the SDF is no longer exact.
+    cons3 = jnp.maximum(rr-r, 0)**2
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons1 + cons2 + cons3
 
 def quadratic_distance_pill_pipe(pts, params, sign, threshold):
     sls = sdf_pill_pipe(pts, params, sign)
@@ -132,8 +136,12 @@ def sdf_torus(pts, params, sign):
 
 def quadratic_threshold_torus(pts, params, sign, threshold):
     sls = sdf_torus(pts, params, sign)
-    d1, d2 = params
-    return jnp.mean(jnp.maximum(threshold-sls, 0)**2)
+    r, R = params
+    # valid-torus regime: the minor radius must be smaller than the major radius
+    # (the circle curvature is 1/R, so r*kappa = r/R < 1), else the torus
+    # self-intersects through the hole and the SDF is no longer exact.
+    cons = jnp.maximum(r-R, 0)**2
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
 
 def quadratic_distance_torus(pts, params, sign, threshold):
     sls = sdf_torus(pts, params, sign)

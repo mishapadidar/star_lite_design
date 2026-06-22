@@ -1198,7 +1198,13 @@ for j in range(15):
     vessel_shape_err = 0.
     if vessel_id == 0:
         bx, by, r, rr = sdf.local_full_x.copy()
-        vessel_shape_err = max([r-bx, r-by, 0])
+        # rounded-rect validity (corner radius r <= half-dimensions) AND the
+        # pipe-radius regime rr < r (corner curvature 1/r, so rr*kappa < 1).
+        vessel_shape_err = max([r-bx, r-by, rr-r, 0])
+    elif vessel_id == 2:
+        r, R = sdf.local_full_x.copy()
+        # torus regime: minor radius < major radius (r*kappa = r/R < 1).
+        vessel_shape_err = max(r-R, 0.)
     elif isinstance(sdf, HelicalVesselSDF):
         # Helical vessel geometry constraints, all feeding the plasma-vessel-margin
         # weight escalation below (the geometric penalty rides inside the vessel
