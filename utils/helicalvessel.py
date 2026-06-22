@@ -189,14 +189,22 @@ class HelicalVesselSDF(Optimizable):
                                            stellsym=self.stellsym)
 
     @classmethod
-    def from_curve_xyz_fourier_symmetries(cls, curve, rr, stellsym=None, **kwargs):
+    def from_curve_xyz_fourier_symmetries(cls, curve, rr, stellsym=None, num_modes=6, **kwargs):
         """Build directly from a simsopt CurveXYZFourierSymmetries, copying its
         harmonics, nfp, and ntor. ``stellsym`` defaults to the curve's own flag:
         a stellarator-symmetric curve yields a stellsym vessel (xs/yc/zc absent),
-        a non-symmetric one yields a full vessel seeded with the curve's xs/yc/zc."""
+        a non-symmetric one yields a full vessel seeded with the curve's xs/yc/zc.
+
+        ``num_modes`` TRUNCATES the centerline Fourier order: only modes
+        m = 0..num_modes are kept (cosine families) and m = 1..num_modes (sine),
+        so the resulting vessel has order min(num_modes, curve.order). The higher
+        harmonics of the (typically order-16) axis are dropped, giving a much
+        smaller, smoother vessel dof set. Pass ``num_modes=curve.order`` (or
+        larger) to keep every mode."""
         # name -> value over ALL dofs (free and fixed); strip any 'ObjName:' prefix
         d = {n.split(':')[-1]: v for n, v in zip(curve.full_dof_names, curve.full_x)}
-        N, nfp = curve.order, curve.nfp
+        nfp = curve.nfp
+        N = min(int(num_modes), curve.order)   # truncated Fourier order
         ntor = getattr(curve, 'ntor', 1)
         if stellsym is None:
             stellsym = curve.stellsym
