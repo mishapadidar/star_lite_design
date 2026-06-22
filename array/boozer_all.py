@@ -811,6 +811,9 @@ def callback(dofs):
     table2.add_row('minimum coil-clearance distance', f'{min_coil_clearance_distance:.3e}')
 
     table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
+    if isinstance(sdf, HelicalVesselSDF):
+        # exact-SDF regime requires max_t kappa(t)*R < 1 on the centerline
+        table2.add_row('max kappa*R (helical vessel)', f'{sdf.rr * float(np.max(sdf.kappa())):.4e}')
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
     
     table2.add_row('fieldline mean-z', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in meanzs]))
