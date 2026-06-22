@@ -737,8 +737,11 @@ def callback(dofs):
 
     table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
     if isinstance(sdf, HelicalVesselSDF):
-        # exact-SDF regime requires max_t kappa(t)*R < 1 on the centerline
-        table2.add_row('max kappa*R (helical vessel)', f'{sdf.rr * float(np.max(sdf.kappa())):.4e}')
+        # exact-SDF regime requires max_t kappa(t)*R(t) < 1 on the centerline;
+        # arclength variation should stay near 0 (uniform parametrization)
+        table2.add_row('max kappa*R (helical vessel)', f'{sdf.max_kappa_radius():.4e}')
+        table2.add_row('max |dR/ds| (helical vessel)', f'{sdf.max_dr_ds():.4e}')
+        table2.add_row('centerline arclength variation', f'{sdf.arclength_variation():.4e}')
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
     table2.add_row('minimum aux-to-modular coil distance',
                    ' '.join([f'{a.shortest_distance():.3e}' for a in aux_coil_distances]))
@@ -945,13 +948,17 @@ for j in range(5):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     plasma_vessel_margin_err = max(PLASMA_VESSEL_MARGIN_THRESHOLD-np.min([min_xpoint_to_vessel, min_boozer_surface_to_vessel]), 0)/np.abs(PLASMA_VESSEL_MARGIN_THRESHOLD)
 
-    # Helical vessel: the exact-SDF regime requires rr * kappa_max < 1 along the
-    # centerline. The violation rr*kappa_max - 1 (>0 only out of regime) escalates
-    # the plasma-vessel-margin weight below, so the weight grows whenever the
-    # kappa*R < 1 constraint is not satisfied.
+    # Helical vessel geometry constraints (the geometric penalty rides inside the
+    # vessel penalty, so its weight IS the plasma-vessel-margin weight escalated
+    # below): max_t R(t)*kappa(t) < 1 and max_t |dR/ds| < 1 (violations > 0 only out
+    # of regime), plus the constant-arclength penalty (centerline-speed squared
+    # coefficient of variation), so the weight grows whenever kappa*R >= 1, the
+    # radius slope |dR/ds| >= 1, OR the arclength variation is large.
     vessel_shape_err = 0.
     if isinstance(sdf, HelicalVesselSDF):
-        vessel_shape_err = max(sdf.rr * float(np.max(sdf.kappa())) - 1.0, 0.0)
+        vessel_shape_err = (max(sdf.max_kappa_radius() - 1.0, 0.0)
+                            + max(sdf.max_dr_ds() - 1.0, 0.0)
+                            + sdf.arclength_variation())
 
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     coil_on_vessel_err = (
@@ -1166,6 +1173,17 @@ final_metrics = {
     'fieldline_meanz':            (max(Jfl.max_distance() for Jfl in meanzs),      FIELDLINE_MEANZ_THRESHOLD,     meanz_err if FIELDLINE_MEANZ_WEIGHT.value != 0. else 0.0),
     'fieldline_meandist':         (max_fieldline_mean_distance,                    FIELDLINE_MEANDIST_THRESHOLD,  fieldline_mean_distance_err if FIELDLINE_MEANDIST_WEIGHT.value != 0. else 0.0),
 }
+
+# Helical vessel geometry: report the regime metrics (both must stay < 1) and the
+# centerline arclength variation in summary.txt. The two regime constraints carry a
+# relative violation (so a geometrically invalid tube fails the 0.1% gate); the
+# arclength variation is descriptive (escalated during the optimization, not gated).
+if isinstance(sdf, HelicalVesselSDF):
+    _kr = sdf.max_kappa_radius()
+    _drds = sdf.max_dr_ds()
+    final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
+    final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
+    final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
 
 # record the solved auxiliary-coil parameters (currents in Amperes) per fl.
 for fi, fl in enumerate(sing_fls):

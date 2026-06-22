@@ -190,14 +190,19 @@ elif vessel_id == 2:
     r = 0.2
     R = 0.5
     sdf = TorusSDF(r, R)
-elif vessel_id == 3:
-    # Tube of minor radius rr (same as the other vessels) whose centerline STARTS
-    # as the magnetic axis; all centerline harmonics are free design variables.
-    # stellsym follows the device: DN -> symmetric vessel (no xs/yc/zc harmonics),
-    # SN -> full non-symmetric vessel.
+elif vessel_id in (3, 4):
+    # Helical tube of minor radius rr (same as the other vessels) whose centerline
+    # STARTS as the magnetic axis; all centerline harmonics are free design
+    # variables. stellsym follows the device: DN -> symmetric vessel (no xs/yc/zc
+    # harmonics), SN -> full non-symmetric vessel.
+    #   vessel_id 3: CONSTANT radius (radius_num_modes=0).
+    #   vessel_id 4: VARIABLE radius R(t), same Fourier order as the centerline.
     rr = 0.2
+    HELICAL_NUM_MODES = 6
+    radius_num_modes = HELICAL_NUM_MODES if vessel_id == 4 else 0
     sdf = HelicalVesselSDF.from_curve_xyz_fourier_symmetries(
-        axes[0].curve, rr, stellsym=(null_type == 'DN'))
+        axes[0].curve, rr, stellsym=(null_type == 'DN'),
+        num_modes=HELICAL_NUM_MODES, radius_num_modes=radius_num_modes)
 else:
     raise Exception('vessel not implemented')
 
@@ -812,8 +817,11 @@ def callback(dofs):
 
     table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
     if isinstance(sdf, HelicalVesselSDF):
-        # exact-SDF regime requires max_t kappa(t)*R < 1 on the centerline
-        table2.add_row('max kappa*R (helical vessel)', f'{sdf.rr * float(np.max(sdf.kappa())):.4e}')
+        # exact-SDF regime requires max_t kappa(t)*R(t) < 1 on the centerline;
+        # arclength variation should stay near 0 (uniform parametrization)
+        table2.add_row('max kappa*R (helical vessel)', f'{sdf.max_kappa_radius():.4e}')
+        table2.add_row('max |dR/ds| (helical vessel)', f'{sdf.max_dr_ds():.4e}')
+        table2.add_row('centerline arclength variation', f'{sdf.arclength_variation():.4e}')
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
     
     table2.add_row('fieldline mean-z', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in meanzs]))
@@ -1191,12 +1199,17 @@ for j in range(15):
     if vessel_id == 0:
         bx, by, r, rr = sdf.local_full_x.copy()
         vessel_shape_err = max([r-bx, r-by, 0])
-    elif vessel_id == 3:
-        # Helical vessel: the exact-SDF regime requires rr * kappa_max < 1 along
-        # the centerline. The violation rr*kappa_max - 1 (>0 only out of regime)
-        # feeds the plasma-vessel-margin weight escalation below, so the weight
-        # grows whenever the kappa*R < 1 constraint is not satisfied.
-        vessel_shape_err = max(sdf.rr * float(np.max(sdf.kappa())) - 1.0, 0.0)
+    elif isinstance(sdf, HelicalVesselSDF):
+        # Helical vessel geometry constraints, all feeding the plasma-vessel-margin
+        # weight escalation below (the geometric penalty rides inside the vessel
+        # penalty, so its weight IS the plasma-vessel-margin weight):
+        #   - curvature regime: max_t R(t)*kappa(t) < 1; violation max(max R*kappa-1,0).
+        #   - radius-slope regime: max_t |dR/ds| < 1; violation max(max|dR/ds|-1,0).
+        #   - constant-arclength: the centerline-speed squared coefficient of
+        #     variation, so the weight grows when the arclength variation is large.
+        vessel_shape_err = (max(sdf.max_kappa_radius() - 1.0, 0.0)
+                            + max(sdf.max_dr_ds() - 1.0, 0.0)
+                            + sdf.arclength_variation())
 
     msc = [J.J() for J in Jmscs]
     msc_err = max(np.max(msc) - MEAN_SQUARED_CURVATURE_THRESHOLD, 0)/np.abs(MEAN_SQUARED_CURVATURE_THRESHOLD)
@@ -1408,6 +1421,17 @@ final_metrics = {
                                    else np.max([np.abs(np.trace(d.matrix) - 2) for d in tmos]),
                                                                                    MONODROMY_THRESHOLD,           monodromy_err if MONODROMY_WEIGHT.value != 0. else 0.0),
 }
+
+# Helical vessel geometry: report the regime metrics (both must stay < 1) and the
+# centerline arclength variation in summary.txt. The two regime constraints carry a
+# relative violation (so a geometrically invalid tube fails the 0.1% gate); the
+# arclength variation is descriptive (escalated during the optimization, not gated).
+if isinstance(sdf, HelicalVesselSDF):
+    _kr = sdf.max_kappa_radius()
+    _drds = sdf.max_dr_ds()
+    final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
+    final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
+    final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
 
 # also record the full 2x2 monodromy (tangent) matrix per X-point so the
 # device browser can display it; entries are descriptive (no threshold/error).

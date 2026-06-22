@@ -17,7 +17,10 @@ wells=(OFF 0 -100)
 binary_values=(0 1)
 mono_values=(0 1 2)
 configs=(0 1 2 3)
-vessel_values=(0 1 2 3)
+# Vessel geometry: 0/1/2 = pill-pipe / renaissance / torus; 3 = constant-radius
+# helical (centerline starts as the magnetic axis); 4 = variable-radius helical
+# (radius R(t) is a Fourier series of the same order as the centerline).
+vessel_values=(0 1 2 3 4)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)
