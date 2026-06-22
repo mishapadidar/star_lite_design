@@ -67,6 +67,7 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
+from star_lite_design.utils.helicalvessel import HelicalVesselSDF
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
@@ -352,6 +353,17 @@ for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing
         raise SystemExit(1)
     new_axes.append(nax)
 boozer_surfaces, axes = new_boozer_surfaces, new_axes
+
+# Snapshot the INITIAL device WITH the auxiliary coils, BEFORE any design polishing.
+# This device carries the aux coils but has not been optimized, so it may not satisfy
+# all the design constraints; it is saved purely as an unpolished reference. prefix.sh
+# copies it off scratch regardless of whether the polished device passes its gate.
+os.makedirs(OUT_DIR, exist_ok=True)
+save([boozer_surfaces, iota_Gs, axes, sing_fls, sdf],
+     OUT_DIR + f'design_unpolished_final_{DEVICE_ID}.json')
+with open(OUT_DIR + f'design_unpolished_final_{DEVICE_ID}.yaml', 'w') as f:
+    yaml.dump(config, f, default_flow_style=False)
+print(f"wrote {OUT_DIR}design_unpolished_final_{DEVICE_ID}.json (initial device with aux coils, unpolished)")
 
 
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
@@ -930,6 +942,14 @@ for j in range(5):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     plasma_vessel_margin_err = max(PLASMA_VESSEL_MARGIN_THRESHOLD-np.min([min_xpoint_to_vessel, min_boozer_surface_to_vessel]), 0)/np.abs(PLASMA_VESSEL_MARGIN_THRESHOLD)
 
+    # Helical vessel: the exact-SDF regime requires rr * kappa_max < 1 along the
+    # centerline. The violation rr*kappa_max - 1 (>0 only out of regime) escalates
+    # the plasma-vessel-margin weight below, so the weight grows whenever the
+    # kappa*R < 1 constraint is not satisfied.
+    vessel_shape_err = 0.
+    if isinstance(sdf, HelicalVesselSDF):
+        vessel_shape_err = max(sdf.rr * float(np.max(sdf.kappa())) - 1.0, 0.0)
+
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     coil_on_vessel_err = (
         max(COIL_ON_VESSEL_THRESHOLD - min_coil_on_vessel_distance, 0)
@@ -973,9 +993,9 @@ for j in range(5):
     if aux_err > 0.001 and AUX_CURRENT_WEIGHT.value != 0.:
         AUX_CURRENT_WEIGHT *= 10
         print("AUX CURRENT ERROR (dependent + independent)", aux_err)
-    if plasma_vessel_margin_err > 0.001 and PLASMA_VESSEL_MARGIN_WEIGHT.value != 0.:
+    if (plasma_vessel_margin_err > 0.001 or vessel_shape_err > 0.001) and PLASMA_VESSEL_MARGIN_WEIGHT.value != 0.:
         PLASMA_VESSEL_MARGIN_WEIGHT*=10
-        print("PLASMA-VESSEL MARGIN ERROR", plasma_vessel_margin_err)
+        print("PLASMA-VESSEL MARGIN ERROR", plasma_vessel_margin_err, "VESSEL SHAPE ERROR", vessel_shape_err)
     # on-vessel vs clearance is encoded by which weight is nonzero (the other is
     # 0 in the config), so the weight check alone selects the active constraint.
     if coil_on_vessel_err > 0.001 and COIL_ON_VESSEL_WEIGHT.value != 0.:

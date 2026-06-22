@@ -38,6 +38,7 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
+from star_lite_design.utils.helicalvessel import HelicalVesselSDF
 
 from star_lite_design.utils import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
@@ -189,6 +190,14 @@ elif vessel_id == 2:
     r = 0.2
     R = 0.5
     sdf = TorusSDF(r, R)
+elif vessel_id == 3:
+    # Tube of minor radius rr (same as the other vessels) whose centerline STARTS
+    # as the magnetic axis; all centerline harmonics are free design variables.
+    # stellsym follows the device: DN -> symmetric vessel (no xs/yc/zc harmonics),
+    # SN -> full non-symmetric vessel.
+    rr = 0.2
+    sdf = HelicalVesselSDF.from_curve_xyz_fourier_symmetries(
+        axes[0].curve, rr, stellsym=(null_type == 'DN'))
 else:
     raise Exception('vessel not implemented')
 
@@ -1179,6 +1188,12 @@ for j in range(15):
     if vessel_id == 0:
         bx, by, r, rr = sdf.local_full_x.copy()
         vessel_shape_err = max([r-bx, r-by, 0])
+    elif vessel_id == 3:
+        # Helical vessel: the exact-SDF regime requires rr * kappa_max < 1 along
+        # the centerline. The violation rr*kappa_max - 1 (>0 only out of regime)
+        # feeds the plasma-vessel-margin weight escalation below, so the weight
+        # grows whenever the kappa*R < 1 constraint is not satisfied.
+        vessel_shape_err = max(sdf.rr * float(np.max(sdf.kappa())) - 1.0, 0.0)
 
     msc = [J.J() for J in Jmscs]
     msc_err = max(np.max(msc) - MEAN_SQUARED_CURVATURE_THRESHOLD, 0)/np.abs(MEAN_SQUARED_CURVATURE_THRESHOLD)
