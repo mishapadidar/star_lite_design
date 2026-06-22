@@ -82,6 +82,8 @@ SYNC_INCLUDES=(
   --include='design_opt_final_*.yaml'
   --include='design_polished_final_*.json'
   --include='design_polished_final_*.yaml'
+  --include='design_unpolished_final_*.json'
+  --include='design_unpolished_final_*.yaml'
   --include='LCFS_*.json'
   --include='LCFS[0-9][0-9]_*.json'
   --include='singular.json'
@@ -122,6 +124,23 @@ sync_dir() {
   dest="$HOME_DIR/output/$(shard "$name")"
   mkdir -p "$dest"
   rsync -a "${SYNC_INCLUDES[@]}" "$d/" "$dest/$name/"
+}
+
+# Copy ONLY the unpolished (with-aux, pre-polish) design files of a local device
+# dir to its ceph shard. The unpolished device carries the aux coils but has not
+# been optimized, so it may not meet all design constraints; we keep it as a
+# reference EVEN WHEN the polished device is later discarded for being out of
+# spec, so it must be copied off scratch before any rm -rf of the polish dir.
+sync_unpolished() {
+  local d="${1%/}" name dest
+  [ -d "$d" ] || return 0
+  ls "$d"/design_unpolished_final_*.json >/dev/null 2>&1 || return 0
+  name="$(basename "$d")"
+  dest="$HOME_DIR/output/$(shard "$name")/$name"
+  mkdir -p "$dest"
+  rsync -a --include='design_unpolished_final_*.json' \
+           --include='design_unpolished_final_*.yaml' \
+           --exclude='*' "$d/" "$dest/"
 }
 
 # Always preserved so the run is traceable, regardless of success/failure.
@@ -228,6 +247,10 @@ if [ -n "$MONO_CONSTRAINT" ]; then
   # The copied init design was only the polish INPUT; remove it (and its yaml) now
   # the polish has finished, leaving only the polished design in the dir.
   rm -f "$POLISH_DIR/$INIT_JSON_BASE" "$POLISH_DIR/$(basename "$INIT_YAML")"
+
+  # Preserve the unpolished (with-aux) device on ceph BEFORE the gate, so it
+  # survives even if the polished device is discarded below for being out of spec.
+  sync_unpolished "$POLISH_DIR"
 
   POLISHED_JSON="$(ls "$POLISH_DIR"/design_polished_final_*.json 2>/dev/null | head -1)"
   if [ -z "$POLISHED_JSON" ]; then

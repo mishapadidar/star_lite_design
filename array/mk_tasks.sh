@@ -17,7 +17,7 @@ wells=(OFF 0 -100)
 binary_values=(0 1)
 mono_values=(0 1 2)
 configs=(0 1 2 3)
-vessel_values=(0 1 2)
+vessel_values=(0 1 2 3)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)

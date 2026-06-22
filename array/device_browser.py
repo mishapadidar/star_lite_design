@@ -443,9 +443,9 @@ with st.sidebar:
     root_input = st.text_input("Root folder", value=default_root,
                                help="Absolute or relative path to scan")
     cols = st.columns([1, 1])
-    scan_clicked  = cols[0].button("🔍 Scan",   use_container_width=True,
+    scan_clicked  = cols[0].button("🔍 Scan",   width="stretch",
                                    type="primary")
-    rescan_clicked = cols[1].button("🔄 Rescan", use_container_width=True)
+    rescan_clicked = cols[1].button("🔄 Rescan", width="stretch")
 
     if scan_clicked:
         st.session_state["root_dir"] = root_input
@@ -535,10 +535,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Sort")
-    # Server-side sort: this is what the device table AND the ← / → navigation follow. (The
-    # table's header-click sorting only reorders the view client-side -- Streamlit doesn't report
-    # it to Python, so navigation can't follow it; this control makes the order explicit so the
-    # arrows always step through devices in the order you chose.)
+    # The ONLY way to reorder the device table: this drives both the table order and the ← / →
+    # navigation. (Column-header click-sorting is disabled in the table via JS, because Streamlit
+    # doesn't report that client-side sort back to Python, so the arrows could never follow it.)
+    # Every summary.txt metric is offered here, plus QS error.
     SORT_QS = "QS error (%)"
     _metric_names, _seen = [], set()
     for _r in records:
@@ -780,9 +780,9 @@ st.markdown(
 # ◀ Prev / Next ▶ navigation across the TOP, spanning the full width (both columns).
 _prev_col, _next_col = st.columns(2)
 _prev_col.button("◀ Prev", key="dev_prev", on_click=_nav_prev,
-                 use_container_width=True, help="Previous device (← arrow)")
+                 width="stretch", help="Previous device (← arrow)")
 _next_col.button("Next ▶", key="dev_next", on_click=_nav_next,
-                 use_container_width=True, help="Next device (→ arrow)")
+                 width="stretch", help="Next device (→ arrow)")
 
 # Shared height for the two top panes (metrics table on the left, images on the
 # right). Sized so the device name + Prev/Next + the panes fit on screen without
@@ -814,7 +814,7 @@ with left:
                 M = pd.DataFrame([[e[(0, 0)], e[(0, 1)]],
                                   [e[(1, 0)], e[(1, 1)]]])
                 st.dataframe(M.style.format("{:.6e}"),
-                             hide_index=True, use_container_width=True)
+                             hide_index=True, width="stretch")
 
         stats_df = pd.DataFrame([
             {
@@ -834,7 +834,7 @@ with left:
                 subset=["Relative error"], cmap="RdYlGn_r",
                 vmin=0, vmax=0.2,
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=PANE_HEIGHT,
         )
@@ -935,20 +935,20 @@ with right:
             if selected_device.xs_png and selected_device.xs_png.exists():
                 st.image(str(selected_device.xs_png),
                          caption=selected_device.xs_png.name,
-                         use_container_width=True)
+                         width="stretch")
             else:
                 st.info("xs_*.png missing")
         with img_right:
             if selected_device.scene_top and selected_device.scene_top.exists():
                 st.image(str(selected_device.scene_top),
                          caption="scene_top.png",
-                         use_container_width=True)
+                         width="stretch")
             else:
                 st.info("scene_top.png missing")
             if selected_device.scene_left and selected_device.scene_left.exists():
                 st.image(str(selected_device.scene_left),
                          caption="scene_left.png",
-                         use_container_width=True)
+                         width="stretch")
             else:
                 st.info("scene_left.png missing")
 
@@ -971,13 +971,18 @@ def _highlight_plotted(row):
 _num_cols = [c for c in df.columns if c not in ({"⭐", "ID", "Device"} | set(keys))]
 _fmt = {c: "{:.4g}" for c in _num_cols}
 
+# The .background_gradient/.apply Styler renders every cell, and pandas caps the
+# styled element count (default 262144). With many devices/columns this is
+# exceeded, so raise the limit to fit the current dataframe.
+pd.set_option("styler.render.max_elements", max(df.size, 262144))
+
 st.dataframe(
     df.style.format(_fmt, na_rep="n/a").background_gradient(
         subset=["QS error (%)"], cmap="RdYlGn_r", vmin=0, vmax=30,
     ).background_gradient(
         subset=["Max rel err (%)"], cmap="RdYlGn_r", vmin=0, vmax=20,
     ).apply(_highlight_plotted, axis=1),
-    use_container_width=True,
+    width="stretch",
     height=PANE_HEIGHT,
     hide_index=True,
     on_select="rerun",
@@ -1004,14 +1009,17 @@ st.dataframe(
     },
 )
 
-st.caption(f"Device {sel_idx + 1} of {n_dev}  ·  use ← / → to navigate")
+st.caption(
+    f"Device {sel_idx + 1} of {n_dev}  ·  sorted by **{sort_by}** "
+    f"{'↓ (desc)' if sort_desc else '↑ (asc)'}  ·  ← / → step in this order "
+    f"(change order with the sidebar *Sort by* control)"
+)
 
-# Bind Left/Right arrow keys to the ◀/▶ buttons. This component runs in an iframe;
-# it reaches into the parent Streamlit document and, on an arrow key (unless the
-# user is typing in a field or a dropdown is focused), clicks the matching button —
-# which fires its on_click callback and reruns. Bound once per document (guard
-# flag) so reruns don't stack listeners; buttons are looked up at click time so
-# they always resolve to the freshly-rendered nodes.
+# This component runs in an iframe and reaches into the parent Streamlit document to install two
+# capture-phase listeners (each re-bound every run via a stored reference, so reruns/edits never
+# stack stale listeners): (1) Left/Right arrows click the ◀/▶ buttons (firing their callbacks),
+# and (2) a blocker that disables the device table's column-header click-sorting. Buttons are
+# looked up at event time so they resolve to the freshly-rendered nodes.
 components.html(
     """
     <script>
@@ -1054,6 +1062,29 @@ components.html(
       if (btn) { e.preventDefault(); e.stopPropagation(); btn.click(); }
     };
     doc.addEventListener('keydown', doc._devKeyNav, true);
+
+    // Disable column-header sorting on the device table. Streamlit/glide-data-grid renders the
+    // grid to a CANVAS and offers no API to turn sorting off, so we block pointer events that
+    // land in the top header band of the table (where header clicks trigger the sort). Row
+    // clicks (below the header) and the table's hover toolbar are left untouched. Sorting is
+    // done only via the sidebar "Sort by" control, which the ← / → navigation follows.
+    const HEADER_PX = 38;
+    const blockTypes = ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick'];
+    function _inDfHeader(e) {
+      const tgt = e.target;
+      if (!tgt || !tgt.closest) return false;
+      if (tgt.closest('[data-testid="stElementToolbar"]')) return false;   // keep toolbar usable
+      const grid = tgt.closest('[data-testid="stDataFrameResizable"],[data-testid="stDataFrame"]');
+      if (!grid) return false;
+      return (e.clientY - grid.getBoundingClientRect().top) <= HEADER_PX;
+    }
+    if (doc._devHeaderBlock) {
+      blockTypes.forEach(ty => doc.removeEventListener(ty, doc._devHeaderBlock, true));
+    }
+    doc._devHeaderBlock = function (e) {
+      if (_inDfHeader(e)) { e.preventDefault(); e.stopPropagation(); }
+    };
+    blockTypes.forEach(ty => doc.addEventListener(ty, doc._devHeaderBlock, true));
     </script>
     """,
     height=0,
