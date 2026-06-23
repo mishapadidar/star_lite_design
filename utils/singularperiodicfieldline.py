@@ -13,7 +13,9 @@ circular-coil parameters
     mu = (I_1, ..., I_N, r_1, ..., r_N, Z)
 
 such that the total field B = B_modular + B_aux(mu) admits a periodic field
-line whose monodromy matrix equals the identity (or has trace 2).
+line whose monodromy matrix equals the identity, has trace 2, or equals a user-specified SL(2)
+target matrix (monodromy_constraint 'identity' / 'trace' / 'target_monodromy', the last reading
+options['target_monodromy']).
 
 Partitioned formulation (simsopt dofs)
 --------------------------------------
@@ -431,7 +433,7 @@ def monodromy_matrix_pure(B, gradB, L, gammadash, gammadashdash, D):
 # -----------------------------------------------------------------------------
 
 def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_fns,
-                                 stellsym=True, monodromy_constraint='identity'):
+                                 stellsym=True, monodromy_constraint='identity', target_monodromy=None):
 
     pts = curve.gamma()
     dpts_dcurve = curve.dgamma_by_dcoeff()
@@ -539,8 +541,13 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     elif monodromy_constraint == 'identity':
         # Four equations: M - I = 0 (one is redundant since det(M)=1; caller drops it).
         r_mon = (M - np.eye(2)).reshape(4)
+    elif monodromy_constraint == 'target_monodromy':
+        # Four equations: M - M_target = 0 (one redundant since det(M)=det(M_target)=1; caller
+        # drops it). Same structure as 'identity' but to a user-specified SL(2) target matrix.
+        r_mon = (M - np.asarray(target_monodromy)).reshape(4)
     else:
-        raise ValueError(f"Unknown monodromy_constraint {monodromy_constraint!r}; must be 'identity' or 'trace'.")
+        raise ValueError(f"Unknown monodromy_constraint {monodromy_constraint!r}; "
+                         "must be 'identity', 'trace', or 'target_monodromy'.")
 
     r = np.concatenate((res, r_mon))
     J = np.vstack((dres, J_mon))
@@ -624,6 +631,32 @@ class SingularPeriodicFieldline(Optimizable):
             options['newton_maxiter'] = 40
         if 'monodromy_constraint' not in options:
             options['monodromy_constraint'] = 'identity'
+        if 'target_monodromy' not in options:
+            options['target_monodromy'] = None
+        if options['monodromy_constraint'] not in ('identity', 'trace', 'target_monodromy'):
+            raise ValueError(f"Unknown monodromy_constraint {options['monodromy_constraint']!r}; "
+                             "must be 'identity', 'trace', or 'target_monodromy'.")
+        # 'target_monodromy' pins the whole monodromy to a user-specified 2x2 SL(2) target M_target
+        # (options['target_monodromy']); same machinery as 'identity' but to M_target instead of I
+        # (3 independent equations -- one of the four M - M_target = 0 rows is redundant because
+        # det(M) = det(M_target) = 1 holds for free). M_target must therefore have det = 1 to
+        # machine precision. It is meaningless for the other modes -- reject those combinations.
+        tm = options['target_monodromy']
+        if options['monodromy_constraint'] == 'target_monodromy':
+            if tm is None:
+                raise ValueError("monodromy_constraint='target_monodromy' requires "
+                                 "options['target_monodromy'] (a 2x2 SL(2) matrix).")
+            tm = np.asarray(tm, dtype=float)
+            if tm.shape != (2, 2):
+                raise ValueError(f"target_monodromy must be 2x2, got shape {tm.shape}.")
+            det = float(np.linalg.det(tm))
+            if abs(det - 1.0) > 1e-13:
+                raise ValueError("target_monodromy must have det = 1 to machine precision "
+                                 f"(monodromy is area-preserving); got det = {det!r}.")
+            options['target_monodromy'] = tm
+        elif tm is not None:
+            raise ValueError("target_monodromy is only valid for "
+                             "monodromy_constraint='target_monodromy'.")
         self.options = options
         self.stellsym_aux = stellsym_aux
         # Solve results we want to survive save/load. They appear as __init__
@@ -717,7 +750,7 @@ class SingularPeriodicFieldline(Optimizable):
 
     def _num_independent_mu(self, nmu, monodromy_constraint):
         """num_independent_mu for an explicit nmu."""
-        if monodromy_constraint not in ('identity', 'trace'):
+        if monodromy_constraint not in ('identity', 'trace', 'target_monodromy'):
             raise ValueError(f"Unknown monodromy_constraint {monodromy_constraint!r}; "
                              "must be 'identity' or 'trace'.")
         row_mask, _ = self._row_mask(monodromy_constraint)
@@ -760,7 +793,7 @@ class SingularPeriodicFieldline(Optimizable):
         # NEGATED simsopt free-dof status: fixed = dependent (solved for),
         # free = independent (held).
         mon_constraint = self.options['monodromy_constraint']
-        n_mon = 4 if mon_constraint == 'identity' else 1
+        n_mon = 4 if mon_constraint in ('identity', 'target_monodromy') else 1
         nmu = len(mu)
         row_mask = self.get_stellsym_mask(tail=n_mon)
         # The column mask selects the DEPENDENT state variables (the ones the
@@ -777,9 +810,9 @@ class SingularPeriodicFieldline(Optimizable):
         x = np.concatenate((curve.get_dofs(), [length], mu))
         i = 0
 
-        if mon_constraint == 'identity':
+        if mon_constraint in ('identity', 'target_monodromy'):
             row_mask[-4] = False  # det(M)=1 makes one of the four equations redundant.
-        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint)
+        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'])
 
         b = r[row_mask]
         Jm = J[row_mask][:, col_mask]
@@ -804,7 +837,7 @@ class SingularPeriodicFieldline(Optimizable):
             length = x[-(nmu + 1)]
             mu = x[-nmu:]
             i += 1
-            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint)
+            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'])
             b = r[row_mask]
             Jm = J[row_mask][:, col_mask]
             #if verbose:
@@ -873,9 +906,9 @@ class SingularPeriodicFieldline(Optimizable):
         Defaults to the constraint in self.options."""
         mon_constraint = monodromy_constraint if monodromy_constraint is not None \
             else self.options['monodromy_constraint']
-        n_mon = 4 if mon_constraint == 'identity' else 1
+        n_mon = 4 if mon_constraint in ('identity', 'target_monodromy') else 1
         row_mask = self.get_stellsym_mask(tail=n_mon)
-        if mon_constraint == 'identity':
+        if mon_constraint in ('identity', 'target_monodromy'):
             row_mask[-4] = False  # det(M)=1 makes one of the four equations redundant.
         return row_mask, n_mon
 
@@ -943,6 +976,8 @@ class SingularPeriodicFieldline(Optimizable):
             r_mon = np.array([float(M[0, 0] + M[1, 1] - 2.0)])
         elif mon_constraint == 'identity':
             r_mon = (M - np.eye(2)).reshape(4)
+        elif mon_constraint == 'target_monodromy':
+            r_mon = (M - np.asarray(self.options['target_monodromy'])).reshape(4)
         else:
             raise ValueError(f"Unknown monodromy_constraint {mon_constraint!r}.")
 
@@ -1080,7 +1115,7 @@ class SingularPeriodicFieldline(Optimizable):
         _, J, _ = singular_field_line_residual(
             self.curve, self.curve_tm, length, self.biotsavart, mu,
             self.monodromy_fns, stellsym=self.stellsym_aux,
-            monodromy_constraint=mon_constraint)
+            monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'])
         J_act = J[row_mask]
 
         Jm = J_act[:, col_mask]                     # dg/d(dependent)
