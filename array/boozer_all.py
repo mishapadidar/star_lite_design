@@ -38,7 +38,7 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
-from star_lite_design.utils.helicalvessel import HelicalVesselSDF
+from star_lite_design.utils.helicalvessel import HelicalVesselSDF, REGIME_MARGIN
 
 from star_lite_design.utils import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
@@ -1210,12 +1210,13 @@ for j in range(15):
         # Helical vessel geometry constraints, all feeding the plasma-vessel-margin
         # weight escalation below (the geometric penalty rides inside the vessel
         # penalty, so its weight IS the plasma-vessel-margin weight):
-        #   - curvature regime: max_t R(t)*kappa(t) < 1; violation max(max R*kappa-1,0).
-        #   - radius-slope regime: max_t |dR/ds| < 1; violation max(max|dR/ds|-1,0).
+        #   - curvature regime: max_t R(t)*kappa(t) < REGIME_MARGIN (buffer off the
+        #     degenerate boundary); violation max(max R*kappa - margin, 0).
+        #   - radius-slope regime: max_t |dR/ds| < REGIME_MARGIN; violation similar.
         #   - constant-arclength: the centerline-speed squared coefficient of
         #     variation, so the weight grows when the arclength variation is large.
-        vessel_shape_err = (max(sdf.max_kappa_radius() - 1.0, 0.0)
-                            + max(sdf.max_dr_ds() - 1.0, 0.0)
+        vessel_shape_err = (max(sdf.max_kappa_radius() - REGIME_MARGIN, 0.0)
+                            + max(sdf.max_dr_ds() - REGIME_MARGIN, 0.0)
                             + sdf.arclength_variation())
 
     msc = [J.J() for J in Jmscs]
@@ -1436,8 +1437,8 @@ final_metrics = {
 if isinstance(sdf, HelicalVesselSDF):
     _kr = sdf.max_kappa_radius()
     _drds = sdf.max_dr_ds()
-    final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
-    final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
+    final_metrics['vessel_max_kappa_radius'] = (_kr, REGIME_MARGIN, max(_kr - REGIME_MARGIN, 0.0))
+    final_metrics['vessel_max_dr_ds'] = (_drds, REGIME_MARGIN, max(_drds - REGIME_MARGIN, 0.0))
     final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
 
 # also record the full 2x2 monodromy (tangent) matrix per X-point so the
