@@ -132,11 +132,39 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=2
             lambda t, _: (t - g(t) / jnp.maximum(h(t), 1e-9), None),
             t, None, length=n_newton)
 
-        # (3) DETACH the foot point. By the envelope theorem dphi/dt = 0 at t*, so
-        #     the chain-rule term that would flow through dt*/d(params) is exactly
-        #     zero -- freezing t* loses nothing, makes grad(Phi) the exact normal
-        #     and shape gradient (including sensitivity to the radius harmonics),
-        #     and skips backprop through argmin and the Newton iterations.
+        # (3) DETACH the foot point. Freezing t* loses NOTHING -- the envelope
+        #     (Danskin) theorem makes the frozen-t* gradient equal the true total
+        #     gradient. Write the parametrized distance-to-ball as phi(t, q) with
+        #     q = (p, params), and the SDF as the optimal value
+        #         Phi(q) = min_t phi(t, q) = phi(t*(q), q),   t*(q) := argmin_t phi.
+        #     Differentiating the composition by the chain rule,
+        #         dPhi/dq = phi_t(t*, q) . dt*/dq  +  phi_q(t*, q),
+        #     where phi_t := d phi/dt and phi_q := partial phi/partial q (t held
+        #     fixed). But t* is an interior minimizer, so the first-order optimality
+        #     condition is exactly the Newton residual we drove to zero in (2):
+        #         phi_t(t*, q) = 0.
+        #     Hence the dt*/dq term drops identically and
+        #         dPhi/dq = phi_q(t*, q),
+        #     i.e. the gradient with t* held CONSTANT.
+        #
+        #     What stop_gradient does: it is the IDENTITY in the forward pass
+        #     (stop_gradient(t) == t, the value is untouched) but declares a ZERO
+        #     derivative in the backward pass (d/d(.)[stop_gradient(t)] = 0). So
+        #     autodiff treats t* as a frozen constant and never differentiates
+        #     HOW it was produced -- it severs only the IMPLICIT path
+        #     params -> t* -> phi (which would otherwise backprop through argmin,
+        #     not differentiable, and the Newton iterates). The EXPLICIT dependence
+        #     of phi on params -- via C(t*) and R(t*) at the frozen t* -- is left
+        #     fully differentiable, so reverse mode returns exactly phi_q(t*, q).
+        #     By the optimality argument above that frozen-t* gradient phi_q equals
+        #     the true total derivative dPhi/dq (the discarded dt*/dq term is
+        #     provably 0, so nothing real is dropped). (torch: t.detach();
+        #     tensorflow: tf.stop_gradient.) Concretely this gives:
+        #       * spatial gradient (q = p):    grad_p Phi = (p - C(t*))/||p - C(t*)||,
+        #         the exact outward unit normal of the tube surface;
+        #       * shape gradient (q = params): grad_params Phi = partial/partial(params)
+        #         [ ||p - C(t*)|| - R(t*) ] at fixed t*, i.e. exact sensitivity to the
+        #         centerline AND radius harmonics.
         t = lax.stop_gradient(t)
 
         return sign * phi(t)
@@ -170,7 +198,8 @@ def max_dr_ds_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=512):
     xc, xs, yc, ys, zc, zs, rc, rs = _unpack(params, stellsym, r_order)
     C = lambda s: _C(s, xc, xs, yc, ys, zc, zs, nfp, ntor)
     R = lambda s: _R(s, rc, rs, nfp)
-    tg = jnp.linspace(0.0, 1.0, n_grid, endpoint=False)
+    # |dR/ds| is 1/nfp-periodic (see _geometric_penalty), so one field period suffices.
+    tg = jnp.linspace(0.0, 1.0 / nfp, n_grid, endpoint=False)
     slope = lambda s: jnp.abs(jax.grad(R)(s)) / jnp.linalg.norm(jax.jacfwd(C)(s))
     return jnp.max(jax.vmap(slope)(tg))
 
@@ -181,7 +210,9 @@ def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_g
     tracking arclength (a uniform parametrization)."""
     xc, xs, yc, ys, zc, zs, _rc, _rs = _unpack(params, stellsym, r_order)
     C = lambda s: _C(s, xc, xs, yc, ys, zc, zs, nfp, ntor)
-    tg = jnp.linspace(0.0, 1.0, n_grid, endpoint=False)
+    # ||C'|| is 1/nfp-periodic (see _geometric_penalty), so the speed distribution
+    # over one field period [0, 1/nfp) has the same mean and variance as over [0,1).
+    tg = jnp.linspace(0.0, 1.0 / nfp, n_grid, endpoint=False)
     speeds = jax.vmap(lambda s: jnp.linalg.norm(jax.jacfwd(C)(s)))(tg)
     mean = jnp.mean(speeds)
     return jnp.mean((speeds - mean) ** 2) / mean ** 2
@@ -198,7 +229,12 @@ def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=512):
     xc, xs, yc, ys, zc, zs, rc, rs = _unpack(params, stellsym, r_order)
     C = lambda s: _C(s, xc, xs, yc, ys, zc, zs, nfp, ntor)
     R = lambda s: _R(s, rc, rs, nfp)
-    tg = jnp.linspace(0.0, 1.0, n_grid, endpoint=False)
+    # All these quantities are intrinsic (curvature, speed, R, dR/ds) and the
+    # centerline profile uses only nfp*m frequencies, so they are exactly
+    # 1/nfp-periodic in t (the ntor rotation is rigid and norm/cross-product
+    # preserving). Sampling one field period [0, 1/nfp) therefore captures every
+    # value -- nfp x finer resolution than [0,1) for the same n_grid.
+    tg = jnp.linspace(0.0, 1.0 / nfp, n_grid, endpoint=False)
     def per_t(s):
         Cp, Cpp = jax.jacfwd(C)(s), jax.jacfwd(jax.jacfwd(C))(s)
         speed = jnp.linalg.norm(Cp)
@@ -269,7 +305,7 @@ class HelicalVesselSDF(Optimizable):
                                            stellsym=self.stellsym, r_order=self._Mr)
 
     @classmethod
-    def from_curve_xyz_fourier_symmetries(cls, curve, rr, stellsym=None, num_modes=6,
+    def from_curve_xyz_fourier_symmetries(cls, curve, rr, stellsym=None, num_modes=4,
                                           radius_num_modes=0, **kwargs):
         """Build directly from a simsopt CurveXYZFourierSymmetries, copying its
         harmonics, nfp, and ntor. ``stellsym`` defaults to the curve's own flag:
@@ -387,8 +423,11 @@ class HelicalVesselSDF(Optimizable):
                                                 self.stellsym, self._Mr))
 
     def max_kappa_radius(self, n_grid=512):
-        """max_t R(t)*kappa(t): the curvature regime metric (must stay < 1)."""
-        t = np.linspace(0.0, 1.0, n_grid, endpoint=False)
+        """max_t R(t)*kappa(t): the curvature regime metric (must stay < 1).
+
+        R*kappa is 1/nfp-periodic (intrinsic + nfp-frequency profile), so sampling
+        one field period [0, 1/nfp) captures the maximum at nfp x finer resolution."""
+        t = np.linspace(0.0, 1.0 / self.nfp, n_grid, endpoint=False)
         return float(np.max(self.kappa(t) * self.radius(t)))
 
     def max_dr_ds(self, n_grid=512):

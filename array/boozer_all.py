@@ -198,8 +198,9 @@ elif vessel_id in (3, 4):
     #   vessel_id 3: CONSTANT radius (radius_num_modes=0).
     #   vessel_id 4: VARIABLE radius R(t), same Fourier order as the centerline.
     rr = 0.2
-    HELICAL_NUM_MODES = 6
-    radius_num_modes = HELICAL_NUM_MODES if vessel_id == 4 else 0
+    HELICAL_NUM_MODES = 4       # centerline Fourier order
+    HELICAL_RADIUS_MODES = 4    # radius R(t) Fourier order (vessel 4 only)
+    radius_num_modes = HELICAL_RADIUS_MODES if vessel_id == 4 else 0
     sdf = HelicalVesselSDF.from_curve_xyz_fourier_symmetries(
         axes[0].curve, rr, stellsym=(null_type == 'DN'),
         num_modes=HELICAL_NUM_MODES, radius_num_modes=radius_num_modes)
