@@ -6,13 +6,6 @@ from jax import lax
 from simsopt._core import Optimizable
 from pyevtk.hl import gridToVTK  # pip install pyevtk
 
-# Safety margin for the exact-SDF regime: the tube is valid (and the foot-point
-# Newton solve well-conditioned) only for R*kappa < 1 and |dR/ds| < 1, but RIGHT
-# at the boundary phi'' -> 0 and the SDF/gradient degenerate (NaNs, surface
-# self-intersections). So we penalize these above REGIME_MARGIN < 1, keeping the
-# optimizer comfortably inside the regime rather than parked at the boundary.
-REGIME_MARGIN = 0.9
-
 # ---------- vessel SDF about a CurveXYZFourierSymmetries centerline ----------
 # Centerline parametrized exactly as simsopt's CurveXYZFourierSymmetries, with
 # field-period (nfp) and optional stellarator symmetry, parameter theta in [0,1):
@@ -226,10 +219,9 @@ def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_g
 
 def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=512):
     """Geometrical penalty on the tube, sampled on a uniform grid, combining:
-      (1) the valid-tube regime  max_t R(t)*kappa(t) < REGIME_MARGIN  (no self-
-          intersection across a bend, with a buffer off the degenerate boundary)
-          and  max_t |dR/ds| < REGIME_MARGIN  (radius grows slower than arclength;
-          no swallowing along the axis), each as max(excess - margin, 0)^2; and
+      (1) the valid-tube regime  max_t R(t)*kappa(t) < 1  (no self-intersection
+          across a bend) and  max_t |dR/ds| < 1  (radius grows slower than
+          arclength; no swallowing along the axis), each as max(excess,0)^2; and
       (2) a constant-arclength penalty on the centerline: the squared coefficient
           of variation of the speed ||C'(t)||, which drives the parametrization
           toward uniform arclength.
@@ -250,10 +242,8 @@ def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=512):
         slope = jnp.abs(jax.grad(R)(s)) / speed       # |dR/ds|
         return speed, R(s) * kap, slope
     speeds, Rkap, slopes = jax.vmap(per_t)(tg)
-    # Penalize above REGIME_MARGIN (<1), not 1, to keep a safety buffer off the
-    # degenerate boundary where the SDF foot-point solve breaks down.
-    curv = jnp.maximum(jnp.max(Rkap) - REGIME_MARGIN, 0.0) ** 2
-    slp = jnp.maximum(jnp.max(slopes) - REGIME_MARGIN, 0.0) ** 2
+    curv = jnp.maximum(jnp.max(Rkap) - 1.0, 0.0) ** 2
+    slp = jnp.maximum(jnp.max(slopes) - 1.0, 0.0) ** 2
     mean = jnp.mean(speeds)
     arclen = jnp.mean((speeds - mean) ** 2) / mean ** 2     # constant-arclength penalty
     return curv + slp + arclen
