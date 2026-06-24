@@ -28,6 +28,18 @@ design_json="$1"
 # >= 3 for identity). Same default as the polish.
 num_aux="${2:-10}"
 
+# Per-device run log, sharded like prefix.sh's logs/ (first two hex chars of md5 of the
+# folder name, so any one logs/ subdir stays under ~500 entries). prefix_singular.sh runs
+# in place (no scratch), so tee straight to the final logs/<shard>/<name>_unpolished.out
+# -- duplicating output to the log while keeping the disBatch stdout/stderr pipe alive
+# (same trick as prefix.sh). Derived from the folder name in the path so logging starts
+# before we touch the filesystem (the not-found error below is captured too).
+shard() { printf '%s' "$1" | md5sum | cut -c1-2; }
+unpolished_name="$(basename "$(dirname "$design_json")")_unpolished"
+mkdir -p "logs/$(shard "$unpolished_name")"
+LOG="logs/$(shard "$unpolished_name")/${unpolished_name}.out"
+exec > >(tee "$LOG") 2>&1
+
 if [ ! -f "$design_json" ]; then
   echo "ERROR: design json not found: $design_json"
   exit 1
@@ -38,9 +50,11 @@ fi
 in_dir="$(cd "$(dirname "$design_json")" && pwd)"
 unpolished_dir="${in_dir}_unpolished"
 
+echo "Host: $(hostname)"
 echo "Started: $(date)"
 echo "Input device json: $design_json"
 echo "Unpolished output dir: $unpolished_dir"
+echo "Log: $LOG"
 echo "num_aux=$num_aux"
 
 # ── (1) compute the aux coils + save the unpolished device (BOOZER venv) ──
