@@ -31,13 +31,14 @@ TF_FRACS = (0.9, 0.8, 0.7)
 
 p = Path(sys.argv[1])
 
-# Only run on the FINAL design jsons: design_opt_final_<ID>.json (from boozer_all.py) or
-# design_polished_final_<ID>.json (from the polish). Refuse anything else BEFORE loading
+# Only run on the FINAL design jsons: design_opt_final_<ID>.json (from boozer_all.py),
+# design_polished_final_<ID>.json (from the polish), or design_unpolished_final_<ID>.json
+# (from boozer_singular.py). Refuse anything else BEFORE loading
 # -- in particular the diagnostic design_opt_xpoint_deletion.json, which is NOT a
 # converged device and must never be grown into an LCFS.
-m = re.match(r'design_(?:opt|polished)_final_(\d+)\.json$', p.name)
+m = re.match(r'design_(?:opt|polished|unpolished)_final_(\d+)\.json$', p.name)
 if m is None:
-    print(f"mk_LCFS: '{p.name}' is not a design_opt_final_/design_polished_final_ json "
+    print(f"mk_LCFS: '{p.name}' is not a design_opt_final_/design_polished_final_/design_unpolished_final_ json "
           f"(e.g. design_opt_xpoint_deletion.json); skipping, no LCFS written.")
     sys.exit(0)
 device_id = m.group(1)
