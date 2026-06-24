@@ -34,6 +34,7 @@ the *_opt_final VTK files consumed by mk_paraview.py, and a descriptive summary.
 """
 import argparse
 import os
+import re
 import zlib
 
 import numpy as np
@@ -95,13 +96,16 @@ if num_aux < N_DEP_CURRENTS:
     raise SystemExit(f"NUM_AUX must be >= {N_DEP_CURRENTS} for the "
                      f"{mon_constraint!r} constraint, got {num_aux}")
 
-# Outputs go to a NEW directory: the input device folder name with '_unpolished'
-# appended, as a sibling of the input. The device ID is the crc32 of that
-# (unpolished) folder name -- matching boozer_all.py / device_browser.py's
-# folder-name -> ID convention -- and is embedded in the output json/yaml names.
+# Outputs go to a NEW directory, a sibling of the input: the input device folder name
+# with its num_aux token set to the ACTUAL number of auxiliary coils we just added (the
+# input is a num_aux=0 boozer_all device, but this device carries `num_aux` of them, so
+# leaving num_aux=0 in the name would be wrong and would mislead device_browser), then
+# '_unpolished' appended. The device ID is the crc32 of that (unpolished) folder name --
+# matching boozer_all.py / device_browser.py's folder-name -> ID convention -- and is
+# embedded in the output json/yaml names.
 _in_dir = os.path.dirname(_in)
 _src_name = os.path.basename(_in_dir) or os.path.basename(_in)
-TASK_NAME = _src_name + '_unpolished'
+TASK_NAME = re.sub(r'num_aux=\d+', f'num_aux={num_aux}', _src_name) + '_unpolished'
 OUT_DIR = os.path.join(os.path.dirname(_in_dir), TASK_NAME, '')
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
 print(f"Task: {TASK_NAME}")

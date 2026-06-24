@@ -28,14 +28,24 @@ design_json="$1"
 # >= 3 for identity). Same default as the polish.
 num_aux="${2:-10}"
 
+# The unpolished device dir is a SIBLING of the input device dir. Its name is the input
+# device's folder name with the num_aux token set to the ACTUAL number of auxiliary coils
+# added (the input is a num_aux=0 boozer_all device, but this device carries $num_aux of
+# them), then '_unpolished' appended -- IDENTICAL to the OUT_DIR boozer_singular.py derives
+# (re.sub r'num_aux=\d+' -> num_aux=$num_aux). EVERYTHING this script (and every step it
+# calls) writes goes under this dir or into this device's own log: the source
+# design_opt_final device dir and any polished device dir are NEVER written to.
+src_dir="$(dirname "$design_json")"
+unpolished_name="$(basename "$src_dir" | sed -E "s/num_aux=[0-9]+/num_aux=${num_aux}/")_unpolished"
+unpolished_dir="$(dirname "$src_dir")/${unpolished_name}"
+
 # Per-device run log, sharded like prefix.sh's logs/ (first two hex chars of md5 of the
 # folder name, so any one logs/ subdir stays under ~500 entries). prefix_singular.sh runs
-# in place (no scratch), so tee straight to the final logs/<shard>/<name>_unpolished.out
-# -- duplicating output to the log while keeping the disBatch stdout/stderr pipe alive
-# (same trick as prefix.sh). Derived from the folder name in the path so logging starts
-# before we touch the filesystem (the not-found error below is captured too).
+# in place (no scratch), so tee straight to the final logs/<shard>/<name>.out -- duplicating
+# output to the log while keeping the disBatch stdout/stderr pipe alive (same trick as
+# prefix.sh). Re-running regenerates the unpolished dir (and this log) in place, which is
+# fine -- only the SOURCE device files must never be overwritten (they never are).
 shard() { printf '%s' "$1" | md5sum | cut -c1-2; }
-unpolished_name="$(basename "$(dirname "$design_json")")_unpolished"
 mkdir -p "logs/$(shard "$unpolished_name")"
 LOG="logs/$(shard "$unpolished_name")/${unpolished_name}.out"
 exec > >(tee "$LOG") 2>&1
@@ -44,11 +54,6 @@ if [ ! -f "$design_json" ]; then
   echo "ERROR: design json not found: $design_json"
   exit 1
 fi
-
-# boozer_singular.py derives its own output dir: the input device folder name with
-# '_unpolished' appended, as a sibling of the input.
-in_dir="$(cd "$(dirname "$design_json")" && pwd)"
-unpolished_dir="${in_dir}_unpolished"
 
 echo "Host: $(hostname)"
 echo "Started: $(date)"
