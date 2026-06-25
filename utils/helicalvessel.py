@@ -241,8 +241,10 @@ def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """Geometrical penalty on the tube, sampled on a uniform grid, combining:
       (1) the valid-tube regime  max_t R(t)*kappa(t) < 1  (no self-intersection
           across a bend) and  max_t |dR/ds| < 1  (radius grows slower than
-          arclength; no swallowing along the axis), each as max(excess,0)^2; and
-      (2) a constant-arclength penalty on the centerline: the squared coefficient
+          arclength; no swallowing along the axis), each as max(excess,0)^2;
+      (2) radius positivity  R(t) > 0  (a negative radius is meaningless), as a
+          mean of squared hinges over the grid; and
+      (3) a constant-arclength penalty on the centerline: the squared coefficient
           of variation of the speed ||C'(t)||, which drives the parametrization
           toward uniform arclength.
     All terms are dimensionless and enter the vessel penalty additively."""
@@ -260,13 +262,14 @@ def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
         speed = jnp.linalg.norm(Cp)
         kap = jnp.linalg.norm(jnp.cross(Cp, Cpp)) / speed ** 3
         slope = jnp.abs(jax.grad(R)(s)) / speed       # |dR/ds|
-        return speed, R(s) * kap, slope
-    speeds, Rkap, slopes = jax.vmap(per_t)(tg)
+        return speed, R(s) * kap, slope, R(s)
+    speeds, Rkap, slopes, Rs = jax.vmap(per_t)(tg)
     curv = jnp.maximum(jnp.max(Rkap) - 1.0, 0.0) ** 2
     slp = jnp.maximum(jnp.max(slopes) - 1.0, 0.0) ** 2
+    pos = jnp.mean(jnp.maximum(-Rs, 0.0) ** 2)             # radius must stay positive
     mean = jnp.mean(speeds)
     arclen = jnp.mean((speeds - mean) ** 2) / mean ** 2     # constant-arclength penalty
-    return curv + slp + arclen
+    return curv + slp + pos + arclen
 
 def quadratic_threshold_helical_vessel(pts, params, sign, threshold, nfp, ntor, stellsym, r_order):
     sls = sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order)
@@ -464,6 +467,12 @@ class HelicalVesselSDF(Optimizable):
         t = np.linspace(0.0, 1.0 / self.nfp, n_grid, endpoint=False)
         x = self.local_full_x
         return float(np.max(np.asarray(self._kappa_fn(t, x)) * np.asarray(self._radius_fn(t, x))))
+
+    def min_radius(self, n_grid=N_GRID):
+        """min_t R(t): smallest tube radius over one field period (R is 1/nfp-periodic).
+        Must stay > 0; used (eager) by the drivers' geometric-constraint escalation."""
+        t = np.linspace(0.0, 1.0 / self.nfp, n_grid, endpoint=False)
+        return float(np.min(self.radius(t)))
 
     def max_dr_ds(self):
         """max_t |dR/ds| = max_t |R'(t)|/||C'(t)||: the radius-slope regime metric

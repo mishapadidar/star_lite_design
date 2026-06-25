@@ -75,6 +75,14 @@ from star_lite_design.utils.mubound import MuBound
 from star_lite_design.utils.tangent_map import TangentMap, AxisIota
 
 
+def _rel_vio(a, b):
+    """Violation of the inequality a < b for the weight-escalation check: the raw
+    excess max(a-b, 0) made RELATIVE to the target |b| (so it is comparable to the
+    0.1% escalation gate), or ABSOLUTE when the target b == 0 (e.g. positivity)."""
+    v = max(a - b, 0.0)
+    return v / abs(b) if b != 0.0 else v
+
+
 # The boozer_all design json is the only required input; everything else
 # (weights, thresholds, monodromy constraint, config id, well state, ...) is
 # read from the sibling yaml of the same basename in the same directory. The
@@ -741,6 +749,7 @@ def callback(dofs):
         # arclength variation should stay near 0 (uniform parametrization)
         table2.add_row('max kappa*R (helical vessel)', f'{sdf.max_kappa_radius():.4e}')
         table2.add_row('max |dR/ds| (helical vessel)', f'{sdf.max_dr_ds():.4e}')
+        table2.add_row('min radius (helical vessel)', f'{sdf.min_radius():.4e}')
         table2.add_row('centerline arclength variation', f'{sdf.arclength_variation():.4e}')
         # foot-point optimality residual max_p |phi'(t*)| on the plasma boundary;
         # ~0 (< FOOT_TOL) means every foot-point solve converged.
@@ -965,26 +974,31 @@ for j in range(5):
     _, min_xpoint_to_vessel, min_boozer_surface_to_vessel = J_plasma_to_vessel_margin.shortest_distance()
     plasma_vessel_margin_err = max(PLASMA_VESSEL_MARGIN_THRESHOLD-np.min([min_xpoint_to_vessel, min_boozer_surface_to_vessel]), 0)/np.abs(PLASMA_VESSEL_MARGIN_THRESHOLD)
 
-    # Helical vessel geometry constraints (the geometric penalty rides inside the
-    # vessel penalty, so its weight IS the plasma-vessel-margin weight escalated
-    # below): max_t R(t)*kappa(t) < 1 and max_t |dR/ds| < 1 (violations > 0 only out
-    # of regime), plus the constant-arclength penalty (centerline-speed squared
-    # coefficient of variation), so the weight grows whenever kappa*R >= 1, the
-    # radius slope |dR/ds| >= 1, OR the arclength variation is large.
+    # Geometric validity of the loaded vessel, fed into the plasma-vessel-margin
+    # weight escalation below (the helical geometric penalty rides inside the vessel
+    # penalty, so its weight IS that weight). Worst (max) of all constraint errors;
+    # relative for nonzero targets, absolute for target-0 (positivity / arclength).
     vessel_shape_err = 0.
     if isinstance(sdf, HelicalVesselSDF):
-        vessel_shape_err = (max(sdf.max_kappa_radius() - 1.0, 0.0)
-                            + max(sdf.max_dr_ds() - 1.0, 0.0)
-                            + sdf.arclength_variation())
+        #   max_t R*kappa < 1, max_t |dR/ds| < 1, min_t R > 0, arclength variation ~ 0.
+        vessel_shape_err = max([_rel_vio(sdf.max_kappa_radius(), 1.0),
+                                _rel_vio(sdf.max_dr_ds(), 1.0),
+                                max(-sdf.min_radius(), 0.0),
+                                sdf.arclength_variation()])
     elif isinstance(sdf, PillPipeSDF):
-        # rounded-rect validity (corner radius r <= half-dimensions) AND the
-        # pipe-radius regime rr < r (corner curvature 1/r, so rr*kappa < 1).
+        # rounded-rect pipe validity 0 < rr < r <= (bx, by).
         bx, by, r, rr = sdf.local_full_x
-        vessel_shape_err = max([r - bx, r - by, rr - r, 0.])
+        vessel_shape_err = max([_rel_vio(r, bx), _rel_vio(r, by), _rel_vio(rr, r),
+                                max(-bx, 0.), max(-by, 0.), max(-r, 0.), max(-rr, 0.)])
+    elif isinstance(sdf, RennaissanceSDF):
+        # renaissance validity 0 < rr < (d1, d2).
+        d1, d2, rr = sdf.local_full_x
+        vessel_shape_err = max([_rel_vio(rr, d1), _rel_vio(rr, d2),
+                                max(-d1, 0.), max(-d2, 0.), max(-rr, 0.)])
     elif isinstance(sdf, TorusSDF):
-        # torus regime: minor radius < major radius (r*kappa = r/R < 1).
+        # torus validity 0 < r < R.
         r, R = sdf.local_full_x
-        vessel_shape_err = max(r - R, 0.)
+        vessel_shape_err = max([_rel_vio(r, R), max(-r, 0.), max(-R, 0.)])
 
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     coil_on_vessel_err = (

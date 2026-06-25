@@ -45,6 +45,14 @@ from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
 from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
 
 
+def _rel_vio(a, b):
+    """Violation of the inequality a < b for the weight-escalation check: the raw
+    excess max(a-b, 0) made RELATIVE to the target |b| (so it is comparable to the
+    0.1% escalation gate), or ABSOLUTE when the target b == 0 (e.g. positivity)."""
+    v = max(a - b, 0.0)
+    return v / abs(b) if b != 0.0 else v
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--margin", type=float)
 parser.add_argument("--well", type=str, default='OFF')
@@ -822,6 +830,7 @@ def callback(dofs):
         # arclength variation should stay near 0 (uniform parametrization)
         table2.add_row('max kappa*R (helical vessel)', f'{sdf.max_kappa_radius():.4e}')
         table2.add_row('max |dR/ds| (helical vessel)', f'{sdf.max_dr_ds():.4e}')
+        table2.add_row('min radius (helical vessel)', f'{sdf.min_radius():.4e}')
         table2.add_row('centerline arclength variation', f'{sdf.arclength_variation():.4e}')
         # foot-point optimality residual max_p |phi'(t*)| on the plasma boundary;
         # ~0 (< FOOT_TOL) means every foot-point solve converged.
@@ -1217,24 +1226,33 @@ for j in range(15):
     vessel_shape_err = 0.
     if vessel_id == 0:
         bx, by, r, rr = sdf.local_full_x.copy()
-        # rounded-rect validity (corner radius r <= half-dimensions) AND the
-        # pipe-radius regime rr < r (corner curvature 1/r, so rr*kappa < 1).
-        vessel_shape_err = max([r-bx, r-by, rr-r, 0])
+        # rounded-rect pipe validity 0 < rr < r <= (bx, by): relative for the
+        # inequalities (nonzero target), absolute for the positivity (target 0).
+        vessel_shape_err = max([_rel_vio(r, bx), _rel_vio(r, by), _rel_vio(rr, r),
+                                max(-bx, 0.), max(-by, 0.), max(-r, 0.), max(-rr, 0.)])
+    elif vessel_id == 1:
+        d1, d2, rr = sdf.local_full_x.copy()
+        # renaissance validity 0 < rr < (d1, d2).
+        vessel_shape_err = max([_rel_vio(rr, d1), _rel_vio(rr, d2),
+                                max(-d1, 0.), max(-d2, 0.), max(-rr, 0.)])
     elif vessel_id == 2:
         r, R = sdf.local_full_x.copy()
-        # torus regime: minor radius < major radius (r*kappa = r/R < 1).
-        vessel_shape_err = max(r-R, 0.)
+        # torus validity 0 < r < R.
+        vessel_shape_err = max([_rel_vio(r, R), max(-r, 0.), max(-R, 0.)])
     elif isinstance(sdf, HelicalVesselSDF):
         # Helical vessel geometry constraints, all feeding the plasma-vessel-margin
         # weight escalation below (the geometric penalty rides inside the vessel
-        # penalty, so its weight IS the plasma-vessel-margin weight):
-        #   - curvature regime: max_t R(t)*kappa(t) < 1; violation max(max R*kappa-1,0).
-        #   - radius-slope regime: max_t |dR/ds| < 1; violation max(max|dR/ds|-1,0).
-        #   - constant-arclength: the centerline-speed squared coefficient of
-        #     variation, so the weight grows when the arclength variation is large.
-        vessel_shape_err = (max(sdf.max_kappa_radius() - 1.0, 0.0)
-                            + max(sdf.max_dr_ds() - 1.0, 0.0)
-                            + sdf.arclength_variation())
+        # penalty, so its weight IS the plasma-vessel-margin weight). Targets of 1
+        # (regimes) use a relative excess; targets of 0 (radius positivity, arclength)
+        # use the absolute value. Take the worst (max) of:
+        #   - curvature regime: max_t R(t)*kappa(t) < 1.
+        #   - radius-slope regime: max_t |dR/ds| < 1.
+        #   - radius positivity: min_t R(t) > 0.
+        #   - constant-arclength: centerline-speed squared coefficient of variation.
+        vessel_shape_err = max([_rel_vio(sdf.max_kappa_radius(), 1.0),
+                                _rel_vio(sdf.max_dr_ds(), 1.0),
+                                max(-sdf.min_radius(), 0.0),
+                                sdf.arclength_variation()])
 
     msc = [J.J() for J in Jmscs]
     msc_err = max(np.max(msc) - MEAN_SQUARED_CURVATURE_THRESHOLD, 0)/np.abs(MEAN_SQUARED_CURVATURE_THRESHOLD)

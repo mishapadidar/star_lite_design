@@ -61,13 +61,12 @@ def sdf_pill_pipe(pts, params, sign):
 def quadratic_threshold_pill_pipe(pts, params, sign, threshold):
     sls = sdf_pill_pipe(pts, params, sign)
     bx, by, r, rr = params
-    cons1 = jnp.maximum(r-bx, 0)**2
-    cons2 = jnp.maximum(r-by, 0)**2
-    # valid-tube regime: the pipe radius rr must be smaller than the rounded-corner
-    # radius r (the corner curvature is 1/r, so rr*kappa = rr/r < 1), else the pipe
-    # self-intersects at a corner and the SDF is no longer exact.
-    cons3 = jnp.maximum(rr-r, 0)**2
-    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons1 + cons2 + cons3
+    # Geometric validity of the rounded-rect pipe: 0 < rr < r <= (bx, by), all > 0.
+    cons = (jnp.maximum(r - bx, 0)**2 + jnp.maximum(r - by, 0)**2   # corner radius fits the box
+            + jnp.maximum(rr - r, 0)**2                            # pipe radius < corner radius
+            + jnp.maximum(-bx, 0)**2 + jnp.maximum(-by, 0)**2      # positive half-widths
+            + jnp.maximum(-r, 0)**2 + jnp.maximum(-rr, 0)**2)      # positive radii
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
 
 def quadratic_distance_pill_pipe(pts, params, sign, threshold):
     sls = sdf_pill_pipe(pts, params, sign)
@@ -137,10 +136,10 @@ def sdf_torus(pts, params, sign):
 def quadratic_threshold_torus(pts, params, sign, threshold):
     sls = sdf_torus(pts, params, sign)
     r, R = params
-    # valid-torus regime: the minor radius must be smaller than the major radius
-    # (the circle curvature is 1/R, so r*kappa = r/R < 1), else the torus
-    # self-intersects through the hole and the SDF is no longer exact.
-    cons = jnp.maximum(r-R, 0)**2
+    # Geometric validity: 0 < r < R. r < R (the circle curvature is 1/R, so r*kappa =
+    # r/R < 1) keeps the torus from self-intersecting through the hole; r, R > 0.
+    cons = (jnp.maximum(r - R, 0)**2
+            + jnp.maximum(-r, 0)**2 + jnp.maximum(-R, 0)**2)
     return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
 
 def quadratic_distance_torus(pts, params, sign, threshold):
@@ -237,7 +236,12 @@ def sdf_rennaissance(pts, params, sign):
 def quadratic_threshold_rennaissance(pts, params, sign, threshold):
     sls = sdf_rennaissance(pts, params, sign)
     d1, d2, rr = params
-    return jnp.mean(jnp.maximum(threshold-sls, 0)**2)
+    # Geometric validity: tube of radius rr about the spine at offsets d1 (x) and d2 (y).
+    # rr < d1 and rr < d2 keep the opposite (mirrored) walls from merging through the
+    # centre; all dimensions positive.
+    cons = (jnp.maximum(rr - d1, 0)**2 + jnp.maximum(rr - d2, 0)**2
+            + jnp.maximum(-d1, 0)**2 + jnp.maximum(-d2, 0)**2 + jnp.maximum(-rr, 0)**2)
+    return jnp.mean(jnp.maximum(threshold-sls, 0)**2) + cons
 
 def quadratic_distance_rennaissance(pts, params, sign, threshold):
     sls = sdf_rennaissance(pts, params, sign)
