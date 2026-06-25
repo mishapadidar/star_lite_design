@@ -314,6 +314,13 @@ class HelicalVesselSDF(Optimizable):
         names = [f'{p}({m})' for p, a, m0 in parts
                  for m in range(m0, m0 + len(a))]
         super().__init__(depends_on=[], x0=x0, names=names, **kwargs)
+        if not self.stellsym:
+            # zc(0) is a rigid vertical translation of the centerline (z is not rotated
+            # by ntor), and it is a gauge freedom of the penalties -- the geometry terms
+            # (kappa, dR/ds, arclength) are translation-invariant and the distance terms
+            # are one-sided -- so the vessel could otherwise drift up/down. Pin it. (For
+            # stellsym the zc family is absent entirely, so there is nothing to fix.)
+            self.fix('zc(0)')
         self.nfp, self.ntor = int(nfp), int(ntor)
         _sj = dict(nfp=self.nfp, ntor=self.ntor, stellsym=self.stellsym, r_order=self._Mr)
         # JIT the EAGER SDF paths used by the diagnostics (shortest/longest_distance,

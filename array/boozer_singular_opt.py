@@ -67,7 +67,7 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
-from star_lite_design.utils.helicalvessel import HelicalVesselSDF
+from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
@@ -742,6 +742,12 @@ def callback(dofs):
         table2.add_row('max kappa*R (helical vessel)', f'{sdf.max_kappa_radius():.4e}')
         table2.add_row('max |dR/ds| (helical vessel)', f'{sdf.max_dr_ds():.4e}')
         table2.add_row('centerline arclength variation', f'{sdf.arclength_variation():.4e}')
+        # foot-point optimality residual max_p |phi'(t*)| on the plasma boundary;
+        # ~0 (< FOOT_TOL) means every foot-point solve converged.
+        _foot_gammas = np.concatenate(
+            [xp.curve.gamma() for xp in xpoints]
+            + [bsurf.surface.gamma().reshape((-1, 3)) for bsurf in boozer_surfaces])
+        table2.add_row('foot-point residual max|phi prime|', f'{sdf.foot_residual(_foot_gammas):.4e}')
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
     table2.add_row('minimum aux-to-modular coil distance',
                    ' '.join([f'{a.shortest_distance():.3e}' for a in aux_coil_distances]))
@@ -828,6 +834,17 @@ def fun(dofs):
             fail_reasons.append(f'singular polish[{i}] Newton solve did not converge')
         elif not fl.res.get('square', False):
             fail_reasons.append(f'singular polish[{i}] system is not square (bad mu partition)')
+
+    # Helical vessel: foot-point solve unconverged (residual >> tol) => degenerate tube /
+    # unreliable SDF; treat as a failed evaluation so the quadratic barrier makes the line
+    # search retreat (mirrors boozer_all.py).
+    if isinstance(sdf, HelicalVesselSDF):
+        _gammas = np.concatenate(
+            [fl.curve.gamma() for fl in xpoints]
+            + [bs.surface.gamma().reshape((-1, 3)) for bs in boozer_surfaces])
+        _foot_res = sdf.foot_residual(_gammas)
+        if _foot_res > FOOT_TOL:
+            fail_reasons.append(f'helical SDF foot-point unconverged (max|phi prime|={_foot_res:.2e})')
 
     if fail_reasons:
         print('failed — quadratic barrier toward last good point: ' + '; '.join(fail_reasons))
