@@ -154,6 +154,7 @@ class Device:
 
     nonqs_pct:     Optional[float] = None   # percent
     max_rel_error: Optional[float] = None   # fraction
+    kind:          str = "init"             # 'init' | 'polished' | 'unpolished'
     metrics: list[Metric] = field(default_factory=list)
 
 
@@ -182,6 +183,22 @@ def parse_folder_params(name: str) -> dict[str, str]:
     # Devices predating the DN/SN split have no null token; treat them as DN.
     out.setdefault("null", "DN")
     return out
+
+
+_NUM_AUX_RE = re.compile(r"num_aux=(\d+)")
+
+
+def device_kind(name: str) -> str:
+    """Classify a device by its polish state, read straight from the folder name:
+      'unpolished' — boozer_singular.py aux-coil device (folder ends in '_unpolished'),
+      'init'       — boozer_all.py num_aux=0 device (no aux coils, never polished),
+      'polished'   — boozer_singular_opt.py optimized device (num_aux>0, not unpolished).
+    num_aux is matched directly here (NOT via parse_folder_params, whose split('_')
+    turns the 'num_aux=N' token into 'aux=N')."""
+    if name.endswith("_unpolished"):
+        return "unpolished"
+    m = _NUM_AUX_RE.search(name)
+    return "init" if (m is None or int(m.group(1)) == 0) else "polished"
 
 
 def parse_summary(path: Path) -> list[Metric]:
@@ -351,6 +368,7 @@ def find_devices(root: Path, progress=None) -> list[Device]:
             scene_left  = folder / "scene_left.png"  if has_left else None,
             summary_path= folder / "summary.txt"     if "summary.txt" in fset else None,
         )
+        device.kind = device_kind(device.name)
 
         if device.summary_path is not None:
             device.metrics = parse_summary(device.summary_path)
@@ -557,6 +575,25 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Parameter filters")
 
+    # Polish-state filter (derived from the folder name, not a parsed param): init vs
+    # polished vs unpolished. Only the kinds actually present in the scan are offered.
+    KIND_FILTER = {
+        "Any": None,
+        "init (num_aux=0)": "init",
+        "polished": "polished",
+        "unpolished": "unpolished",
+    }
+    _kinds_present = {r.kind for r in records}
+    kind_labels = ["Any"] + [lbl for lbl, k in KIND_FILTER.items()
+                             if k is not None and k in _kinds_present]
+    kind_choice = st.selectbox(
+        "Polish state", kind_labels, index=0,
+        help="init = boozer_all num_aux=0 device (no aux coils); polished = "
+             "boozer_singular_opt.py optimized device (num_aux>0); unpolished = "
+             "boozer_singular.py aux-coil device (folder ends in _unpolished).",
+    )
+    kind_want = KIND_FILTER[kind_choice]
+
     available_keys = [k for k in PARAM_ORDER
                       if k not in HIDDEN_PARAMS and any(k in r.params for r in records)]
     extras = sorted({k for r in records for k in r.params
@@ -596,6 +633,8 @@ def keep(r: Device) -> bool:
         if rk not in hidden:
             return False
     elif rk in hidden:
+        return False
+    if kind_want is not None and r.kind != kind_want:
         return False
     for k, choice in selections.items():
         if choice != "Any" and r.params.get(k) != choice:

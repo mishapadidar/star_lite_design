@@ -38,7 +38,7 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
-from star_lite_design.utils.helicalvessel import HelicalVesselSDF
+from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 
 from star_lite_design.utils import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
@@ -198,8 +198,8 @@ elif vessel_id in (3, 4):
     #   vessel_id 3: CONSTANT radius (radius_num_modes=0).
     #   vessel_id 4: VARIABLE radius R(t), same Fourier order as the centerline.
     rr = 0.2
-    HELICAL_NUM_MODES = 4       # centerline Fourier order
-    HELICAL_RADIUS_MODES = 4    # radius R(t) Fourier order (vessel 4 only)
+    HELICAL_NUM_MODES = 2       # centerline Fourier order
+    HELICAL_RADIUS_MODES = 2    # radius R(t) Fourier order (vessel 4 only)
     radius_num_modes = HELICAL_RADIUS_MODES if vessel_id == 4 else 0
     sdf = HelicalVesselSDF.from_curve_xyz_fourier_symmetries(
         axes[0].curve, rr, stellsym=(null_type == 'DN'),
@@ -923,6 +923,18 @@ def fun(dofs):
     for i, fl in enumerate(xpoints):
         if not fl.res['success']:
             fail_reasons.append(f'xpoint[{i}] Newton solve did not converge')
+
+    # Helical vessel: if the foot-point solve failed to converge on the plasma-
+    # boundary points (residual >> tol, i.e. it hit maxiter), the tube is degenerate
+    # (R*kappa near/over 1) and the SDF/gradient are unreliable -- treat it like a
+    # failed surface solve so the quadratic barrier makes the line search retreat.
+    if isinstance(sdf, HelicalVesselSDF):
+        _gammas = np.concatenate(
+            [fl.curve.gamma() for fl in xpoints]
+            + [bs.surface.gamma().reshape((-1, 3)) for bs in boozer_surfaces])
+        _foot_res = sdf.foot_residual(_gammas)
+        if _foot_res > FOOT_TOL:
+            fail_reasons.append(f'helical SDF foot-point unconverged (max|phi prime|={_foot_res:.2e})')
 
     if fail_reasons:
         print('failed — quadratic barrier toward last good point: ' + '; '.join(fail_reasons))

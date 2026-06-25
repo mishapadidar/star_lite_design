@@ -6,6 +6,20 @@ from jax import lax
 from simsopt._core import Optimizable
 from pyevtk.hl import gridToVTK  # pip install pyevtk
 
+# Single coarse sampling resolution shared by every grid in this module: the SDF
+# foot-point bracketing scan over [0,1) and the geometric metrics (kappa, dR/ds,
+# arclength, radius) over one field period [0,1/nfp). One value suffices -- the
+# binding requirement is that the SDF scan bracket the global basin, i.e.
+# N_GRID >~ 4*max(nfp*N, ntor); the per-period geometric grids are then over-
+# resolved by a factor nfp (harmless). Bump it if a higher centerline order needs
+# finer bracketing.
+N_GRID = 64
+
+# Foot-point solve tolerance: the guarded Newton drives |phi'(t*)| below this. It is
+# also the convergence test elsewhere -- a residual above FOOT_TOL means the solve hit
+# maxiter (degenerate tube, R*kappa >= 1), which callers use to flag a bad config.
+FOOT_TOL = 1e-11
+
 # ---------- vessel SDF about a CurveXYZFourierSymmetries centerline ----------
 # Centerline parametrized exactly as simsopt's CurveXYZFourierSymmetries, with
 # field-period (nfp) and optional stellarator symmetry, parameter theta in [0,1):
@@ -83,16 +97,17 @@ def _R(t, rc, rs, nfp):
     ms = jnp.arange(1, rs.shape[0] + 1)     # 1..N   (sine)
     return rc @ jnp.cos(2 * jnp.pi * nfp * mc * t) + rs @ jnp.sin(2 * jnp.pi * nfp * ms * t)
 
-def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=128, tol=1e-11, maxiter=100):
+def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=N_GRID, tol=FOOT_TOL, maxiter=100, return_residual=False):
     """Signed distance from each point in `pts` to the variable-radius tube.
 
     The tube is the union of balls B(C(t), R(t)), so the exact SDF is
         Phi(p) = min_t ( ||p - C(t*)|| - R(t*) ),
     where t* is the "foot point" that minimizes the distance-to-ball over the
     centerline. There is no closed form for t*, so for each query point we
-    (1) seed the global basin with a coarse scan, (2) polish with Newton on
-    phi'(t*) = 0, and (3) detach the solve so autodiff still returns the exact
-    gradient (envelope theorem: phi'(t*) = 0 kills the dt*/d(params) term).
+    (1) seed the global basin with a coarse scan + bracket, (2) polish phi'(t*)=0
+    with bisection-guarded Newton ("rtsafe") run to |phi'| < tol, and (3) detach
+    the solve so autodiff still returns the exact gradient (envelope theorem:
+    phi'(t*) = 0 kills the dt*/d(params) term).
 
     Args:
         pts:      (M, 3) query points.
@@ -110,14 +125,11 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=1
     xc, xs, yc, ys, zc, zs, rc, rs = _unpack(params, stellsym, r_order)  # harmonics + radius
 
     def one(p):                                        # --- SDF for one point p ---
-        # phi(t): signed distance from p to the ball at parameter t (distance to
-        # the centerline point C(t) minus the local radius R(t)). The tube SDF is
-        # the minimum of phi over t (union of balls).
+        # phi(t): signed distance from p to the ball at parameter t (||p - C(t)|| - R(t));
+        # the tube SDF is min_t phi (union of balls).
         phi = lambda t: (jnp.linalg.norm(p - _C(t, xc, xs, yc, ys, zc, zs, nfp, ntor))
                          - _R(t, rc, rs, nfp))
-
-        # phi'(t) and phi''(t) by autodiff -- no hand-coded curve derivatives needed.
-        g, h = jax.grad(phi), jax.grad(jax.grad(phi))
+        g, h = jax.grad(phi), jax.grad(jax.grad(phi))  # phi'(t), phi''(t) by autodiff
 
         # (1) GLOBAL SEARCH + BRACKET: scan phi over one period [0,1), pick the
         #     smallest sample (correct basin even if the curve wiggles), and bracket
@@ -132,9 +144,9 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=1
         xh = jnp.where(g(a) <= 0.0, b, a)
 
         # (2) LOCAL POLISH: bisection-guarded Newton ("rtsafe"), iterated as a
-        #     while_loop UNTIL the residual |phi'(t)| < tol (or maxiter). Each step
-        #     takes a Newton step on phi'(t)=0 only if it stays inside [xl,xh] and
-        #     shrinks the bracket by >= half; otherwise it bisects. The bracket
+        #     while_loop UNTIL the residual |phi'(t)| < tol (or maxiter). A Newton
+        #     step on phi'(t)=0 is taken only if it stays inside [xl,xh] and shrinks
+        #     the bracket by >= half; otherwise it bisects. The bracket
         #     (phi'(xl) <= 0 <= phi'(xh)) is kept by the sign of phi' at each new
         #     iterate. The bisection branch never divides by phi'', so the solve is
         #     robust (degrading to linear) as phi'' -> 0 near R*kappa = 1, where plain
@@ -162,48 +174,22 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=1
             return (t_new, g_new, h_new, xl_new, xh_new, dx_new, dx, it + 1)
 
         dx0 = jnp.abs(xh - xl)
-        t, resid, *_ = lax.while_loop(
-            _cond, _step, (t0, g(t0), h(t0), xl, xh, dx0, dx0, jnp.array(0)))
+        st = lax.while_loop(_cond, _step, (t0, g(t0), h(t0), xl, xh, dx0, dx0, jnp.array(0)))
+        t, resid = st[0], st[1]                         # foot point and its residual phi'(t*)
 
-        # (3) DETACH the foot point. Freezing t* loses NOTHING -- the envelope
-        #     (Danskin) theorem makes the frozen-t* gradient equal the true total
-        #     gradient. Write the parametrized distance-to-ball as phi(t, q) with
-        #     q = (p, params), and the SDF as the optimal value
-        #         Phi(q) = min_t phi(t, q) = phi(t*(q), q),   t*(q) := argmin_t phi.
-        #     Differentiating the composition by the chain rule,
-        #         dPhi/dq = phi_t(t*, q) . dt*/dq  +  phi_q(t*, q),
-        #     where phi_t := d phi/dt and phi_q := partial phi/partial q (t held
-        #     fixed). But t* is an interior minimizer, so the first-order optimality
-        #     condition is exactly the Newton residual we drove to zero in (2):
-        #         phi_t(t*, q) = 0.
-        #     Hence the dt*/dq term drops identically and
-        #         dPhi/dq = phi_q(t*, q),
-        #     i.e. the gradient with t* held CONSTANT.
-        #
-        #     What stop_gradient does: it is the IDENTITY in the forward pass
-        #     (stop_gradient(t) == t, the value is untouched) but declares a ZERO
-        #     derivative in the backward pass (d/d(.)[stop_gradient(t)] = 0). So
-        #     autodiff treats t* as a frozen constant and never differentiates
-        #     HOW it was produced -- it severs only the IMPLICIT path
-        #     params -> t* -> phi (which would otherwise backprop through argmin,
-        #     not differentiable, and the Newton iterates). The EXPLICIT dependence
-        #     of phi on params -- via C(t*) and R(t*) at the frozen t* -- is left
-        #     fully differentiable, so reverse mode returns exactly phi_q(t*, q).
-        #     By the optimality argument above that frozen-t* gradient phi_q equals
-        #     the true total derivative dPhi/dq (the discarded dt*/dq term is
-        #     provably 0, so nothing real is dropped). (torch: t.detach();
-        #     tensorflow: tf.stop_gradient.) Concretely this gives:
-        #       * spatial gradient (q = p):    grad_p Phi = (p - C(t*))/||p - C(t*)||,
-        #         the exact outward unit normal of the tube surface;
-        #       * shape gradient (q = params): grad_params Phi = partial/partial(params)
-        #         [ ||p - C(t*)|| - R(t*) ] at fixed t*, i.e. exact sensitivity to the
-        #         centerline AND radius harmonics.
+        # (3) DETACH the foot point: by the envelope theorem phi'(t*)=0, so freezing
+        #     t* loses nothing and grad(Phi) = phi_q(t*) is exact (the implicit
+        #     params->t* path contributes zero). stop_gradient also makes the
+        #     non-reverse-differentiable while_loop / argmin invisible to autodiff --
+        #     the backward pass only differentiates phi at the frozen t*, giving the
+        #     exact outward normal (grad_p) and shape gradient (grad_params).
         t = lax.stop_gradient(t)
+        sdf_val = sign * phi(t)
+        return (sdf_val, resid) if return_residual else sdf_val
 
-        return sign * phi(t), resid
-    sdfs, resids =  jax.vmap(one)(pts)                          # vectorize over all M points
-    jax.debug.print("max |g(t*)| = {m}", m=jnp.max(jnp.abs(resids)))
-    return sdfs
+    # vectorize over all M points. With return_residual, also returns the (M,) array
+    # of foot-point residuals |phi'(t*)| (for a convergence / line-search check).
+    return jax.vmap(one)(pts)
 
 def kappa_helical_vessel(t, params, nfp, ntor, stellsym, r_order):
     """Curvature kappa(t) of the centerline at parameter(s) t in [0,1).
@@ -226,7 +212,7 @@ def radius_helical_vessel(t, params, nfp, stellsym, r_order):
     t = jnp.asarray(t)
     return R(t) if t.ndim == 0 else jax.vmap(R)(t)
 
-def max_dr_ds_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=512):
+def max_dr_ds_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """max_t |dR/ds| = max_t |R'(t)| / ||C'(t)|| over a uniform grid: the radius-
     slope regime metric (must stay < 1). Identically 0 for a constant radius."""
     xc, xs, yc, ys, zc, zs, rc, rs = _unpack(params, stellsym, r_order)
@@ -237,7 +223,7 @@ def max_dr_ds_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=512):
     slope = lambda s: jnp.abs(jax.grad(R)(s)) / jnp.linalg.norm(jax.jacfwd(C)(s))
     return jnp.max(jax.vmap(slope)(tg))
 
-def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=256):
+def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """Squared coefficient of variation of the centerline speed ||C'(t)||:
     mean((|C'| - <|C'|>)^2) / <|C'|>^2. Zero iff the centerline is parametrized
     at constant arclength; used as a penalty to keep the toroidal parameter
@@ -251,7 +237,7 @@ def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_g
     mean = jnp.mean(speeds)
     return jnp.mean((speeds - mean) ** 2) / mean ** 2
 
-def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=512):
+def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """Geometrical penalty on the tube, sampled on a uniform grid, combining:
       (1) the valid-tube regime  max_t R(t)*kappa(t) < 1  (no self-intersection
           across a bend) and  max_t |dR/ds| < 1  (radius grows slower than
@@ -430,7 +416,7 @@ class HelicalVesselSDF(Optimizable):
     def num_dofs(self):
         return len(self.local_full_x)
 
-    def kappa(self, t=None, n_grid=512):
+    def kappa(self, t=None, n_grid=N_GRID):
         """Centerline curvature kappa.
 
         The valid-tube regime requires R(t)*kappa(t) < 1 everywhere; sample this
@@ -448,7 +434,7 @@ class HelicalVesselSDF(Optimizable):
                                                self.local_full_x, self.nfp,
                                                self.ntor, self.stellsym, self._Mr))
 
-    def radius(self, t=None, n_grid=512):
+    def radius(self, t=None, n_grid=N_GRID):
         """Tube radius R(t) (constant when radius order Mr == 0)."""
         if t is None:
             t = np.linspace(0.0, 1.0, n_grid, endpoint=False)
@@ -456,7 +442,7 @@ class HelicalVesselSDF(Optimizable):
                                                 self.local_full_x, self.nfp,
                                                 self.stellsym, self._Mr))
 
-    def max_kappa_radius(self, n_grid=512):
+    def max_kappa_radius(self, n_grid=N_GRID):
         """max_t R(t)*kappa(t): the curvature regime metric (must stay < 1).
 
         R*kappa is 1/nfp-periodic (intrinsic + nfp-frequency profile), so sampling
@@ -464,17 +450,28 @@ class HelicalVesselSDF(Optimizable):
         t = np.linspace(0.0, 1.0 / self.nfp, n_grid, endpoint=False)
         return float(np.max(self.kappa(t) * self.radius(t)))
 
-    def max_dr_ds(self, n_grid=512):
+    def max_dr_ds(self, n_grid=N_GRID):
         """max_t |dR/ds| = max_t |R'(t)|/||C'(t)||: the radius-slope regime metric
         (must stay < 1; 0 for a constant radius)."""
         return float(max_dr_ds_helical_vessel(
             self.local_full_x, self.nfp, self.ntor, self.stellsym, self._Mr, n_grid))
 
-    def arclength_variation(self, n_grid=256):
+    def arclength_variation(self, n_grid=N_GRID):
         """Squared coefficient of variation of the centerline speed ||C'(t)||;
         0 iff the centerline is parametrized at constant arclength."""
         return float(arclength_variation_helical_vessel(
             self.local_full_x, self.nfp, self.ntor, self.stellsym, self._Mr, n_grid))
+
+    def foot_residual(self, pts):
+        """max_p |phi'(t*_p)| over the query points `pts` (eager). The foot-point
+        solve drives this below its tolerance, so a value well above tol means the
+        solve hit maxiter without converging -- the tube is degenerate/invalid
+        (e.g. R*kappa >= 1) and the SDF is unreliable there. Use it to detect a bad
+        configuration and trigger an optimizer line-search retreat."""
+        _, resids = sdf_helical_vessel(np.asarray(pts), self.local_full_x, 1.0,
+                                       self.nfp, self.ntor, self.stellsym, self._Mr,
+                                       return_residual=True)
+        return float(np.max(np.abs(resids)))
 
     @property
     def rr(self):
