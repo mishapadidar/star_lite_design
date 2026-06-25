@@ -823,6 +823,12 @@ def callback(dofs):
         table2.add_row('max kappa*R (helical vessel)', f'{sdf.max_kappa_radius():.4e}')
         table2.add_row('max |dR/ds| (helical vessel)', f'{sdf.max_dr_ds():.4e}')
         table2.add_row('centerline arclength variation', f'{sdf.arclength_variation():.4e}')
+        # foot-point optimality residual max_p |phi'(t*)| on the plasma boundary;
+        # ~0 (< FOOT_TOL) means every foot-point solve converged.
+        _foot_gammas = np.concatenate(
+            [xp.curve.gamma() for xp in xpoints]
+            + [bsurf.surface.gamma().reshape((-1, 3)) for bsurf in boozer_surfaces])
+        table2.add_row('foot-point residual max|phi prime|', f'{sdf.foot_residual(_foot_gammas):.4e}')
     table2.add_row('minimum coil-to-coil distance', f'{Jccdist.shortest_distance():.3e}')
     
     table2.add_row('fieldline mean-z', ' '.join([f'{Jfl.max_distance():.3e}' for Jfl in meanzs]))
