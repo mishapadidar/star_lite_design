@@ -315,14 +315,25 @@ class HelicalVesselSDF(Optimizable):
                  for m in range(m0, m0 + len(a))]
         super().__init__(depends_on=[], x0=x0, names=names, **kwargs)
         self.nfp, self.ntor = int(nfp), int(ntor)
-        self.pure = partial(sdf_helical_vessel, nfp=self.nfp, ntor=self.ntor,
-                            stellsym=self.stellsym, r_order=self._Mr)
-        self.quadratic_threshold = partial(quadratic_threshold_helical_vessel,
-                                            nfp=self.nfp, ntor=self.ntor,
-                                            stellsym=self.stellsym, r_order=self._Mr)
-        self.quadratic_distance = partial(quadratic_distance_helical_vessel,
-                                           nfp=self.nfp, ntor=self.ntor,
-                                           stellsym=self.stellsym, r_order=self._Mr)
+        _sj = dict(nfp=self.nfp, ntor=self.ntor, stellsym=self.stellsym, r_order=self._Mr)
+        # JIT the EAGER SDF paths used by the diagnostics (shortest/longest_distance,
+        # eval, to_vtk, foot_residual) and the per-grid metric helpers. Run eagerly,
+        # the while_loop/vmap foot-point solve dispatches op-by-op and is ~1000x slower
+        # than the compiled kernel (it made the optimizer callback take seconds; jitted
+        # it is milliseconds). Static args (nfp/ntor/stellsym/r_order/n_grid) are bound
+        # here, so only `params` (the dofs) varies -> each compiles once and is reused.
+        # quadratic_threshold/_distance stay plain partials -- VesselDistance jits them
+        # itself (self.J_jax), so they are already fast there.
+        self.pure = jax.jit(partial(sdf_helical_vessel, **_sj))
+        self._resid_fn = jax.jit(partial(sdf_helical_vessel, return_residual=True, **_sj))
+        self.quadratic_threshold = partial(quadratic_threshold_helical_vessel, **_sj)
+        self.quadratic_distance = partial(quadratic_distance_helical_vessel, **_sj)
+        self._kappa_fn = jax.jit(partial(kappa_helical_vessel, nfp=self.nfp, ntor=self.ntor,
+                                         stellsym=self.stellsym, r_order=self._Mr))
+        self._radius_fn = jax.jit(partial(radius_helical_vessel, nfp=self.nfp,
+                                          stellsym=self.stellsym, r_order=self._Mr))
+        self._max_dr_ds_fn = jax.jit(partial(max_dr_ds_helical_vessel, n_grid=N_GRID, **_sj))
+        self._arclen_fn = jax.jit(partial(arclength_variation_helical_vessel, n_grid=N_GRID, **_sj))
 
     @classmethod
     def from_curve_xyz_fourier_symmetries(cls, curve, rr, stellsym=None, num_modes=4,
@@ -430,17 +441,13 @@ class HelicalVesselSDF(Optimizable):
         """
         if t is None:
             t = np.linspace(0.0, 1.0, n_grid, endpoint=False)
-        return np.asarray(kappa_helical_vessel(np.asarray(t, float),
-                                               self.local_full_x, self.nfp,
-                                               self.ntor, self.stellsym, self._Mr))
+        return np.asarray(self._kappa_fn(np.asarray(t, float), self.local_full_x))
 
     def radius(self, t=None, n_grid=N_GRID):
         """Tube radius R(t) (constant when radius order Mr == 0)."""
         if t is None:
             t = np.linspace(0.0, 1.0, n_grid, endpoint=False)
-        return np.asarray(radius_helical_vessel(np.asarray(t, float),
-                                                self.local_full_x, self.nfp,
-                                                self.stellsym, self._Mr))
+        return np.asarray(self._radius_fn(np.asarray(t, float), self.local_full_x))
 
     def max_kappa_radius(self, n_grid=N_GRID):
         """max_t R(t)*kappa(t): the curvature regime metric (must stay < 1).
@@ -448,29 +455,26 @@ class HelicalVesselSDF(Optimizable):
         R*kappa is 1/nfp-periodic (intrinsic + nfp-frequency profile), so sampling
         one field period [0, 1/nfp) captures the maximum at nfp x finer resolution."""
         t = np.linspace(0.0, 1.0 / self.nfp, n_grid, endpoint=False)
-        return float(np.max(self.kappa(t) * self.radius(t)))
+        x = self.local_full_x
+        return float(np.max(np.asarray(self._kappa_fn(t, x)) * np.asarray(self._radius_fn(t, x))))
 
-    def max_dr_ds(self, n_grid=N_GRID):
+    def max_dr_ds(self):
         """max_t |dR/ds| = max_t |R'(t)|/||C'(t)||: the radius-slope regime metric
-        (must stay < 1; 0 for a constant radius)."""
-        return float(max_dr_ds_helical_vessel(
-            self.local_full_x, self.nfp, self.ntor, self.stellsym, self._Mr, n_grid))
+        (must stay < 1; 0 for a constant radius). Sampled on N_GRID points."""
+        return float(self._max_dr_ds_fn(self.local_full_x))
 
-    def arclength_variation(self, n_grid=N_GRID):
+    def arclength_variation(self):
         """Squared coefficient of variation of the centerline speed ||C'(t)||;
-        0 iff the centerline is parametrized at constant arclength."""
-        return float(arclength_variation_helical_vessel(
-            self.local_full_x, self.nfp, self.ntor, self.stellsym, self._Mr, n_grid))
+        0 iff the centerline is parametrized at constant arclength. N_GRID points."""
+        return float(self._arclen_fn(self.local_full_x))
 
     def foot_residual(self, pts):
-        """max_p |phi'(t*_p)| over the query points `pts` (eager). The foot-point
-        solve drives this below its tolerance, so a value well above tol means the
-        solve hit maxiter without converging -- the tube is degenerate/invalid
-        (e.g. R*kappa >= 1) and the SDF is unreliable there. Use it to detect a bad
-        configuration and trigger an optimizer line-search retreat."""
-        _, resids = sdf_helical_vessel(np.asarray(pts), self.local_full_x, 1.0,
-                                       self.nfp, self.ntor, self.stellsym, self._Mr,
-                                       return_residual=True)
+        """max_p |phi'(t*_p)| over the query points `pts`. The foot-point solve drives
+        this below its tolerance, so a value well above tol means the solve hit maxiter
+        without converging -- the tube is degenerate/invalid (e.g. R*kappa >= 1) and the
+        SDF is unreliable there. Use it to detect a bad configuration and trigger an
+        optimizer line-search retreat. (Uses the jitted solve.)"""
+        _, resids = self._resid_fn(np.asarray(pts), self.local_full_x, 1.0)
         return float(np.max(np.abs(resids)))
 
     @property
