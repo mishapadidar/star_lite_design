@@ -83,7 +83,7 @@ def _R(t, rc, rs, nfp):
     ms = jnp.arange(1, rs.shape[0] + 1)     # 1..N   (sine)
     return rc @ jnp.cos(2 * jnp.pi * nfp * mc * t) + rs @ jnp.sin(2 * jnp.pi * nfp * ms * t)
 
-def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=256, n_newton=8):
+def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=128, tol=1e-11, maxiter=100):
     """Signed distance from each point in `pts` to the variable-radius tube.
 
     The tube is the union of balls B(C(t), R(t)), so the exact SDF is
@@ -101,8 +101,9 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=2
         nfp:      field-period number (multiplies the basis frequencies).
         ntor:     toroidal winding number (rotates xhat/yhat into x/y).
         n_grid:   coarse-scan resolution; use >~ 4*max(nfp*N, ntor) so the scan
-                  lands in the correct global basin before Newton refines it.
-        n_newton: number of Newton steps (quadratic convergence near the min).
+                  brackets the correct global basin before the polish refines it.
+        tol:      stop each foot-point solve once the residual |phi'(t)| < tol.
+        maxiter:  hard cap on guarded-Newton iterations (degenerate-point safety).
     Returns:
         (M,) array of signed distances.
     """
@@ -118,19 +119,51 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=2
         # phi'(t) and phi''(t) by autodiff -- no hand-coded curve derivatives needed.
         g, h = jax.grad(phi), jax.grad(jax.grad(phi))
 
-        # (1) GLOBAL SEARCH: sample phi on a uniform grid over one period [0,1) and
-        #     pick the parameter with the smallest value. This chooses the correct
-        #     basin so Newton can't fall into a wrong local minimum on a curve that
-        #     wiggles or folds back near itself.
+        # (1) GLOBAL SEARCH + BRACKET: scan phi over one period [0,1), pick the
+        #     smallest sample (correct basin even if the curve wiggles), and bracket
+        #     the foot point with the two neighbouring grid points (phi is 1-periodic,
+        #     so endpoints just outside [0,1) are fine). Orient [xl, xh] so that
+        #     phi'(xl) <= 0 <= phi'(xh): the root of phi' between them is the MINIMUM.
         grid = jnp.linspace(0.0, 1.0, n_grid, endpoint=False)
-        t = grid[jnp.argmin(jax.vmap(phi)(grid))]
+        t0 = grid[jnp.argmin(jax.vmap(phi)(grid))]
+        dt = 1.0 / n_grid
+        a, b = t0 - dt, t0 + dt
+        xl = jnp.where(g(a) <= 0.0, a, b)
+        xh = jnp.where(g(a) <= 0.0, b, a)
 
-        # (2) LOCAL POLISH: Newton on the normality condition phi'(t) = 0. In-regime
-        #     phi'' > 0, so jnp.maximum(., 1e-9) only guards floating-point underflow
-        #     rather than changing the step; convergence is quadratic.
-        t, _ = lax.scan(
-            lambda t, _: (t - g(t) / jnp.maximum(h(t), 1e-9), None),
-            t, None, length=n_newton)
+        # (2) LOCAL POLISH: bisection-guarded Newton ("rtsafe"), iterated as a
+        #     while_loop UNTIL the residual |phi'(t)| < tol (or maxiter). Each step
+        #     takes a Newton step on phi'(t)=0 only if it stays inside [xl,xh] and
+        #     shrinks the bracket by >= half; otherwise it bisects. The bracket
+        #     (phi'(xl) <= 0 <= phi'(xh)) is kept by the sign of phi' at each new
+        #     iterate. The bisection branch never divides by phi'', so the solve is
+        #     robust (degrading to linear) as phi'' -> 0 near R*kappa = 1, where plain
+        #     Newton's step blows up.
+        def _cond(st):
+            gt, it = st[1], st[7]
+            return (jnp.abs(gt) > tol) & (it < maxiter)
+
+        def _step(st):
+            t, gt, ht, xl, xh, dx, dxold, it = st
+            out = ((t - xh) * ht - gt) * ((t - xl) * ht - gt) > 0.0   # Newton leaves bracket?
+            slow = jnp.abs(2.0 * gt) > jnp.abs(dxold * ht)            # step not shrinking >= half?
+            bisect = out | slow | (jnp.abs(ht) < 1e-14)               # or phi'' ~ 0
+            dx_bis = 0.5 * (xh - xl)
+            ht_safe = jnp.where(jnp.abs(ht) > 1e-300, ht, 1e-300)     # guard the unused-branch divide
+            dx_newt = gt / ht_safe
+            dx_step = jnp.where(bisect, dx_bis, dx_newt)
+            t_prop = jnp.where(bisect, xl + dx_bis, t - dx_newt)
+            done = jnp.abs(gt) <= tol                                 # freeze converged lanes (vmap)
+            t_new = jnp.where(done, t, t_prop)
+            dx_new = jnp.where(done, dx, dx_step)
+            g_new, h_new = g(t_new), h(t_new)
+            xl_new = jnp.where((g_new < 0.0) & (~done), t_new, xl)    # keep phi'(xl) <= 0 <= phi'(xh)
+            xh_new = jnp.where((g_new >= 0.0) & (~done), t_new, xh)
+            return (t_new, g_new, h_new, xl_new, xh_new, dx_new, dx, it + 1)
+
+        dx0 = jnp.abs(xh - xl)
+        t, resid, *_ = lax.while_loop(
+            _cond, _step, (t0, g(t0), h(t0), xl, xh, dx0, dx0, jnp.array(0)))
 
         # (3) DETACH the foot point. Freezing t* loses NOTHING -- the envelope
         #     (Danskin) theorem makes the frozen-t* gradient equal the true total
@@ -167,9 +200,10 @@ def sdf_helical_vessel(pts, params, sign, nfp, ntor, stellsym, r_order, n_grid=2
         #         centerline AND radius harmonics.
         t = lax.stop_gradient(t)
 
-        return sign * phi(t)
-
-    return jax.vmap(one)(pts)                          # vectorize over all M points
+        return sign * phi(t), resid
+    sdfs, resids =  jax.vmap(one)(pts)                          # vectorize over all M points
+    jax.debug.print("max |g(t*)| = {m}", m=jnp.max(jnp.abs(resids)))
+    return sdfs
 
 def kappa_helical_vessel(t, params, nfp, ntor, stellsym, r_order):
     """Curvature kappa(t) of the centerline at parameter(s) t in [0,1).
