@@ -239,9 +239,10 @@ def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_g
 
 def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """Geometrical penalty on the tube, sampled on a uniform grid, combining:
-      (1) the valid-tube regime  max_t R(t)*kappa(t) < 1  (no self-intersection
-          across a bend) and  max_t |dR/ds| < 1  (radius grows slower than
-          arclength; no swallowing along the axis), each as max(excess,0)^2;
+      (1) the valid-tube regime  R(t)*kappa(t) < 1  (no self-intersection across a
+          bend) and  |dR/ds| < 1  (radius grows slower than arclength; no swallowing
+          along the axis), each as a MEAN of squared hinges over the grid (smooth,
+          unlike a max over t which would concentrate the gradient at one point);
       (2) radius positivity  R(t) > 0  (a negative radius is meaningless), as a
           mean of squared hinges over the grid; and
       (3) a constant-arclength penalty on the centerline: the squared coefficient
@@ -264,8 +265,8 @@ def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
         slope = jnp.abs(jax.grad(R)(s)) / speed       # |dR/ds|
         return speed, R(s) * kap, slope, R(s)
     speeds, Rkap, slopes, Rs = jax.vmap(per_t)(tg)
-    curv = jnp.maximum(jnp.max(Rkap) - 1.0, 0.0) ** 2
-    slp = jnp.maximum(jnp.max(slopes) - 1.0, 0.0) ** 2
+    curv = jnp.mean(jnp.maximum(Rkap - 1.0, 0.0) ** 2)     # R*kappa < 1 everywhere
+    slp = jnp.mean(jnp.maximum(slopes - 1.0, 0.0) ** 2)    # |dR/ds| < 1 everywhere
     pos = jnp.mean(jnp.maximum(-Rs, 0.0) ** 2)             # radius must stay positive
     mean = jnp.mean(speeds)
     arclen = jnp.mean((speeds - mean) ** 2) / mean ** 2     # constant-arclength penalty
