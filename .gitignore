@@ -22,3 +22,6 @@ output*/
 # === Bulk previous-run snapshot tree ===
 prev_all/
 backup/
+
+.*
+paper_plots*
