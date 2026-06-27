@@ -13,7 +13,8 @@ circular-coil parameters
     mu = (I_1, ..., I_N, r_1, ..., r_N, Z)
 
 such that the total field B = B_modular + B_aux(mu) admits a periodic field
-line whose monodromy matrix equals the identity, has trace 2, or equals a user-specified SL(2)
+line whose monodromy matrix equals the identity, has a prescribed trace (options['target_trace'],
+default 2), or equals a user-specified SL(2)
 target matrix (monodromy_constraint 'identity' / 'trace' / 'target_monodromy', the last reading
 options['target_monodromy']).
 
@@ -433,7 +434,8 @@ def monodromy_matrix_pure(B, gradB, L, gammadash, gammadashdash, D):
 # -----------------------------------------------------------------------------
 
 def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_fns,
-                                 stellsym=True, monodromy_constraint='identity', target_monodromy=None):
+                                 stellsym=True, monodromy_constraint='identity', target_monodromy=None,
+                                 target_trace=2.0):
 
     pts = curve.gamma()
     dpts_dcurve = curve.dgamma_by_dcoeff()
@@ -535,8 +537,11 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     J_mon = np.concatenate((dM_dcurve, dM_dL, dM_dmu), axis=1)
 
     if monodromy_constraint == 'trace':
-        # Single equation: tr(M) - 2 = M[0,0] + M[1,1] - 2.
-        r_mon = np.array([M[0, 0] + M[1, 1] - 2.0])
+        # Single equation: tr(M) - target_trace = M[0,0] + M[1,1] - target_trace.
+        # target_trace defaults to 2.0 (the parabolic/snowflake value); set
+        # options['target_trace'] to pin the trace elsewhere, e.g. to continue an
+        # X-point's |tr| > 2 down across 2 to an O-point's |tr| < 2.
+        r_mon = np.array([M[0, 0] + M[1, 1] - target_trace])
         J_mon = J_mon[0:1] + J_mon[3:4]
     elif monodromy_constraint == 'identity':
         # Four equations: M - I = 0 (one is redundant since det(M)=1; caller drops it).
@@ -633,6 +638,8 @@ class SingularPeriodicFieldline(Optimizable):
             options['monodromy_constraint'] = 'identity'
         if 'target_monodromy' not in options:
             options['target_monodromy'] = None
+        if 'target_trace' not in options:
+            options['target_trace'] = 2.0   # only used by the 'trace' constraint
         if options['monodromy_constraint'] not in ('identity', 'trace', 'target_monodromy'):
             raise ValueError(f"Unknown monodromy_constraint {options['monodromy_constraint']!r}; "
                              "must be 'identity', 'trace', or 'target_monodromy'.")
@@ -812,7 +819,7 @@ class SingularPeriodicFieldline(Optimizable):
 
         if mon_constraint in ('identity', 'target_monodromy'):
             row_mask[-4] = False  # det(M)=1 makes one of the four equations redundant.
-        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'])
+        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
 
         b = r[row_mask]
         Jm = J[row_mask][:, col_mask]
@@ -837,7 +844,7 @@ class SingularPeriodicFieldline(Optimizable):
             length = x[-(nmu + 1)]
             mu = x[-nmu:]
             i += 1
-            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'])
+            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
             b = r[row_mask]
             Jm = J[row_mask][:, col_mask]
             #if verbose:
@@ -973,7 +980,7 @@ class SingularPeriodicFieldline(Optimizable):
 
         mon_constraint = self.options.get('monodromy_constraint', 'identity')
         if mon_constraint == 'trace':
-            r_mon = np.array([float(M[0, 0] + M[1, 1] - 2.0)])
+            r_mon = np.array([float(M[0, 0] + M[1, 1] - self.options.get('target_trace', 2.0))])
         elif mon_constraint == 'identity':
             r_mon = (M - np.eye(2)).reshape(4)
         elif mon_constraint == 'target_monodromy':
@@ -1115,7 +1122,8 @@ class SingularPeriodicFieldline(Optimizable):
         _, J, _ = singular_field_line_residual(
             self.curve, self.curve_tm, length, self.biotsavart, mu,
             self.monodromy_fns, stellsym=self.stellsym_aux,
-            monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'])
+            monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'],
+            target_trace=self.options['target_trace'])
         J_act = J[row_mask]
 
         Jm = J_act[:, col_mask]                     # dg/d(dependent)
