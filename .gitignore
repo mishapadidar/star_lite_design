@@ -1,0 +1,23 @@
+# === Python / editor junk ===
+__pycache__/
+*.py[co]
+*.swp
+*.swo
+*~
+
+# === ParaView / VTK output ===
+*.vtu
+*.vts
+*.vtr
+*.vtk
+*.pvsm
+*.pvd
+
+# === Plot images ===
+*.png
+
+# === Optimization run output directories (matched at any depth) ===
+output*/
+
+# === Bulk previous-run snapshot tree ===
+prev_all/
