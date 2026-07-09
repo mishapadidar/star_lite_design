@@ -11,7 +11,7 @@ set -uo pipefail
 # for a failed / out-of-spec device except the run log.
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt] [qs(QA|QH)]
+#                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt]
 #
 # Flow: boozer_all -> gate. If it passes, render the num_aux=0 device and copy it to
 # ceph BEFORE polishing. Then (mono 1/2) polish at num_aux=NUM_AUX_POLISH; if the
@@ -42,11 +42,6 @@ AR="${11:-0}"
 # the folder-name tail (..._num_aux_AR_attempt).
 attempt="${12}"
 
-# Quasisymmetry type / device forwarded to boozer_all.py (--qs): QA (default, the
-# 3-config designA) or QH (single-config quasi-helical device). Part of the device
-# identity, so it goes into the folder name (task_name) too. Must match boozer_all.py.
-qs="${13:-QA}"
-
 if [ "$well" = "OFF" ]; then
   well_str="OFF"
 else
@@ -59,7 +54,7 @@ HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 # Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the device
 # IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_qs=${qs}_num_aux=${1}_AR=${AR}_attempt=${attempt}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}"
 }
 
 # Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
@@ -169,10 +164,6 @@ trap cleanup EXIT
 rsync -a --exclude 'output*' --exclude 'logs*' --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
 mkdir -p "$SCRATCH/convert"
 rsync -a "$HOME_DIR/../convert/" "$SCRATCH/convert/"
-# QH devices load ../designs/qh_design/qh_device.{json,yaml} (relative to $RUN, which
-# lives at $SCRATCH/run); stage that small directory into scratch too, like convert/.
-mkdir -p "$SCRATCH/designs/qh_design"
-rsync -a "$HOME_DIR/../designs/qh_design/" "$SCRATCH/designs/qh_design/"
 
 cd "$RUN"
 
@@ -187,7 +178,7 @@ INIT_DIR="./output/$INIT_NAME"
 # ───────────────────── (1) initial optimization -> num_aux=0 ──────────────────
 bash run_boozer_all.sh \
   "$margin" "$well" "$Z" "$distance" "$on_vessel" \
-  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR" "$qs"
+  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR"
 
 # boozer_all.py writes design_opt_final_<DEVICE_ID>.json (the device ID is in the
 # name); locate it by glob (one per device dir).

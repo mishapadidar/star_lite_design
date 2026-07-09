@@ -185,3 +185,64 @@ class FieldLineDistance(Optimizable):
         return res
 
     return_fn_map = {'J': J, 'dJ': dJ}
+
+
+def mean_radius_pure(gamma):
+    """Mean cylindrical radius (1/n) sum_i sqrt(x_i^2 + y_i^2) over curve points."""
+    return jnp.mean(jnp.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2))
+
+
+class FieldLineMeanRadius(Optimizable):
+    """Mean cylindrical (major) radius of a periodic field line,
+
+        J = (1/n) sum_i sqrt(x_i^2 + y_i^2),
+
+    a major-radius proxy for a PeriodicFieldLine or SingularPeriodicFieldline.
+    UNLIKE FieldLineMeanZ this returns the mean radius itself (not a one-sided
+    penalty), so pair it with QuadraticPenalty(FieldLineMeanRadius(fl), R0,
+    'identity') to constrain the major radius.  J depends on the design dofs only
+    through the polished curve, so dJ flows through the field-line Newton adjoint
+    (res['PLU']/res['vjp']); a converged SQUARE solve is required.
+    """
+
+    def __init__(self, fieldline):
+        self.fieldline = fieldline
+        self.J_jax = jit(lambda gamma: mean_radius_pure(gamma))
+        self.thisgrad0 = jit(lambda gamma: grad(self.J_jax)(gamma))
+        super().__init__(depends_on=[fieldline])
+
+    def J(self):
+        if self.fieldline.need_to_run_code:
+            res = self.fieldline.res
+            res = self.fieldline.run_code(res['length'])
+        gamma = self.fieldline.curve.gamma()
+        return float(self.J_jax(gamma))
+
+    @derivative_dec
+    def dJ(self):
+        if self.fieldline.need_to_run_code:
+            res = self.fieldline.res
+            res = self.fieldline.run_code(res['length'])
+
+        fieldline = self.fieldline
+        gamma = fieldline.curve.gamma()
+        dJ_dgamma = np.asarray(self.thisgrad0(gamma))
+
+        curve = fieldline.curve
+        res_curve = curve.dgamma_by_dcoeff_vjp(dJ_dgamma)
+        res_curve = res_curve(curve)
+
+        P, L, U = fieldline.res['PLU']
+        dconstraint_dcoils_vjp = fieldline.res['vjp']
+
+        # tack on dJ_dlength = 0 to the end of dJ_ds
+        dJ_dc = np.zeros(L.shape[0])
+        dj_dc = res_curve.copy()
+        dJ_dc[:dj_dc.size] = dj_dc
+        adj = forward_backward(P, L, U, dJ_dc)
+
+        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, fieldline.biotsavart, fieldline)
+        res = -1 * adj_times_dg_dcoil
+        return res
+
+    return_fn_map = {'J': J, 'dJ': dJ}

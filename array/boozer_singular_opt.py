@@ -53,6 +53,7 @@ from simsopt.geo import (
     LpCurveCurvature,
     MajorRadius,
     MeanSquaredCurvature,
+    NonQuasiSymmetricRatio,
     Iotas,
     RotatedCurve,
     curves_to_vtk,
@@ -70,7 +71,6 @@ from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
-from star_lite_design.utils.nonquasisymmetryratio import NonQuasiSymmetricRatio
 from star_lite_design.utils.mubound import MuBound
 from star_lite_design.utils.tangent_map import TangentMap, AxisIota
 
@@ -112,7 +112,6 @@ mon_constraint = config['MONODROMY_CONSTRAINT']
 if mon_constraint not in ('trace', 'identity'):
     raise SystemExit(f"config MONODROMY_CONSTRAINT must be 'trace' or 'identity', "
                      f"got {mon_constraint!r}")
-qs = config.get('QS', 'QA')   # quasisymmetry type (QA/QH), written by boozer_all
 num_aux = int(args.num_aux)
 config['NUM_AUX'] = num_aux   # record it in the (output) yaml
 # 1 dependent current for the trace system, 3 for identity.
@@ -154,14 +153,7 @@ biotsavart = boozer_surfaces[0].biotsavart
 coils = biotsavart.coils
 curves = [c.curve for c in coils]
 # DN (stellsym surface): 2 independent base coils -> [0, 4]. SN: 3 -> [0, 1, 2].
-# QH stores its independent base coils first/contiguously; their count follows from the
-# symmetry expansion: len(coils)//2//nfp (stellsym) or len(coils)//nfp (non-stellsym).
-if qs == 'QH':
-    nfp = boozer_surfaces[0].surface.nfp
-    base_curve_idx = (list(range(len(coils) // 2 // nfp)) if boozer_surfaces[0].surface.stellsym
-                      else list(range(len(coils) // nfp)))
-else:
-    base_curve_idx = [0, 4] if boozer_surfaces[0].surface.stellsym else [0, 1, 2]
+base_curve_idx = [0, 4] if boozer_surfaces[0].surface.stellsym else [0, 1, 2]
 base_curves = [curves[i] for i in base_curve_idx]
 
 # ALL thresholds AND weights are read STRAIGHT from the config yaml (boozer_all
@@ -408,7 +400,7 @@ if axis_iota_enabled:
                        for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
 else:
     AXIS_IOTA_TARGET, J_axis_iota = [], None
-nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, SingularBiotSavart(fl), quasi=qs) for boozer_surface, fl in zip(boozer_surfaces, sing_fls)]
+nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, SingularBiotSavart(fl)) for boozer_surface, fl in zip(boozer_surfaces, sing_fls)]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
 
@@ -642,10 +634,9 @@ for bbsurf in boozer_surfaces:
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
 
-# make sure coils are stellarator symmetric (QA + DN only). For SN designs the base
-# coils are deliberately general (the device is no longer stellsym); QH fixes NO coil
-# harmonics (its symmetry comes from the coils_via_symmetries expansion), so skip it too.
-if qs == 'QA' and boozer_surfaces[0].surface.stellsym:
+# make sure coils are stellarator symmetric (DN only). For SN designs the base
+# coils are deliberately general (the device is no longer stellsym).
+if boozer_surfaces[0].surface.stellsym:
     for ii in [base_curve_idx[-1]]:
         c = boozer_surfaces[0].biotsavart.coils[ii].curve
         if isinstance(c, RotatedCurve):

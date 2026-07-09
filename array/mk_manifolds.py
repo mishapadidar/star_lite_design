@@ -427,13 +427,10 @@ _sc_surface = SurfaceXYZTensorFourier(
 _sc_surface.fit_to_curve(axes[0].curve, 0.45, flip_theta=False)
 surface_classifier = SurfaceClassifier(_sc_surface, h=0.05, p=2)
 
-# convert to RZFourier. Sample + fit over the X-point's OWN period 1/nfp: a QA X-point
-# is field-period-periodic (nfp=2 -> [0, 0.5)), whereas the QH X-point closes only over
-# the FULL torus (nfp=1 -> [0, 1)). Hardcoding the surface nfp (2) would fit -- and
-# monodromy-integrate in compute() -- only HALF of an nfp=1 orbit and misclassify it.
+# convert to RZFourier
 order=16
-nfp = xpoint.curve.nfp
-quadpoints=np.linspace(0, 1.0/nfp, 2*order+1, endpoint=False)
+quadpoints=np.linspace(0, 0.5, 2*order+1, endpoint=False)
+nfp=2
 stellsym=False
 
 XYZ = []
