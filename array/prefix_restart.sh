@@ -146,6 +146,10 @@ fi
 rsync -a --exclude 'output*' --exclude 'logs*' --exclude '*_disBatch_*' "$HOME_DIR/" "$RUN/"
 mkdir -p "$SCRATCH/convert"
 rsync -a "$HOME_DIR/../convert/" "$SCRATCH/convert/"
+# QH devices load ../designs/qh_design/qh_device.{json,yaml} (relative to $RUN, which
+# lives at $SCRATCH/run); stage that small directory into scratch too, like convert/.
+mkdir -p "$SCRATCH/designs/qh_design"
+rsync -a "$HOME_DIR/../designs/qh_design/" "$SCRATCH/designs/qh_design/"
 
 cd "$RUN"
 
