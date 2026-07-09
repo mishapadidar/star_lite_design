@@ -122,6 +122,10 @@ qs = args.qs
 if qs == 'QH':
     if vessel_id not in (3, 4):
         raise SystemExit('--qs QH only supports --vessel-id 3 or 4')
+    if null_type == 'SN':
+        # SN rebuilds the coils via sn_setup, which assumes the QA structure and is
+        # not QH-aware; disallow it for now (mk_tasks.sh also emits QH only with DN).
+        raise SystemExit('--qs QH does not support --null SN yet')
     if config_id not in (0, None):
         raise SystemExit('--qs QH has a single configuration; use --config 0')
     config_id = 0
@@ -156,9 +160,9 @@ print("================================")
 
 
 # Load the design. QA = designA (3 current configurations); we take the single config
-# selected by config_id. QH = the quasi-helical device: a SINGLE configuration that,
-# unlike QA, may carry MORE THAN ONE X-point -- we keep them all. QH reuses the designA
-# yaml for the penalty weights/thresholds.
+# selected by config_id. QH = the quasi-helical device: a SINGLE configuration with its
+# own X-point(s), loaded whole (no config slicing) from qh_device.json + qh_device.yaml
+# (its own penalty weights/thresholds and single-element IOTAS_TARGET).
 if qs == 'QH':
     config = yaml.safe_load(open(f"../designs/qh_design/qh_device.yaml",'r'))
     data = load(f"../designs/qh_design/qh_device.json")
@@ -220,8 +224,9 @@ curves = [c.curve for c in coils]
 # DN: 2 independent base coils (stellsym expansion gives [0,4]). SN: the rebuilt
 # coils_via_symmetries(3 bases, nfp=2, stellsym=False) set has the 3 independent
 # base coils at indices [0,1,2] (rotated copies at 3,4,5). QH stores its independent
-# base coils first and contiguously: 5 for the stellsym device (nfp=2 x2 -> 20 coils),
-# 10 for the non-stellsym device (nfp=2 -> 20 coils).
+# base coils first and contiguously; their count follows from the symmetry expansion:
+# len(coils)//2//nfp for the stellsym device (2*nfp copies each), len(coils)//nfp for
+# the non-stellsym one (nfp copies each). E.g. the 8-coil nfp=2 stellsym device -> 2.
 if qs == 'QH':
     nc = len(coils)
     nfp = boozer_surfaces[0].surface.nfp
