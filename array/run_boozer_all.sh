@@ -5,13 +5,13 @@
 # Does NOT touch ceph -- the master decides what to copy back.
 #
 #   run_boozer_all.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                     <vessel_id> <mono> <attempt> <null> [AR]
+#                     <vessel_id> <mono> <attempt> <null> [AR] [qs(QA|QH)]
 #
 # Exit status is boozer_all.py's; the master gates on the produced design json.
 set -uo pipefail
 
 margin="$1"; well="$2"; Z="$3"; distance="$4"; on_vessel="$5"
-config="$6"; vessel_id="$7"; mono="$8"; attempt="$9"; null="${10}"; AR="${11:-0}"
+config="$6"; vessel_id="$7"; mono="$8"; attempt="$9"; null="${10}"; AR="${11:-0}"; qs="${12:-QA}"
 
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -36,4 +36,5 @@ source /mnt/home/agiuliani/ceph/STAR_LITE/venv/bin/activate
   --num-aux 0 \
   --attempt "$attempt" \
   --null "$null" \
-  --AR "$AR"
+  --AR "$AR" \
+  --qs "$qs"

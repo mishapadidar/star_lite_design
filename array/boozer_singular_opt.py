@@ -53,7 +53,6 @@ from simsopt.geo import (
     LpCurveCurvature,
     MajorRadius,
     MeanSquaredCurvature,
-    NonQuasiSymmetricRatio,
     Iotas,
     RotatedCurve,
     curves_to_vtk,
@@ -71,6 +70,7 @@ from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
+from star_lite_design.utils.nonquasisymmetryratio import NonQuasiSymmetricRatio
 from star_lite_design.utils.mubound import MuBound
 from star_lite_design.utils.tangent_map import TangentMap, AxisIota
 
@@ -112,6 +112,7 @@ mon_constraint = config['MONODROMY_CONSTRAINT']
 if mon_constraint not in ('trace', 'identity'):
     raise SystemExit(f"config MONODROMY_CONSTRAINT must be 'trace' or 'identity', "
                      f"got {mon_constraint!r}")
+qs = config.get('QS', 'QA')   # quasisymmetry type (QA/QH), written by boozer_all
 num_aux = int(args.num_aux)
 config['NUM_AUX'] = num_aux   # record it in the (output) yaml
 # 1 dependent current for the trace system, 3 for identity.
@@ -400,7 +401,7 @@ if axis_iota_enabled:
                        for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
 else:
     AXIS_IOTA_TARGET, J_axis_iota = [], None
-nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, SingularBiotSavart(fl)) for boozer_surface, fl in zip(boozer_surfaces, sing_fls)]
+nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, SingularBiotSavart(fl), quasi=qs) for boozer_surface, fl in zip(boozer_surfaces, sing_fls)]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
 

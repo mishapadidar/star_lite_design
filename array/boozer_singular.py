@@ -49,7 +49,6 @@ from simsopt.geo import (
     CurveXYZFourier,
     CurveXYZFourierSymmetries,
     Volume,
-    NonQuasiSymmetricRatio,
     curves_to_vtk,
 )
 
@@ -57,6 +56,7 @@ from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
+from star_lite_design.utils.nonquasisymmetryratio import NonQuasiSymmetricRatio
 
 
 # The boozer_all design json is the only required input; the monodromy constraint
@@ -88,6 +88,7 @@ mon_constraint = config['MONODROMY_CONSTRAINT']
 if mon_constraint not in ('trace', 'identity'):
     raise SystemExit(f"config MONODROMY_CONSTRAINT must be 'trace' or 'identity', "
                      f"got {mon_constraint!r}")
+qs = config.get('QS', 'QA')   # quasisymmetry type (QA/QH), written by boozer_all
 num_aux = int(args.num_aux)
 config['NUM_AUX'] = num_aux   # record it in the (output) yaml
 # 1 dependent current for the trace system, 3 for identity.
@@ -278,7 +279,7 @@ for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing
     new_axes.append(nax)
 boozer_surfaces, axes = new_boozer_surfaces, new_axes
 
-print(f"non-QS ratio (total field): {[NonQuasiSymmetricRatio(bs, SingularBiotSavart(fl)).J()**0.5 for bs, fl in zip(boozer_surfaces, sing_fls)]}")
+print(f"non-QS ratio (total field): {[NonQuasiSymmetricRatio(bs, SingularBiotSavart(fl), quasi=qs).J()**0.5 for bs, fl in zip(boozer_surfaces, sing_fls)]}")
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -366,7 +367,7 @@ print(f"wrote {OUT_DIR}design_unpolished_final_{DEVICE_ID}.json (combined modula
 # optimization here, so no constraint relative-errors and no max_rel_error.txt.
 final_metrics = {}
 final_metrics['nonQS_percent'] = (
-    100. * (sum(NonQuasiSymmetricRatio(bs, bs.biotsavart) for bs in out_boozer_surfaces).J()
+    100. * (sum(NonQuasiSymmetricRatio(bs, bs.biotsavart, quasi=qs) for bs in out_boozer_surfaces).J()
             / len(out_boozer_surfaces))**0.5, None, None)
 
 # mirror ratio max|B|/min|B| on the (first) magnetic surface, in the TOTAL field,

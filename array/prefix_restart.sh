@@ -44,6 +44,10 @@ AR="${11:-0}"
 # the folder-name tail (..._num_aux_AR_attempt). Must match prefix.sh.
 attempt="${12}"
 
+# Quasisymmetry type forwarded to boozer_all.py (--qs); part of the device identity,
+# so it is in the folder name (task_name) too. Must match prefix.sh / boozer_all.py.
+qs="${13:-QA}"
+
 if [ "$well" = "OFF" ]; then
   well_str="OFF"
 else
@@ -54,7 +58,7 @@ margin_str=$(printf "%.2f" "$margin" | sed 's/\./p/')
 HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_qs=${qs}_num_aux=${1}_AR=${AR}_attempt=${attempt}"
 }
 
 # Shard helper -- identical to prefix.sh so the reused device is read from exactly
@@ -177,7 +181,7 @@ else
   echo "restart: design_opt_final_*.json not on ceph in $SRC_INIT_DIR — recomputing the num_aux=0 device with boozer_all.py"
   bash run_boozer_all.sh \
     "$margin" "$well" "$Z" "$distance" "$on_vessel" \
-    "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR"
+    "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR" "$qs"
   INIT_JSON="$(ls "$INIT_DIR"/design_opt_final_*.json 2>/dev/null | head -1)"
   if [ -z "$INIT_JSON" ] || [ ! -f "$INIT_JSON" ]; then
     echo "ERROR: design_opt_final_*.json not produced in $INIT_DIR — boozer_all.py failed"

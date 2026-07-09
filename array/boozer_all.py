@@ -21,7 +21,6 @@ from simsopt.geo import (
     LpCurveCurvature,
     MajorRadius,
     MeanSquaredCurvature,
-    NonQuasiSymmetricRatio,
     Iotas,
     RotatedCurve,
     SurfaceXYZTensorFourier,
@@ -43,6 +42,7 @@ from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 from star_lite_design.utils import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
 from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
+from star_lite_design.utils.nonquasisymmetryratio import NonQuasiSymmetricRatio
 
 
 def _rel_vio(a, b):
@@ -83,6 +83,11 @@ parser.add_argument("--null", type=str, default='DN', choices=['DN', 'SN'])
 #       self-intersecting). Skipped if the 80% surface would not lower the AR.
 # See star_lite_design.utils.lcfs and the AR block in the optimization loop.
 parser.add_argument("--AR", type=int, default=0, choices=[0, 1, 2])
+# Quasisymmetry type / device. QA (default) = the 3-configuration designA device,
+# optimized for quasi-axisymmetry. QH = the single-configuration quasi-helical device
+# loaded from ../designs/qh_design/qh_device.json (only vessel-id 3 or 4; ALL of its
+# X-points are kept). --qs also selects the quasisymmetry axis of NonQuasiSymmetricRatio.
+parser.add_argument("--qs", type=str, default='QA', choices=['QA', 'QH'])
 
 args = parser.parse_args()
 
@@ -109,7 +114,17 @@ mono = args.mono
 num_aux = args.num_aux
 attempt = args.attempt
 null_type = args.null
+qs = args.qs
 
+# QH is a single-configuration quasi-helical device and only supports the helical
+# vessels (id 3/4). Normalize/validate its config here so TASK_NAME/DEVICE_ID and the
+# config slicing below stay consistent (QH has exactly one configuration -> config 0).
+if qs == 'QH':
+    if vessel_id not in (3, 4):
+        raise SystemExit('--qs QH only supports --vessel-id 3 or 4')
+    if config_id not in (0, None):
+        raise SystemExit('--qs QH has a single configuration; use --config 0')
+    config_id = 0
 
 
 margin_str = f"{margin_target:.2f}".replace(".", "p")
@@ -123,7 +138,7 @@ else:
 # same ID from the folder name (it uses the identical zlib.crc32 convention).
 TASK_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_vessel}"
              f"_distance={distance_weight}_configID={config_id}_vesselID={vessel_id}"
-             f"_mono={mono}_null={null_type}_num_aux={num_aux}_AR={args.AR}"
+             f"_mono={mono}_null={null_type}_qs={qs}_num_aux={num_aux}_AR={args.AR}"
              f"_attempt={attempt}")
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
@@ -140,13 +155,24 @@ print("Running ALL IN ONE Optimization")
 print("================================")
 
 
-# load the boozer surfaces (1 per Current configuration, so 3 total.)
-config = yaml.safe_load(open(f"../convert/designA_after_scaled.yaml",'r'))
-data = load(f"../convert/designA_after_scaled.json")
-boozer_surfaces = data[0][config_id:config_id+1] # BoozerSurfaces
-iota_Gs = data[1][config_id:config_id+1] # (iota, G) pairs
-axes = data[2][config_id:config_id+1] # magnetic axis CurveRZFouriers
-xpoints = data[3][config_id:config_id+1] # X-point CurveRZFouriers
+# Load the design. QA = designA (3 current configurations); we take the single config
+# selected by config_id. QH = the quasi-helical device: a SINGLE configuration that,
+# unlike QA, may carry MORE THAN ONE X-point -- we keep them all. QH reuses the designA
+# yaml for the penalty weights/thresholds.
+if qs == 'QH':
+    config = yaml.safe_load(open(f"../designs/qh_design/qh_device.yaml",'r'))
+    data = load(f"../designs/qh_design/qh_device.json")
+    boozer_surfaces = data[0]                 # single configuration: one BoozerSurface
+    iota_Gs = data[1]                         # one (iota, G) pair
+    axes = data[2]                            # one magnetic axis
+    xpoints = data[3]                         # ALL X-points of the QH device
+else:
+    config = yaml.safe_load(open(f"../convert/designA_after_scaled.yaml",'r'))
+    data = load(f"../convert/designA_after_scaled.json")
+    boozer_surfaces = data[0][config_id:config_id+1] # BoozerSurfaces
+    iota_Gs = data[1][config_id:config_id+1] # (iota, G) pairs
+    axes = data[2][config_id:config_id+1] # magnetic axis CurveRZFouriers
+    xpoints = data[3][config_id:config_id+1] # X-point CurveRZFouriers
 
 # Single-null setup (SN): drop stellarator symmetry. Rebuild the coils from the
 # 3 independent (Y>0) bases as nfp=2/stellsym=False, convert the surface, axis
@@ -165,13 +191,27 @@ if null_type == 'SN':
 #axes = [axes[1]]
 #xpoints = [xpoints[1]]
 
-for ii, (boozer_surface, axis, xpoint) in enumerate(zip(boozer_surfaces, axes, xpoints)):
-    axis.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
-    xpoint.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
-    boozer_surface.options = {'newton_tol':1e-16 if null_type == 'DN' else 1e-14, 'newton_maxiter':20, 'verbose':True}
-    axis.run_code(CurveLength(axis.curve).J())
-    xpoint.run_code(CurveLength(xpoint.curve).J())
-    boozer_surface.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
+if qs == 'QH':
+    # QH: one axis and one Boozer surface, but multiple X-points -- solve the
+    # X-points in their own loop rather than zipping against the single surface.
+    for axis in axes:
+        axis.options = {'newton_tol':1e-14, 'newton_maxiter':20, 'verbose':True}
+        axis.run_code(CurveLength(axis.curve).J())
+    for xpoint in xpoints:
+        xpoint.options = {'newton_tol':1e-14, 'newton_maxiter':20, 'verbose':True}
+        xpoint.run_code(CurveLength(xpoint.curve).J())
+    for ii, boozer_surface in enumerate(boozer_surfaces):
+        # QH: 1e-13 for both DN and SN (the 1e-16 DN target is a QA-only setting).
+        boozer_surface.options = {'newton_tol':1e-13, 'newton_maxiter':20, 'verbose':True}
+        boozer_surface.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
+else:
+    for ii, (boozer_surface, axis, xpoint) in enumerate(zip(boozer_surfaces, axes, xpoints)):
+        axis.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
+        xpoint.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
+        boozer_surface.options = {'newton_tol':1e-16 if null_type == 'DN' else 1e-14, 'newton_maxiter':20, 'verbose':True}
+        axis.run_code(CurveLength(axis.curve).J())
+        xpoint.run_code(CurveLength(xpoint.curve).J())
+        boozer_surface.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
 
 # get the base curves
 biotsavart = boozer_surfaces[0].biotsavart
@@ -179,8 +219,16 @@ coils = biotsavart.coils
 curves = [c.curve for c in coils]
 # DN: 2 independent base coils (stellsym expansion gives [0,4]). SN: the rebuilt
 # coils_via_symmetries(3 bases, nfp=2, stellsym=False) set has the 3 independent
-# base coils at indices [0,1,2] (rotated copies at 3,4,5).
-base_curve_idx = [0, 1, 2] if null_type == 'SN' else [0, 4]
+# base coils at indices [0,1,2] (rotated copies at 3,4,5). QH stores its independent
+# base coils first and contiguously: 5 for the stellsym device (nfp=2 x2 -> 20 coils),
+# 10 for the non-stellsym device (nfp=2 -> 20 coils).
+if qs == 'QH':
+    nc = len(coils)
+    nfp = boozer_surfaces[0].surface.nfp
+    ncp = len(coils)//2//nfp
+    base_curve_idx = list(range(ncp)) if boozer_surfaces[0].surface.stellsym else list(range(nc//nfp))
+else:
+    base_curve_idx = [0, 1, 2] if null_type == 'SN' else [0, 4]
 base_curves = [curves[i] for i in base_curve_idx]
 
 if vessel_id == 0:
@@ -318,7 +366,7 @@ if axis_iota_enabled:
                        for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
 else:
     AXIS_IOTA_TARGET, J_axis_iota = [], None
-nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
+nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils), quasi=qs) for boozer_surface in boozer_surfaces]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
 
@@ -406,8 +454,13 @@ MONODROMY_WEIGHT = Weight(1e-4) if mono > 0 else Weight(0.)
 # mono 2 -> tr(M)=2 'trace'; mono 0 -> no polish). The polish reads these from
 # the saved yaml so it needs no command-line arguments.
 config['CONFIG_ID'] = config_id
+config['QS'] = qs   # QA or QH -- read back by the singular polish (boozer_singular*.py)
 config['MONODROMY_CONSTRAINT'] = {1: 'identity', 2: 'trace'}.get(mono, None)
-tmos = [TangentMap(xp, BiotSavart(boozer_surface.biotsavart.coils), MONODROMY_THRESHOLD, mtype='identity' if mono == 1 else 'jordan') for xp, boozer_surface in zip(xpoints, boozer_surfaces)]
+if qs == 'QH':
+    # QH: all X-points live on the single configuration, so they share its coils.
+    tmos = [TangentMap(xp, BiotSavart(boozer_surfaces[0].biotsavart.coils), MONODROMY_THRESHOLD, mtype='identity' if mono == 1 else 'jordan') for xp in xpoints]
+else:
+    tmos = [TangentMap(xp, BiotSavart(boozer_surface.biotsavart.coils), MONODROMY_THRESHOLD, mtype='identity' if mono == 1 else 'jordan') for xp, boozer_surface in zip(xpoints, boozer_surfaces)]
 MONODROMY_LIST = [Monodromy(tmo) for tmo in tmos]
 J_monodromy = sum(MONODROMY_LIST) # target rotational transform is that computed on the initial surface
 
@@ -554,10 +607,10 @@ for bbsurf in boozer_surfaces:
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
 
-# make sure coils are stellarator symmetric (DN only). For SN we deliberately
+# make sure coils are stellarator symmetric (QA + DN only). For SN we deliberately
 # keep the base coils general (the device is no longer stellsym), so we do NOT
-# fix the stellsym-violating dofs.
-if null_type == 'DN':
+# fix the stellsym-violating dofs; QH manages its own coil symmetry, so skip it too.
+if qs == 'QA' and null_type == 'DN':
     for ii in [base_curve_idx[-1]]:
         c = boozer_surfaces[0].biotsavart.coils[ii].curve
         if isinstance(c, RotatedCurve):
