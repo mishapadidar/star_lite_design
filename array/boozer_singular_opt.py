@@ -154,7 +154,14 @@ biotsavart = boozer_surfaces[0].biotsavart
 coils = biotsavart.coils
 curves = [c.curve for c in coils]
 # DN (stellsym surface): 2 independent base coils -> [0, 4]. SN: 3 -> [0, 1, 2].
-base_curve_idx = [0, 4] if boozer_surfaces[0].surface.stellsym else [0, 1, 2]
+# QH stores its independent base coils first/contiguously; their count follows from the
+# symmetry expansion: len(coils)//2//nfp (stellsym) or len(coils)//nfp (non-stellsym).
+if qs == 'QH':
+    nfp = boozer_surfaces[0].surface.nfp
+    base_curve_idx = (list(range(len(coils) // 2 // nfp)) if boozer_surfaces[0].surface.stellsym
+                      else list(range(len(coils) // nfp)))
+else:
+    base_curve_idx = [0, 4] if boozer_surfaces[0].surface.stellsym else [0, 1, 2]
 base_curves = [curves[i] for i in base_curve_idx]
 
 # ALL thresholds AND weights are read STRAIGHT from the config yaml (boozer_all
@@ -635,9 +642,10 @@ for bbsurf in boozer_surfaces:
     dn = bbsurf.biotsavart.dof_names
     print('free currents:', [c for c in dn if 'current' in c.lower() ])
 
-# make sure coils are stellarator symmetric (DN only). For SN designs the base
-# coils are deliberately general (the device is no longer stellsym).
-if boozer_surfaces[0].surface.stellsym:
+# make sure coils are stellarator symmetric (QA + DN only). For SN designs the base
+# coils are deliberately general (the device is no longer stellsym); QH fixes NO coil
+# harmonics (its symmetry comes from the coils_via_symmetries expansion), so skip it too.
+if qs == 'QA' and boozer_surfaces[0].surface.stellsym:
     for ii in [base_curve_idx[-1]]:
         c = boozer_surfaces[0].biotsavart.coils[ii].curve
         if isinstance(c, RotatedCurve):
