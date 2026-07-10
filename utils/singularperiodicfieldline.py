@@ -819,6 +819,11 @@ class SingularPeriodicFieldline(Optimizable):
 
         if mon_constraint in ('identity', 'target_monodromy'):
             row_mask[-4] = False  # det(M)=1 makes one of the four equations redundant.
+            if mon_constraint == 'identity' and curve.stellsym:
+                # Stellarator symmetry forces M[0,0] == M[1,1] (reversibility
+                # R M R^-1 = M^-1), so the second diagonal equation is redundant too:
+                # constrain only the two off-diagonals M[0,1] = M[1,0] = 0.
+                row_mask[-1] = False
         r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
 
         b = r[row_mask]
@@ -917,6 +922,11 @@ class SingularPeriodicFieldline(Optimizable):
         row_mask = self.get_stellsym_mask(tail=n_mon)
         if mon_constraint in ('identity', 'target_monodromy'):
             row_mask[-4] = False  # det(M)=1 makes one of the four equations redundant.
+            if mon_constraint == 'identity' and self.curve.stellsym:
+                # Stellarator symmetry forces M[0,0] == M[1,1] (reversibility
+                # R M R^-1 = M^-1), so the second diagonal equation is redundant too:
+                # constrain only the two off-diagonals M[0,1] = M[1,0] = 0.
+                row_mask[-1] = False
         return row_mask, n_mon
 
     def _format_mu(self, mu, col_mask):
