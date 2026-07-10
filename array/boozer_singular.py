@@ -90,11 +90,9 @@ if mon_constraint not in ('trace', 'identity'):
                      f"got {mon_constraint!r}")
 num_aux = int(args.num_aux)
 config['NUM_AUX'] = num_aux   # record it in the (output) yaml
-# 1 dependent current for the trace system, 3 for identity.
-N_DEP_CURRENTS = 1 if mon_constraint == 'trace' else 3
-if num_aux < N_DEP_CURRENTS:
-    raise SystemExit(f"NUM_AUX must be >= {N_DEP_CURRENTS} for the "
-                     f"{mon_constraint!r} constraint, got {num_aux}")
+# N_DEP_CURRENTS (number of dependent aux currents = number of monodromy constraints
+# solved for) is chosen after the X-point stellsym-defect check below: a stellsym
+# singular field line has one fewer identity constraint (M[0,0] == M[1,1]).
 
 # Outputs go to a NEW directory, a sibling of the input: the input device folder name
 # with its num_aux token set to the ACTUAL number of auxiliary coils we just added (the
@@ -152,7 +150,6 @@ config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
 AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
 radii0 = np.linspace(0.5, 1.5, num_aux)
 MU_NAMES = _mu_names(2 * num_aux + 1)
-DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
 
 # A loaded X-point is always parametrized stellsym=False, but it may in fact be
 # stellarator symmetric, i.e. gamma(t) = diag(1, -1, -1) gamma(-t) for all t. If
@@ -174,6 +171,28 @@ def _stellsym_defect(curve):
     refl.set_dofs(curve.get_dofs())
     flip = np.array([1.0, -1.0, -1.0])
     return float(np.max(np.abs(curve.gamma() - flip * refl.gamma())))
+
+
+# Number of dependent aux currents = number of monodromy constraints solved for:
+# 1 for 'trace'; for 'identity', 3 in general but only 2 when the singular field line
+# is stellarator symmetric (stellsym forces M[0,0] == M[1,1], so SingularPeriodicFieldline
+# drops the redundant second diagonal equation). Decide from the X-points' stellsym
+# defect -- the SAME test used per-X-point in the loop below -- assuming (and enforcing)
+# that all X-points share the same stellsym.
+def _is_stellsym(curve):
+    return _stellsym_defect(curve) <= STELLSYM_TOL * float(np.max(np.abs(curve.gamma())))
+
+
+_xp_stellsym = [_is_stellsym(xp.curve) for xp in xpoints]
+if len(set(_xp_stellsym)) > 1:
+    raise SystemExit(f"X-points have mixed stellsym {_xp_stellsym}; N_DEP_CURRENTS "
+                     f"assumes a single value across all field lines.")
+SING_STELLSYM = bool(_xp_stellsym[0])
+N_DEP_CURRENTS = 1 if mon_constraint == 'trace' else (2 if SING_STELLSYM else 3)
+if num_aux < N_DEP_CURRENTS:
+    raise SystemExit(f"NUM_AUX must be >= {N_DEP_CURRENTS} for the {mon_constraint!r} "
+                     f"constraint (stellsym={SING_STELLSYM}), got {num_aux}")
+DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
 
 
 sing_fls = []
