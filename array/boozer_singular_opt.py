@@ -763,7 +763,11 @@ def callback(dofs):
     table2.add_row('minimum coil-on-vessel distance', f'{min_coil_on_vessel_distance:.3e}')
     table2.add_row('minimum coil-clearance distance', f'{min_coil_clearance_distance:.3e}')
 
-    table2.add_row('vessel dimensions', ' '.join([f'{name}={sdf.local_full_x[ii]:.6e} ' for ii, name in enumerate(sdf.local_dof_names)]))
+    # Zip the FULL dof names against the FULL dof vector: local_dof_names lists only
+    # the FREE dofs, so if any dof is fixed (e.g. n0z for the SN welded-pipe vessel,
+    # zc(0) for the non-stellsym helical vessel) enumerate-indexing local_full_x would
+    # shift every entry past the fixed one by one (making rr read as a node coord).
+    table2.add_row('vessel dimensions', ' '.join([f'{name}={val:.6e} ' for name, val in zip(sdf.local_full_dof_names, sdf.local_full_x)]))
     if isinstance(sdf, HelicalVesselSDF):
         # exact-SDF regime requires max_t kappa(t)*R(t) < 1 on the centerline;
         # arclength variation should stay near 0 (uniform parametrization)
