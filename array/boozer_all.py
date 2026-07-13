@@ -217,16 +217,24 @@ elif vessel_id >= 5000:
     # Welded-pipe helical vessel: a closed loop of straight cylinders (radius rr)
     # cut on an angle and mitred at the joints, whose DESIGN VARIABLES are the
     # discrete xyz node positions of the piecewise-linear centreline (plus the
-    # free rr). vessel_id ENCODES the segment count: nseg = vessel_id - 5000, so
-    # different segment counts are distinct devices through the existing vesselID
-    # folder field -- no new CLI arg and no change to the folder-name schema.
-    # The centreline is seeded from the magnetic axis and shares the device
-    # symmetry (DN -> stellsym, SN -> not); nfp=2, so nseg must be a multiple of
-    # 2*nfp=4 for DN (2 for SN) or the vessel constructor will reject it.
+    # free rr). vessel_id ENCODES the total leg count of the loop, nseg =
+    # vessel_id - 5000 (so 5004 -> 4 legs), giving distinct devices via the
+    # existing vesselID folder field -- no new CLI arg, no folder-name change.
+    # The SDF is parametrised by the fundamental-domain node count num_nodes, so
+    # convert nseg -> num_nodes for the device symmetry (DN -> stellsym, SN -> not):
+    # the loop has nseg = 2*nfp*num_nodes (DN) or nfp*num_nodes (SN), hence
+    # num_nodes = nseg/(2*nfp) [DN] or nseg/nfp [SN]. nseg must divide evenly.
     rr = 0.2
     nseg = vessel_id - 5000
+    _nfp = axes[0].curve.nfp
+    _stellsym = (null_type == 'DN')
+    _per = (2 * _nfp) if _stellsym else _nfp
+    if nseg % _per:
+        raise Exception(f"welded-pipe vessel nseg={nseg} (vessel_id-5000) must be a "
+                        f"multiple of {_per} for null={null_type} (nfp={_nfp})")
+    num_nodes = nseg // _per
     sdf = HelicalCylinderVesselSDF.from_curve_xyz_fourier_symmetries(
-        axes[0].curve, rr, nseg=nseg, stellsym=(null_type == 'DN'))
+        axes[0].curve, rr, num_nodes=num_nodes, stellsym=_stellsym)
 else:
     raise Exception('vessel not implemented')
 
