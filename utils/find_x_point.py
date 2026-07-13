@@ -11,9 +11,9 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     Args:
         biotsavart (BiotSavart): BiotSavart magnetic field.
         r0 (array): (n, 3) array guessing the major radius coordinate, R, of the X-point.
-            n should exceed 2 * (2 * order + 1).
+            n should be at least 2 * order + 1.
         z0 (array): (n, 3) array guessing the vertical position, Z, of the X-point.
-            n should exceed 2 * (2 * order + 1).
+            n should be at least 2 * order + 1.
         nfp (int): number of field periods.
         order (int): order of the Fourier expansion.
 
@@ -26,7 +26,7 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     if n % 2 == 0:
         n+=1
 
-    assert n > 2 * (2 * order + 1), "len(r0) must be larger than 2 * (2 * order + 1)"
+    assert n >= 2 * order + 1, "len(r0) must be at least 2 * order + 1"
 
     length = 2*np.pi/nfp
     points = np.linspace(0, length, n, endpoint=False).reshape((n, 1))
