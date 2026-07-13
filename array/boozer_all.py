@@ -39,6 +39,7 @@ from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
+from star_lite_design.utils.helicalcylindervessel import HelicalCylinderVesselSDF
 
 from star_lite_design.utils import sn_setup
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
@@ -212,6 +213,20 @@ elif vessel_id in (3, 4):
     sdf = HelicalVesselSDF.from_curve_xyz_fourier_symmetries(
         axes[0].curve, rr, stellsym=(null_type == 'DN'),
         num_modes=HELICAL_NUM_MODES, radius_num_modes=radius_num_modes)
+elif vessel_id >= 5000:
+    # Welded-pipe helical vessel: a closed loop of straight cylinders (radius rr)
+    # cut on an angle and mitred at the joints, whose DESIGN VARIABLES are the
+    # discrete xyz node positions of the piecewise-linear centreline (plus the
+    # free rr). vessel_id ENCODES the segment count: nseg = vessel_id - 5000, so
+    # different segment counts are distinct devices through the existing vesselID
+    # folder field -- no new CLI arg and no change to the folder-name schema.
+    # The centreline is seeded from the magnetic axis and shares the device
+    # symmetry (DN -> stellsym, SN -> not); nfp=2, so nseg must be a multiple of
+    # 2*nfp=4 for DN (2 for SN) or the vessel constructor will reject it.
+    rr = 0.2
+    nseg = vessel_id - 5000
+    sdf = HelicalCylinderVesselSDF.from_curve_xyz_fourier_symmetries(
+        axes[0].curve, rr, nseg=nseg, stellsym=(null_type == 'DN'))
 else:
     raise Exception('vessel not implemented')
 
@@ -1253,6 +1268,11 @@ for j in range(15):
                                 _rel_vio(sdf.max_dr_ds(), 1.0),
                                 max(-sdf.min_radius(), 0.0),
                                 sdf.arclength_variation()])
+    elif isinstance(sdf, HelicalCylinderVesselSDF):
+        # Welded-pipe vessel validity (rr > 0, turns <= MAX_TURN_DEG, no mitre
+        # interference) collapsed to one relative violation; feeds the same
+        # plasma-vessel-margin weight escalation as the smooth helical vessel.
+        vessel_shape_err = sdf.geometric_violation()
 
     msc = [J.J() for J in Jmscs]
     msc_err = max(np.max(msc) - MEAN_SQUARED_CURVATURE_THRESHOLD, 0)/np.abs(MEAN_SQUARED_CURVATURE_THRESHOLD)
@@ -1475,6 +1495,13 @@ if isinstance(sdf, HelicalVesselSDF):
     final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
     final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
     final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
+
+# Welded-pipe vessel geometry: the mitre validity feeds the 0.1% gate (target 0);
+# the largest turn angle is descriptive.
+if isinstance(sdf, HelicalCylinderVesselSDF):
+    _viol = sdf.geometric_violation()
+    final_metrics['vessel_mitre_violation'] = (_viol, 0.0, _viol)
+    final_metrics['vessel_max_turn_angle_deg'] = (sdf.max_turn_angle(), None, None)
 
 # also record the full 2x2 monodromy (tangent) matrix per X-point so the
 # device browser can display it; entries are descriptive (no threshold/error).

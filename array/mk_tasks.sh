@@ -20,7 +20,12 @@ configs=(0 1 2 3)
 # Vessel geometry: 0/1/2 = pill-pipe / renaissance / torus; 3 = constant-radius
 # helical (centerline starts as the magnetic axis); 4 = variable-radius helical
 # (radius R(t) is a Fourier series of the same order as the centerline).
-vessel_values=(0 1 2 3 4)
+# vessel_id >= 5000 = welded-pipe helical vessel whose design variables are the
+# discrete xyz centreline nodes; the id ENCODES the segment count, nseg =
+# vessel_id - 5000 (so each nseg is a distinct device via the vesselID folder
+# field, no folder-name change). nfp=2, so nseg must be a multiple of 2*nfp=4 to
+# be valid for the DN (stellsym) devices: 5004/5008/5012 = 4/8/12 segments.
+vessel_values=(0 1 2 3 4 5004 5008 5012)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)

@@ -68,6 +68,7 @@ from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
 from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
+from star_lite_design.utils.helicalcylindervessel import HelicalCylinderVesselSDF
 from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
@@ -1018,6 +1019,9 @@ for j in range(5):
         # torus validity 0 < r < R.
         r, R = sdf.local_full_x
         vessel_shape_err = max([_rel_vio(r, R), max(-r, 0.), max(-R, 0.)])
+    elif isinstance(sdf, HelicalCylinderVesselSDF):
+        # welded-pipe validity (rr > 0, turns <= MAX_TURN_DEG, no mitre interference).
+        vessel_shape_err = sdf.geometric_violation()
 
     min_coil_on_vessel_distance, _, _ = J_coil_on_vessel.shortest_distance()
     coil_on_vessel_err = (
@@ -1243,6 +1247,13 @@ if isinstance(sdf, HelicalVesselSDF):
     final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
     final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
     final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
+
+# Welded-pipe vessel geometry: the mitre validity feeds the 0.1% gate (target 0);
+# the largest turn angle is descriptive.
+if isinstance(sdf, HelicalCylinderVesselSDF):
+    _viol = sdf.geometric_violation()
+    final_metrics['vessel_mitre_violation'] = (_viol, 0.0, _viol)
+    final_metrics['vessel_max_turn_angle_deg'] = (sdf.max_turn_angle(), None, None)
 
 # record the solved auxiliary-coil parameters (currents in Amperes) per fl.
 for fi, fl in enumerate(sing_fls):
