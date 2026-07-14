@@ -32,16 +32,31 @@ from pyevtk.hl import gridToVTK  # pip install pyevtk
 #   closed loop then has, with NO divisibility constraint on num_nodes,
 #     stellsym=True:   nseg = 2*nfp*num_nodes
 #     stellsym=False:  nseg =   nfp*num_nodes
+#   OPTION `boundary_node` (stellsym only): node 0 is placed ON the t=0 stellarator
+#   plane (on the x-axis, y=z=0 pinned) and emitted ONCE without a mirror image, so
+#   the field period carries an ODD leg count and the 2*nfp multiple is relaxed:
+#     stellsym=True, boundary_node:  nseg = nfp*(2*(num_nodes-1)+1)
+#   e.g. nfp=2, num_nodes=2 -> nseg=6. The pinned y,z keep the loop exactly stellsym.
 #
-# TUBE (exact mitred welds, unchanged idea from the old version):
-#   Each of the nseg legs is a straight PIPE of radius rr, cut at each joint by
-#   the angle-bisector plane and welded to its neighbour. A leg is the CSG
-#   intersection (max of SDFs) of its infinite cylinder and its two outward
-#   bisector half-spaces; the tube is the union (min) of the legs. For a loop
-#   whose turns stay away from a 180 deg reversal this is an EXACT signed
-#   distance function. The bisector normalisation is guarded so a degenerate
-#   (near-reversal) joint cannot produce a NaN gradient; the geometric penalty
-#   below keeps the optimiser inside the valid regime.
+# TUBE (exact Euclidean SDF of mitre-clipped cylindrical side patches):
+#   Leg k is the radius-rr infinite cylinder about P_k -> P_{k+1}, clipped by
+#   the angle-bisector planes at its two endpoints. The shared elliptical mitre
+#   disks close the individual solids but are INTERNAL after the legs are welded,
+#   so they must not be treated as distance-zero surfaces of the assembled pipe.
+#
+#   For each query point and each leg, this implementation projects onto the
+#   unrestricted cylindrical side and checks whether that PROJECTED SURFACE POINT
+#   lies between the mitre planes. If it does, the radial cylinder distance is
+#   exact. Otherwise the constrained closest point lies on one of the two
+#   elliptical mitre rings, whose Euclidean distance is computed by a fixed-count
+#   point-to-ellipse solve. The minimum unsigned distance over all exposed side
+#   patches is then given one GLOBAL sign using membership in the union of the
+#   clipped solid cylinders.
+#
+#   Exactness requires nonzero legs, no 180-degree reversal, nonoverlapping cuts
+#   on each leg, and no overlap between nonadjacent pipe pieces. The differentiable
+#   penalty below enforces the LOCAL conditions. Global self-intersection remains
+#   a property of the chosen centerline and radius; convexity is not required.
 #
 # DOF LAYOUT (flat vector `params`, all FREE):
 #   params = concat([ node_0(x,y,z), ..., node_{n_free-1}(x,y,z),  rr ])
@@ -56,6 +71,8 @@ from pyevtk.hl import gridToVTK  # pip install pyevtk
 # off the reversal; the mitre-interference term does the finer exactness work.
 MAX_TURN_DEG = 150.0
 _COS_MIN_TURN = float(np.cos(np.radians(MAX_TURN_DEG)))   # cos(150 deg) ~ -0.866
+_MITER_ELLIPSE_BISECTION_ITERS = 48
+_MIN_RELATIVE_GEOMETRY_SIZE = 1e-7
 
 
 def _rot_z(theta):
@@ -73,150 +90,535 @@ def _unpack(params):
     return nodes, rr
 
 
-def _all_joints(nodes, nfp, ntor, stellsym):
+def _nseg(nfp, stellsym, boundary_node, n_free):
+    """Total number of legs/joints in the closed loop for a fundamental domain of
+    ``n_free`` free nodes. With a boundary node (stellsym only) one node sits on the
+    t=0 plane and is NOT mirrored, giving an ODD leg count per field period:
+        stellsym, boundary_node : nfp*(2*(n_free-1)+1)
+        stellsym                : 2*nfp*n_free
+        non-stellsym            :   nfp*n_free
+    """
+    if stellsym:
+        if boundary_node:
+            return nfp * (2 * (n_free - 1) + 1)
+        return 2 * nfp * n_free
+    return nfp * n_free
+
+
+def _all_joints(nodes, nfp, ntor, stellsym, boundary_node=False):
     """Generate the full ordered list of ``nseg`` centreline joints (nseg, 3)
     from the fundamental-domain ``nodes`` by applying the symmetry group.
 
     Ordering follows increasing curve parameter t in [0,1): within field period
     0 the free nodes cover t in (0, 1/(2*nfp)) [stellsym] or (0, 1/nfp), the
     stellsym reflection R=Q S covers the complementary half in reverse, and the
-    nfp rotations Q^m tile the remaining field periods."""
+    nfp rotations Q^m tile the remaining field periods. When ``boundary_node`` is
+    set (stellsym only), nodes[0] sits ON the t=0 stellarator plane (its own
+    reflection, y=z=0): it is emitted ONCE and NOT reflected, so the period carries
+    an ODD leg count 2*(n_free-1)+1 and nseg need not be a multiple of 2*nfp."""
     alpha = 2.0 * jnp.pi * ntor / nfp
     Q = _rot_z(alpha)
     if stellsym:
         S = jnp.diag(jnp.array([1.0, -1.0, -1.0]))
         R = Q @ S                              # reflection isometry, t -> 1/nfp - t
-        refl = (R @ nodes.T).T                 # images of the free nodes
-        half = jnp.concatenate([nodes, refl[::-1]], axis=0)   # one full field period
+        if boundary_node:
+            b = nodes[:1]                      # node on the t=0 plane (not reflected)
+            interior = nodes[1:]
+            refl = (R @ interior.T).T          # images of the interior nodes
+            half = jnp.concatenate([b, interior, refl[::-1]], axis=0)   # one field period
+        else:
+            refl = (R @ nodes.T).T             # images of the free nodes
+            half = jnp.concatenate([nodes, refl[::-1]], axis=0)   # one full field period
     else:
         half = nodes                           # one full field period
     blocks = [(_rot_z(m * alpha) @ half.T).T for m in range(nfp)]
     return jnp.concatenate(blocks, axis=0)
 
 
+def _fundamental_t(n_free, nfp, stellsym, boundary_node):
+    """Curve parameters t in [0, 1/nfp) of the ``n_free`` fundamental-domain nodes.
+    Without a boundary node the nodes sit at cell centres; with one, node 0 is at
+    t=0 (on the stellarator plane) and nodes 1.. are the interior nodes, all at the
+    uniform joint spacing k/nseg of the field period."""
+    if stellsym and boundary_node:
+        ni = n_free - 1                        # interior nodes (node 0 is the boundary)
+        return np.arange(ni + 1) / (nfp * (2 * ni + 1))
+    per = (2 * nfp) if stellsym else nfp
+    return (np.arange(n_free) + 0.5) / (per * n_free)
+
+
+def _seed_circle(n_free, nfp, ntor, stellsym, boundary_node):
+    """Planar unit-circle node seed sampled at the fundamental-domain parameters."""
+    t = _fundamental_t(n_free, nfp, stellsym, boundary_node)
+    ang = 2.0 * np.pi * ntor * t
+    return np.stack([np.cos(ang), np.sin(ang), np.zeros(len(t))], axis=-1)
+
+
 def cyl_sdf(p, P0, u, rad):
-    """SDF of an INFINITE straight cylinder: axis through P0 along unit dir u,
-    radius rad. 'Perpendicular distance from the axis minus the radius'."""
+    """SDF of an infinite straight cylinder, retained for compatibility."""
     v = p - P0
     proj = jnp.sum(v * u, axis=-1, keepdims=True) * u
-    return jnp.linalg.norm(v - proj, axis=-1) - rad
+    return _miter_safe_norm(v - proj) - rad
+
+
+def _miter_dot(a, b):
+    """Dot product over the Cartesian axis with leading-axis broadcasting."""
+    return jnp.sum(a * b, axis=-1)
+
+
+@jax.custom_jvp
+def _miter_safe_norm(x):
+    """Euclidean norm with the zero vector assigned a zero subgradient."""
+    return jnp.sqrt(jnp.sum(x * x, axis=-1))
+
+
+@_miter_safe_norm.defjvp
+def _miter_safe_norm_jvp(primals, tangents):
+    (x,), (dx,) = primals, tangents
+    norm = _miter_safe_norm(x)
+    safe_norm = jnp.where(norm > 0.0, norm, 1.0)
+    dnorm = jnp.where(
+        norm > 0.0,
+        jnp.sum(x * dx, axis=-1) / safe_norm,
+        0.0,
+    )
+    return norm, dnorm
 
 
 def _safe_normalize(v, fallback):
-    """Row-wise normalise (n,3) vectors; where the norm is ~0 (a degenerate
-    near-reversal joint) fall back to the given unit direction instead of
-    dividing by zero, keeping the value and its gradient finite."""
-    n = jnp.linalg.norm(v, axis=-1, keepdims=True)
-    safe = jnp.where(n > 1e-9, n, 1.0)
-    return jnp.where(n > 1e-9, v / safe, fallback)
+    """Normalize vectors along the last axis, using ``fallback`` at zero."""
+    n = _miter_safe_norm(v)[..., None]
+    safe = jnp.where(n > 0.0, n, 1.0)
+    return jnp.where(n > 0.0, v / safe, fallback)
+
+
+def _leg_geometry_full(P):
+    """Return starts, ends, lengths, tangents, and start mitre normals."""
+    A = P
+    B = jnp.roll(P, -1, axis=0)
+    edges = B - A
+    lengths = _miter_safe_norm(edges)
+    u = _safe_normalize(edges, jnp.array([1.0, 0.0, 0.0], dtype=P.dtype))
+    uprev = jnp.roll(u, 1, axis=0)
+    n_bis = _safe_normalize(uprev + u, u)
+    return A, B, lengths, u, n_bis
 
 
 def _leg_geometry(P):
-    """From the ordered closed joint list ``P`` (nseg, 3) return, per straight
-    leg k (axis P_k -> P_{k+1}, wrapping):
-
-        A       : (nseg, 3)  leg start joint  P_k
-        B       : (nseg, 3)  leg end   joint  P_{k+1}
-        u       : (nseg, 3)  unit leg direction
-        n_start : (nseg, 3)  OUTWARD bisector normal at the START joint
-        n_end   : (nseg, 3)  OUTWARD bisector normal at the END   joint
-
-    The bisector at a joint between legs of direction u_prev and u_next has
-    normal along (u_prev + u_next). Each normal is oriented so the leg body is
-    on its NEGATIVE side (matching cyl_sdf's sign): the outward start normal
-    OPPOSES u, the outward end normal ALIGNS with u. Adjacent legs share each
-    bisector plane with opposite orientation, so the welded faces coincide."""
-    A = P
-    B = jnp.roll(P, -1, axis=0)
-    u = _safe_normalize(B - A, jnp.array([1.0, 0.0, 0.0]))
-    uprev = jnp.roll(u, 1, axis=0)
-    unext = jnp.roll(u, -1, axis=0)
-    n_start = _safe_normalize(uprev + u, u)
-    n_end = _safe_normalize(u + unext, u)
-    s_start = jnp.sum(n_start * u, axis=-1, keepdims=True)
-    s_end = jnp.sum(n_end * u, axis=-1, keepdims=True)
-    n_start = jnp.where(s_start > 0, -n_start, n_start)
-    n_end = jnp.where(s_end > 0, n_end, -n_end)
-    return A, B, u, n_start, n_end
+    """Compatibility helper returning ``(A, u, n_bis)`` as before."""
+    A, _B, _lengths, u, n_bis = _leg_geometry_full(P)
+    return A, u, n_bis
 
 
-def _sdf_mitre(pts, A, B, u, n_start, n_end, rr):
-    """Exact mitre: each leg is the CSG intersection (max) of its infinite
-    cylinder and its two outward bisector half-spaces; the tube is the union
-    (min) of the legs."""
-    def one(p):
-        d_cyl = jax.vmap(lambda a, uu: cyl_sdf(p[None, :], a, uu, rr)[0])(A, u)  # (nseg,)
-        d_s = jnp.einsum('kj,kj->k', p[None, :] - A, n_start)   # <=0 inside start cut
-        d_e = jnp.einsum('kj,kj->k', p[None, :] - B, n_end)     # <=0 inside end cut
-        leg = jnp.maximum(jnp.maximum(d_cyl, d_s), d_e)         # exact mitred pipe (max)
-        return jnp.min(leg)                                     # union of welded pipes
-    return jax.vmap(one)(pts)
+def _miter_ellipse_closest_point(p, semimajor, semiminor):
+    """Closest point on x^2/a^2 + y^2/b^2 = 1 for a >= b > 0.
+
+    The strictly monotone Lagrange-multiplier equation is solved by a fixed
+    number of bisection iterations, making the routine JIT compatible.
+    """
+    p = jnp.asarray(p)
+    a = jnp.asarray(semimajor, dtype=p.dtype)
+    b = jnp.asarray(semiminor, dtype=p.dtype)
+
+    x = jnp.abs(p[..., 0])
+    y = jnp.abs(p[..., 1])
+    a, b, x, y = jnp.broadcast_arrays(a, b, x, y)
+
+    finfo = jnp.finfo(p.dtype)
+    eps = finfo.eps
+
+    # Exact coordinate-axis cases are handled below. These floors protect only
+    # the generic branch, which JAX may still evaluate under vectorization.
+    x_safe = jnp.where(x > 0.0, x, jnp.maximum(eps * a, finfo.tiny))
+    y_safe = jnp.where(y > 0.0, y, jnp.maximum(eps * b, finfo.tiny))
+
+    ratio2 = jnp.square(a / b)
+    z0 = x_safe / a
+    z1 = y_safe / b
+    n0 = ratio2 * z0
+    g0 = jnp.square(z0) + jnp.square(z1) - 1.0
+
+    # Root bracket for s = lambda / b^2.
+    lo = jnp.where(g0 < 0.0, z1 - 1.0, 0.0)
+    hi = jnp.where(g0 < 0.0, 0.0, jnp.hypot(n0, z1) - 1.0)
+
+    def bisect_body(_, state):
+        lo_i, hi_i = state
+        s = 0.5 * (lo_i + hi_i)
+        q0 = n0 / (s + ratio2)
+        q1 = z1 / (s + 1.0)
+        residual = q0 * q0 + q1 * q1 - 1.0
+        return (
+            jnp.where(residual > 0.0, s, lo_i),
+            jnp.where(residual > 0.0, hi_i, s),
+        )
+
+    lo, hi = jax.lax.fori_loop(
+        0,
+        _MITER_ELLIPSE_BISECTION_ITERS,
+        bisect_body,
+        (lo, hi),
+    )
+    s = 0.5 * (lo + hi)
+    q_general = jnp.stack(
+        (
+            ratio2 * x_safe / (s + ratio2),
+            y_safe / (s + 1.0),
+        ),
+        axis=-1,
+    )
+
+    # y == 0 can have an off-axis closest point inside the ellipse evolute.
+    denominator = jnp.square(a) - jnp.square(b)
+    denominator_safe = jnp.where(denominator > 0.0, denominator, 1.0)
+    u = jnp.clip(a * x / denominator_safe, 0.0, 1.0)
+    q_xaxis_off = jnp.stack(
+        (
+            a * u,
+            b * jnp.sqrt(jnp.maximum(0.0, 1.0 - u * u)),
+        ),
+        axis=-1,
+    )
+    q_xaxis_end = jnp.stack((a, jnp.zeros_like(a)), axis=-1)
+    q_xaxis = jnp.where(
+        (a * x < denominator)[..., None],
+        q_xaxis_off,
+        q_xaxis_end,
+    )
+
+    # x == 0 has closest representative (0, b).
+    q_yaxis = jnp.stack((jnp.zeros_like(b), b), axis=-1)
+    q_ellipse = jnp.where(
+        (x == 0.0)[..., None],
+        q_yaxis,
+        jnp.where((y == 0.0)[..., None], q_xaxis, q_general),
+    )
+
+    # Stable limit for a circular section (straight joint).
+    circle_tolerance = 8.0 * eps * jnp.maximum(a, b)
+    is_circle = jnp.abs(a - b) <= circle_tolerance
+    p_radius = jnp.hypot(x, y)
+    p_radius_safe = jnp.where(p_radius > 0.0, p_radius, 1.0)
+    q_circle_radial = (
+        a[..., None]
+        * jnp.stack((x, y), axis=-1)
+        / p_radius_safe[..., None]
+    )
+    q_circle_center = jnp.stack((a, jnp.zeros_like(a)), axis=-1)
+    q_circle = jnp.where(
+        (p_radius > 0.0)[..., None],
+        q_circle_radial,
+        q_circle_center,
+    )
+    q_abs = jnp.where(is_circle[..., None], q_circle, q_ellipse)
+
+    signs = jnp.stack(
+        (
+            jnp.where(p[..., 0] < 0.0, -1.0, 1.0),
+            jnp.where(p[..., 1] < 0.0, -1.0, 1.0),
+        ),
+        axis=-1,
+    )
+    return q_abs * signs
 
 
-def _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym):
-    """Signed distance from each point in ``pts`` to the welded-pipe vessel.
+@jax.custom_jvp
+def _miter_ellipse_curve_distance(p, semimajor, semiminor):
+    """Unsigned Euclidean distance from 2-D points to an ellipse curve."""
+    closest = _miter_ellipse_closest_point(p, semimajor, semiminor)
+    return _miter_safe_norm(p - closest)
 
-    Args:
-        pts:      (M, 3) query points.
-        params:   flat dof vector (nodes + rr, see _unpack).
-        sign:     +1 outside-positive; -1 flips inside/outside.
-        nfp,ntor: field-period / toroidal winding of the symmetry group.
-        stellsym: whether the loop is stellarator symmetric (static flag).
-    Returns:
-        (M,) signed distances.
+
+@_miter_ellipse_curve_distance.defjvp
+def _miter_ellipse_curve_distance_jvp(primals, tangents):
+    # The envelope theorem supplies the derivative without differentiating the
+    # discrete bisection decisions.
+    p, a, b = primals
+    dp, da, db = tangents
+
+    closest = _miter_ellipse_closest_point(p, a, b)
+    delta = p - closest
+    distance = _miter_safe_norm(delta)
+    safe_distance = jnp.where(distance > 0.0, distance, 1.0)
+    normal = jnp.where(
+        (distance > 0.0)[..., None],
+        delta / safe_distance[..., None],
+        0.0,
+    )
+
+    derivative = (
+        _miter_dot(normal, dp)
+        - normal[..., 0] * closest[..., 0] / a * da
+        - normal[..., 1] * closest[..., 1] / b * db
+    )
+    return distance, derivative
+
+
+def _miter_ring_distance(points, vertex, tangent, miter_normal, radius):
+    """Exact Euclidean distance to one elliptical mitre ring."""
+    offset = points - vertex
+    eps = jnp.finfo(offset.dtype).eps
+
+    cosine = jnp.clip(_miter_dot(tangent, miter_normal), eps, 1.0)
+    height = _miter_dot(offset, miter_normal)
+    sine2 = jnp.maximum(0.0, 1.0 - cosine * cosine)
+
+    major_axis = (
+        tangent - cosine[..., None] * miter_normal
+    ) / jnp.sqrt(jnp.maximum(sine2, eps))[..., None]
+    minor_axis = jnp.cross(miter_normal, major_axis)
+
+    coordinates = jnp.stack(
+        (
+            _miter_dot(offset, major_axis),
+            _miter_dot(offset, minor_axis),
+        ),
+        axis=-1,
+    )
+    semimajor = radius / cosine
+    in_plane_distance = _miter_ellipse_curve_distance(
+        coordinates,
+        semimajor,
+        radius,
+    )
+    ellipse_distance = jnp.hypot(height, in_plane_distance)
+
+    # A straight joint has a circular ring in a plane normal to the tangent.
+    planar = offset - height[..., None] * miter_normal
+    circle_distance = jnp.hypot(
+        height,
+        _miter_safe_norm(planar) - radius,
+    )
+    return jnp.where(
+        sine2 <= 16.0 * eps,
+        circle_distance,
+        ellipse_distance,
+    )
+
+
+def _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr):
+    """Exact SDF of the valid closed polyline pipe described by leg geometry.
+
+    The unsigned distance is the minimum distance to the exposed cylindrical
+    side patches. Internal mitre disks are used only for the global membership
+    test and are never included as boundary-distance candidates.
+    """
+    points = jnp.asarray(pts)
+    if points.ndim < 1 or points.shape[-1] != 3:
+        raise ValueError("pts must have shape (..., 3)")
+
+    output_shape = points.shape[:-1]
+    points = points.reshape((-1, 3))
+
+    B = jnp.roll(A, -1, axis=0)
+    p = points[:, None, :]
+    a = A[None, :, :]
+    b = B[None, :, :]
+    tangent = u[None, :, :]
+    start_miter = n_bis[None, :, :]
+    end_miter = jnp.roll(n_bis, -1, axis=0)[None, :, :]
+    segment_length = lengths[None, :]
+
+    relative = p - a
+    axial = _miter_dot(relative, tangent)
+    radial = relative - axial[..., None] * tangent
+    radial_length = _miter_safe_norm(radial)
+    radial_nonzero = radial_length > 0.0
+    safe_radial_length = jnp.where(radial_nonzero, radial_length, 1.0)
+
+    # Closest point on each unrestricted infinite cylindrical side surface.
+    cylinder_point = (
+        a
+        + axial[..., None] * tangent
+        + rr * radial / safe_radial_length[..., None]
+    )
+    projection_on_patch = (
+        radial_nonzero
+        & (_miter_dot(cylinder_point - a, start_miter) >= 0.0)
+        & (_miter_dot(cylinder_point - b, end_miter) <= 0.0)
+    )
+    unrestricted_cylinder_distance = jnp.abs(radial_length - rr)
+
+    # If the unrestricted projection is not on the clipped patch, the
+    # constrained closest point lies on one of the two elliptical edge rings.
+    ring_at_vertex = _miter_ring_distance(
+        p,
+        a,
+        tangent,
+        start_miter,
+        rr,
+    )
+    ring_distance = jnp.minimum(
+        ring_at_vertex,
+        jnp.roll(ring_at_vertex, -1, axis=1),
+    )
+
+    # On the axis, the unrestricted cylindrical projection is non-unique. For
+    # an interference-free segment, an admissible side point is exactly rr away
+    # between its centerline endpoints. Outside that interval, the ring fallback
+    # gives the same result wherever an overhanging mitre section is admissible.
+    axis_has_side_patch = (
+        (~radial_nonzero)
+        & (axial >= 0.0)
+        & (axial <= segment_length)
+    )
+    patch_distance = jnp.where(
+        projection_on_patch,
+        unrestricted_cylinder_distance,
+        jnp.where(axis_has_side_patch, rr, ring_distance),
+    )
+
+    # Membership in the union of clipped solid cylinders supplies one global
+    # sign. Shared mitre disks are internal to this union and therefore do not
+    # participate in the unsigned boundary distance above.
+    inside_piece = (
+        (_miter_dot(radial, radial) <= rr * rr)
+        & (_miter_dot(p - a, start_miter) >= 0.0)
+        & (_miter_dot(p - b, end_miter) <= 0.0)
+    )
+
+    unsigned_distance = jnp.min(patch_distance, axis=1)
+    signed_distance = jnp.where(
+        jnp.any(inside_piece, axis=1),
+        -unsigned_distance,
+        unsigned_distance,
+    )
+    return signed_distance.reshape(output_shape)
+
+
+def _sdf_split(pts, A, u, n_bis, rr):
+    """Compatibility wrapper for the old private helper; now evaluates exactly."""
+    lengths = _miter_safe_norm(jnp.roll(A, -1, axis=0) - A)
+    return _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr)
+
+
+def _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node=False):
+    """Exact signed distance to a valid welded, mitred polyline pipe.
+
+    Exactness requires positive radius, nonzero legs, no 180-degree reversal,
+    nonoverlapping mitre cuts on each leg, and no overlap between nonadjacent
+    pipe pieces. ``_geometric_penalty`` enforces the local conditions; global
+    self-intersection must be excluded by the surrounding design constraints.
+    """
+    points = jnp.asarray(pts)
+    dtype = jnp.result_type(points, jnp.asarray(params), jnp.float32)
+    points = points.astype(dtype)
+    params = jnp.asarray(params, dtype=dtype)
+
+    nodes, rr_raw = _unpack(params)
+    P = _all_joints(nodes, nfp, ntor, stellsym, boundary_node)
+    A, _B, lengths, u, n_bis = _leg_geometry_full(P)
+
+    # Keep invalid optimization iterates finite. In the valid domain this is
+    # exactly rr_raw; the geometry penalty supplies the restoring gradient when
+    # rr_raw is nonpositive.
+    scale = jnp.maximum(1.0, jnp.max(lengths))
+    radius_floor = jnp.finfo(dtype).eps * scale
+    rr = jnp.maximum(rr_raw, radius_floor)
+
+    sdf = _sdf_exact_miter_pipe(points, A, lengths, u, n_bis, rr)
+    return jnp.asarray(sign, dtype=dtype) * sdf
+
+
+def _validity_components(params, nfp, ntor, stellsym, boundary_node=False):
+    """Local geometry arrays used by the exactness penalty and diagnostics.
+
+    The returned mitre clearance for leg i is
+
+        length[i] - start_setback[i] - end_setback[i].
+
+    Positive clearance means the two cuts do not overlap on that leg. Global
+    intersections between nonadjacent pipe pieces are intentionally not replaced
+    by a conservative capsule test, since that test rejects valid finely sampled
+    centerlines.
     """
     nodes, rr = _unpack(params)
-    P = _all_joints(nodes, nfp, ntor, stellsym)
-    A, B, u, n_start, n_end = _leg_geometry(P)
-    return sign * _sdf_mitre(pts, A, B, u, n_start, n_end, rr)
+    P = _all_joints(nodes, nfp, ntor, stellsym, boundary_node)
+    _A, _B, lengths, u, n_bis = _leg_geometry_full(P)
+
+    scale = jnp.maximum(
+        1.0,
+        jnp.maximum(jnp.max(lengths), jnp.abs(rr)),
+    )
+    radius = jnp.maximum(rr, 0.0)
+
+    cos_turn = jnp.clip(
+        _miter_dot(jnp.roll(u, 1, axis=0), u),
+        -1.0,
+        1.0,
+    )
+
+    start_cos = jnp.clip(_miter_dot(u, n_bis), 0.0, 1.0)
+    end_cos = jnp.clip(
+        _miter_dot(u, jnp.roll(n_bis, -1, axis=0)),
+        0.0,
+        1.0,
+    )
+    cosine_floor = jnp.sqrt(jnp.finfo(P.dtype).eps)
+    start_cos_safe = jnp.maximum(start_cos, cosine_floor)
+    end_cos_safe = jnp.maximum(end_cos, cosine_floor)
+
+    start_setback = (
+        radius
+        * jnp.sqrt(jnp.maximum(0.0, 1.0 - start_cos * start_cos))
+        / start_cos_safe
+    )
+    end_setback = (
+        radius
+        * jnp.sqrt(jnp.maximum(0.0, 1.0 - end_cos * end_cos))
+        / end_cos_safe
+    )
+    miter_clearance = lengths - start_setback - end_setback
+
+    return rr, scale, lengths, cos_turn, miter_clearance
 
 
-def _geometric_penalty(params, nfp, ntor, stellsym):
-    """Dimensionless validity penalty keeping the mitred tube an exact SDF:
-      (1) radius positivity  rr > 0;
-      (2) turn angle at each joint no sharper than MAX_TURN_DEG (cos of the angle
-          between consecutive legs >= cos(MAX_TURN_DEG)), so the bisector stays
-          well away from the degenerate 180 deg reversal;
-      (3) mitre non-interference: each leg must be longer than the two mitre
-          recessions rr*tan(theta/2) eating into it from its end joints, so the
-          start/end cut planes never cross over the cylinder.
-    Each term is a mean of squared hinges (smooth) and they add up."""
-    nodes, rr = _unpack(params)
-    P = _all_joints(nodes, nfp, ntor, stellsym)
-    A = P
-    B = jnp.roll(P, -1, axis=0)
-    leg = B - A
-    leg_len = jnp.linalg.norm(leg, axis=-1)
-    u = leg / jnp.maximum(leg_len[:, None], 1e-30)
-    uprev = jnp.roll(u, 1, axis=0)
-    cos_turn = jnp.sum(uprev * u, axis=-1)          # angle between leg k-1 and leg k, at joint k
+def _geometric_penalty(params, nfp, ntor, stellsym, boundary_node=False):
+    """Dimensionless LOCAL validity penalty for the exact SDF.
 
-    pos = jnp.maximum(-rr, 0.0) ** 2
-    sharp = jnp.mean(jnp.maximum(_COS_MIN_TURN - cos_turn, 0.0) ** 2)   # keep turns <= MAX_TURN_DEG
-    cos_safe = jnp.clip(cos_turn, _COS_MIN_TURN, 1.0)
-    t_half = jnp.sqrt(jnp.maximum(1.0 - cos_safe, 0.0) / (1.0 + cos_safe))   # tan(theta/2)
-    reach = rr * t_half                                        # mitre recession at each joint
-    reach_sum = reach + jnp.roll(reach, -1, axis=0)            # per leg: start joint + end joint
-    scale = jnp.mean(leg_len) ** 2 + 1e-30
-    interfere = jnp.mean(jnp.maximum(reach_sum - leg_len, 0.0) ** 2) / scale
-    return pos + sharp + interfere
+    It penalizes nonpositive radius, degenerate legs, near-reversal turns, and
+    overlapping mitre cuts. Exactness also requires that nonadjacent pipe pieces
+    do not intersect; that global condition must be enforced by the surrounding
+    design constraints or checked separately for the intended geometry.
+    """
+    rr, scale, lengths, cos_turn, miter_clearance = _validity_components(
+        params, nfp, ntor, stellsym, boundary_node
+    )
+
+    min_size = _MIN_RELATIVE_GEOMETRY_SIZE * scale
+    radius_term = jnp.square(jnp.maximum((min_size - rr) / scale, 0.0))
+    edge_term = jnp.mean(
+        jnp.square(jnp.maximum((min_size - lengths) / scale, 0.0))
+    )
+    turn_term = jnp.mean(
+        jnp.square(jnp.maximum(_COS_MIN_TURN - cos_turn, 0.0))
+    )
+    miter_term = jnp.mean(
+        jnp.square(jnp.maximum(-miter_clearance / scale, 0.0))
+    )
+    return radius_term + edge_term + turn_term + miter_term
 
 
-def quadratic_threshold_welded_helical(pts, params, sign, threshold, nfp, ntor, stellsym):
-    sls = _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym)
-    reach = _geometric_penalty(params, nfp, ntor, stellsym)
+def quadratic_threshold_welded_helical(pts, params, sign, threshold, nfp, ntor, stellsym,
+                                       boundary_node=False):
+    sls = _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node)
+    reach = _geometric_penalty(params, nfp, ntor, stellsym, boundary_node)
     return jnp.mean(jnp.maximum(threshold - sls, 0) ** 2) + reach
 
 
-def quadratic_distance_welded_helical(pts, params, sign, threshold, nfp, ntor, stellsym):
-    sls = _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym)
+def quadratic_distance_welded_helical(pts, params, sign, threshold, nfp, ntor, stellsym,
+                                      boundary_node=False):
+    sls = _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node)
     dvalue = jnp.abs(sls - jnp.mean(sls))
     return jnp.mean(jnp.maximum(dvalue - threshold, 0) ** 2)
 
 
 class HelicalCylinderVesselSDF(Optimizable):
-    """Closed loop of ``nseg`` straight PIPES (constant radius rr) cut on an
-    angle and welded at the joints -- a faceted helical vessel and an exact SDF.
+    """Closed loop of straight circular pipes joined by exact mitre cuts.
+
+    The SDF is the exact Euclidean signed distance when the local conditions
+    reported by :meth:`geometric_violation` hold and nonadjacent pipe pieces do
+    not intersect.
 
     Unlike the harmonic HelicalVesselSDF, the DESIGN VARIABLES are the discrete
     xyz positions of the piecewise-linear centreline's nodes (plus the free
@@ -227,9 +629,10 @@ class HelicalCylinderVesselSDF(Optimizable):
     Args:
         num_nodes: number of free centreline nodes in the fundamental domain --
                   nodes per HALF field period when stellsym, else per FULL field
-                  period. The closed loop has nseg = 2*nfp*num_nodes (stellsym)
-                  or nfp*num_nodes legs, with no divisibility constraint. May be
-                  omitted if ``nodes`` is given (it is then derived).
+                  period (the boundary node, if any, is node 0 and is counted). The
+                  closed loop has nseg = 2*nfp*num_nodes (stellsym), nfp*num_nodes
+                  (non-stellsym), or nfp*(2*(num_nodes-1)+1) (stellsym + boundary
+                  node). May be omitted if ``nodes`` is given (it is then derived).
         rr:       constant pipe radius (a FREE dof, seeded to this value).
         nfp:      field-period number of the symmetry group (default 1, or the
                   curve's nfp when ``curve`` is given).
@@ -242,9 +645,13 @@ class HelicalCylinderVesselSDF(Optimizable):
                   geometry seeds the nodes; it is sampled at the fundamental-
                   domain parameters and NOT retained (so the optimised node
                   state, not the seed curve, is what serialises).
+        boundary_node: (stellsym only) put node 0 ON the t=0 stellarator plane
+                  (y=z=0, pinned), emitted once and NOT mirrored, so the loop can
+                  have an ODD leg count per period, nseg = nfp*(2*(num_nodes-1)+1).
+                  This lets nseg avoid the 2*nfp multiple (e.g. 6 legs at nfp=2).
     """
     def __init__(self, num_nodes=None, rr=0.2, nfp=None, ntor=None, stellsym=None,
-                 nodes=None, curve=None, **kwargs):
+                 nodes=None, curve=None, boundary_node=False, **kwargs):
         # Fill nfp/ntor/stellsym from the seed curve when left unspecified, else
         # default to a single non-winding stellsym loop.
         if curve is not None:
@@ -257,29 +664,46 @@ class HelicalCylinderVesselSDF(Optimizable):
         self.nfp = 1 if nfp is None else int(nfp)
         self.ntor = 1 if ntor is None else int(ntor)
         self.stellsym = True if stellsym is None else bool(stellsym)
-        per = (2 * self.nfp) if self.stellsym else self.nfp
+        # boundary_node: place nodes[0] ON the t=0 stellarator plane (NOT mirrored),
+        # so the loop can carry an ODD number of legs per field period and nseg need
+        # not be a multiple of 2*nfp. Only meaningful with stellsym (the reflection
+        # is what pairs the interior nodes); the node's y,z are pinned to 0 below.
+        self.boundary_node = bool(boundary_node)
+        if self.boundary_node and not self.stellsym:
+            raise ValueError("boundary_node=True requires stellsym=True")
 
         # Resolve the fundamental-domain nodes. num_nodes IS the free node count
-        # (nodes per half field period when stellsym, per full field period else),
-        # so nseg = per*num_nodes with per = 2*nfp (stellsym) or nfp.
+        # (n_free): nodes per half field period when stellsym (per full period else),
+        # the boundary node included when present. The closed loop then has
+        # nseg = _nseg(nfp, stellsym, boundary_node, n_free).
         if curve is not None:
             if num_nodes is None:
                 raise ValueError("num_nodes is required when seeding from a curve")
-            nodes = self._sample_curve(curve, int(num_nodes), self.nfp, self.stellsym)
+            nodes = self._sample_curve(curve, int(num_nodes), self.nfp, self.stellsym,
+                                       self.boundary_node)
         elif nodes is not None:
             nodes = np.asarray(nodes, float).reshape(-1, 3)
         else:
             if num_nodes is None:
                 raise ValueError("provide either num_nodes (with/without curve) or nodes")
-            n = int(num_nodes)
-            t = (np.arange(n) + 0.5) / (per * n)
-            ang = 2.0 * np.pi * self.ntor * t
-            nodes = np.stack([np.cos(ang), np.sin(ang), np.zeros(n)], axis=-1)
+            nodes = _seed_circle(int(num_nodes), self.nfp, self.ntor, self.stellsym,
+                                 self.boundary_node)
 
         n_free = len(nodes)
         if num_nodes is not None and int(num_nodes) != n_free:
             raise ValueError(f"num_nodes={num_nodes} is inconsistent with the "
                              f"{n_free} nodes provided")
+        if self.boundary_node:
+            # The boundary node lives on the t=0 stellarator axis (the x-axis): force
+            # y=z=0 so pinning them below preserves EXACT stellarator symmetry.
+            nodes[0, 1] = 0.0
+            nodes[0, 2] = 0.0
+        nseg = _nseg(self.nfp, self.stellsym, self.boundary_node, n_free)
+        if nseg < 3:
+            raise ValueError(
+                "a closed mitred pipe requires at least three generated joints; "
+                f"this configuration generates {nseg}"
+            )
         self.curve = None   # seed curve is not part of the (optimised) state
 
         x0 = np.concatenate([nodes.flatten(), [float(rr)]])
@@ -293,22 +717,28 @@ class HelicalCylinderVesselSDF(Optimizable):
             # Pin one node's z (as HelicalVesselSDF pins zc(0)). For stellsym the
             # z -> -z reflection already fixes the z=0 plane, so nothing is pinned.
             self.fix('n0z')
+        elif self.boundary_node:
+            # Keep the boundary node on the t=0 stellarator axis (x-axis): its x
+            # slides freely along the axis (1 dof), while y and z stay pinned to 0 so
+            # the generated loop stays EXACTLY stellarator symmetric.
+            self.fix('n0y')
+            self.fix('n0z')
 
-        _sj = dict(nfp=self.nfp, ntor=self.ntor, stellsym=self.stellsym)
-        # JIT the closed-form SDF (static symmetry args bound; only pts/params/sign vary).
+        _sj = dict(nfp=self.nfp, ntor=self.ntor, stellsym=self.stellsym,
+                   boundary_node=self.boundary_node)
+        # JIT the exact SDF (static symmetry args bound; only pts/params/sign vary).
         self.pure = jax.jit(partial(_sdf_welded_helical, **_sj))
         self.quadratic_threshold = partial(quadratic_threshold_welded_helical, **_sj)
         self.quadratic_distance = partial(quadratic_distance_welded_helical, **_sj)
 
     @staticmethod
-    def _sample_curve(curve, num_nodes, nfp, stellsym):
-        """Sample ``curve`` at the fundamental-domain cell centres to seed the
+    def _sample_curve(curve, num_nodes, nfp, stellsym, boundary_node=False):
+        """Sample ``curve`` at the fundamental-domain node parameters to seed the
         ``num_nodes`` free nodes (num_nodes, 3). A same-type curve is rebuilt at
         those quadpoints and given the original dofs, so the sampling is exact for
-        any simsopt curve carrying (order, nfp, stellsym[, ntor])."""
-        per = (2 * nfp) if stellsym else nfp
-        n_free = int(num_nodes)
-        t = (np.arange(n_free) + 0.5) / (per * n_free)
+        any simsopt curve carrying (order, nfp, stellsym[, ntor]). With a boundary
+        node, node 0 is sampled at t=0 (on the stellarator axis, y=z=0)."""
+        t = _fundamental_t(int(num_nodes), nfp, stellsym, boundary_node)
         c2 = curve.__class__(list(t), curve.order, curve.nfp, curve.stellsym,
                              ntor=getattr(curve, 'ntor', 1))
         c2.x = curve.x
@@ -336,8 +766,9 @@ class HelicalCylinderVesselSDF(Optimizable):
 
     @property
     def nseg(self):
-        # total legs in the closed loop; per = 2*nfp (stellsym) or nfp.
-        return (2 * self.nfp if self.stellsym else self.nfp) * self.n_free
+        # total legs in the closed loop (see _nseg): with a boundary node the
+        # stellsym loop carries an ODD leg count per period.
+        return _nseg(self.nfp, self.stellsym, self.boundary_node, self.n_free)
 
     @property
     def nodes(self):
@@ -354,36 +785,87 @@ class HelicalCylinderVesselSDF(Optimizable):
     def joints(self):
         """The full ordered loop of ``nseg`` weld joints as an (nseg, 3) array."""
         nodes, _rr = _unpack(self.local_full_x)
-        return np.asarray(_all_joints(nodes, self.nfp, self.ntor, self.stellsym))
+        return np.asarray(_all_joints(nodes, self.nfp, self.ntor, self.stellsym,
+                                      self.boundary_node))
 
     def max_turn_angle(self):
-        """Largest turn angle (deg) between consecutive legs; the mitre stays
-        exact well below 180 deg (the geometric penalty keeps it <= MAX_TURN_DEG)."""
+        """Largest turn angle in degrees between consecutive centerline legs."""
         P = self.joints()
-        u = P[np.arange(1, len(P) + 1) % len(P)] - P
-        u = u / np.linalg.norm(u, axis=-1, keepdims=True)
+        edges = np.roll(P, -1, axis=0) - P
+        lengths = np.linalg.norm(edges, axis=-1)
+        u = edges / np.maximum(lengths[:, None], np.finfo(float).tiny)
         cos_turn = np.sum(np.roll(u, 1, axis=0) * u, axis=-1)
-        return float(np.degrees(np.arccos(np.clip(cos_turn, -1.0, 1.0))).max())
+        return float(
+            np.degrees(np.arccos(np.clip(cos_turn, -1.0, 1.0))).max()
+        )
+
+    def minimum_miter_clearance(self):
+        """Minimum leg length minus its two axial mitre setbacks.
+
+        A positive value means the start and end cuts do not overlap on any leg.
+        This is a local condition and does not test nonadjacent self-intersection.
+        """
+        P = self.joints()
+        radius = max(self.rr, 0.0)
+        edges = np.roll(P, -1, axis=0) - P
+        lengths = np.linalg.norm(edges, axis=-1)
+        u = edges / np.maximum(lengths[:, None], np.finfo(float).tiny)
+
+        sums = np.roll(u, 1, axis=0) + u
+        miters = sums / np.maximum(
+            np.linalg.norm(sums, axis=-1, keepdims=True),
+            np.finfo(float).tiny,
+        )
+
+        c_start = np.clip(
+            np.sum(u * miters, axis=-1),
+            np.finfo(float).eps,
+            1.0,
+        )
+        c_end = np.clip(
+            np.sum(u * np.roll(miters, -1, axis=0), axis=-1),
+            np.finfo(float).eps,
+            1.0,
+        )
+        start_setback = (
+            radius * np.sqrt(np.maximum(0.0, 1.0 - c_start * c_start))
+            / c_start
+        )
+        end_setback = (
+            radius * np.sqrt(np.maximum(0.0, 1.0 - c_end * c_end))
+            / c_end
+        )
+        return float(np.min(lengths - start_setback - end_setback))
 
     def geometric_violation(self):
-        """Worst geometric-validity violation of the mitred tube as a single
-        non-negative scalar comparable to the 0.1% design gate (0 == valid).
-        Mirrors _geometric_penalty's three conditions but as a max of relative
-        excesses (like the other SDFs' vessel_shape_err): rr > 0, turns no
-        sharper than MAX_TURN_DEG, and every leg longer than the two mitre
-        recessions rr*tan(theta/2) eating in from its end joints."""
+        """Worst normalized LOCAL validity violation; zero means locally valid.
+
+        Checks radius positivity, nonzero legs, the turn cap, and overlap of the
+        two mitre cuts on each leg. Exactness additionally requires no intersection
+        between nonadjacent pipe pieces; this method deliberately does not use the
+        overly conservative capsule test that rejects valid fine discretizations.
+        """
         P = self.joints()
         rr = self.rr
-        leg = np.roll(P, -1, axis=0) - P
-        leg_len = np.linalg.norm(leg, axis=-1)
-        u = leg / np.maximum(leg_len[:, None], 1e-30)
-        cos_turn = np.clip(np.sum(np.roll(u, 1, axis=0) * u, axis=-1), -1.0, 1.0)
-        turn_vio = max((np.degrees(np.arccos(cos_turn)).max() - MAX_TURN_DEG) / MAX_TURN_DEG, 0.0)
-        cos_safe = np.clip(cos_turn, _COS_MIN_TURN, 1.0)
-        reach = rr * np.sqrt(np.maximum(1.0 - cos_safe, 0.0) / (1.0 + cos_safe))  # rr*tan(theta/2)
-        reach_sum = reach + np.roll(reach, -1)                                    # per leg: both joints
-        mitre_vio = float(np.max(np.maximum(reach_sum / np.maximum(leg_len, 1e-30) - 1.0, 0.0)))
-        return float(max(turn_vio, mitre_vio, max(-rr, 0.0)))
+        edges = np.roll(P, -1, axis=0) - P
+        lengths = np.linalg.norm(edges, axis=-1)
+        scale = max(1.0, float(np.max(lengths)), abs(rr))
+        min_size = _MIN_RELATIVE_GEOMETRY_SIZE * scale
+
+        u = edges / np.maximum(lengths[:, None], np.finfo(float).tiny)
+        cos_turn = np.clip(
+            np.sum(np.roll(u, 1, axis=0) * u, axis=-1),
+            -1.0,
+            1.0,
+        )
+        max_turn = float(np.degrees(np.arccos(cos_turn)).max())
+
+        clearance = self.minimum_miter_clearance()
+        radius_vio = max((min_size - rr) / scale, 0.0)
+        edge_vio = float(np.max(np.maximum(min_size - lengths, 0.0)) / scale)
+        turn_vio = max((max_turn - MAX_TURN_DEG) / MAX_TURN_DEG, 0.0)
+        miter_vio = max(-clearance / scale, 0.0)
+        return float(max(radius_vio, edge_vio, turn_vio, miter_vio))
 
     def eval(self, x, y, z):
         pts = np.concatenate((x.flatten()[:, None], y.flatten()[:, None],
@@ -391,12 +873,44 @@ class HelicalCylinderVesselSDF(Optimizable):
         return np.array(self.pure(pts, self.local_full_x, 1.0).astype(np.float32).reshape(x.shape))
 
     def rz_bounds(self):
-        """Conservative (R_max, |Z|_max): the largest cylindrical radius and
-        height over the joints, plus the pipe radius rr."""
+        """Conservative bounds including the axial overhang of oblique mitres."""
         P = self.joints()
-        rr = self.rr
-        R_max = float(np.hypot(P[:, 0], P[:, 1]).max() + abs(rr))
-        Z_max = float(np.abs(P[:, 2]).max() + abs(rr))
+        B = np.roll(P, -1, axis=0)
+        edges = B - P
+        lengths = np.linalg.norm(edges, axis=-1)
+        u = edges / np.maximum(lengths[:, None], np.finfo(float).tiny)
+
+        sums = np.roll(u, 1, axis=0) + u
+        miters = sums / np.maximum(
+            np.linalg.norm(sums, axis=-1, keepdims=True),
+            np.finfo(float).tiny,
+        )
+        c_start = np.clip(
+            np.sum(u * miters, axis=-1),
+            np.finfo(float).eps,
+            1.0,
+        )
+        c_end = np.clip(
+            np.sum(u * np.roll(miters, -1, axis=0), axis=-1),
+            np.finfo(float).eps,
+            1.0,
+        )
+
+        radius = abs(self.rr)
+        start_setback = (
+            radius * np.sqrt(np.maximum(0.0, 1.0 - c_start * c_start))
+            / c_start
+        )
+        end_setback = (
+            radius * np.sqrt(np.maximum(0.0, 1.0 - c_end * c_end))
+            / c_end
+        )
+        extended_start = P - start_setback[:, None] * u
+        extended_end = B + end_setback[:, None] * u
+        axis_points = np.concatenate((extended_start, extended_end), axis=0)
+
+        R_max = float(np.hypot(axis_points[:, 0], axis_points[:, 1]).max() + radius)
+        Z_max = float(np.abs(axis_points[:, 2]).max() + radius)
         return R_max, Z_max
 
     def to_vtk(self, name, nx=60, ny=60, nz=40):

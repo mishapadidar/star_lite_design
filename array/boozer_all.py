@@ -221,20 +221,28 @@ elif vessel_id >= 5000:
     # vessel_id - 5000 (so 5004 -> 4 legs), giving distinct devices via the
     # existing vesselID folder field -- no new CLI arg, no folder-name change.
     # The SDF is parametrised by the fundamental-domain node count num_nodes, so
-    # convert nseg -> num_nodes for the device symmetry (DN -> stellsym, SN -> not):
-    # the loop has nseg = 2*nfp*num_nodes (DN) or nfp*num_nodes (SN), hence
-    # num_nodes = nseg/(2*nfp) [DN] or nseg/nfp [SN]. nseg must divide evenly.
+    # convert nseg -> num_nodes for the device symmetry (DN -> stellsym, SN -> not).
+    # nseg only needs to be a multiple of nfp (rotational symmetry). For DN, an EVEN
+    # nseg/nfp is the standard mirror-paired loop (nseg = 2*nfp*num_nodes); an ODD
+    # nseg/nfp puts one node on the t=0 stellarator plane (boundary_node=True), giving
+    # nseg = nfp*(2*num_interior+1) with num_nodes = num_interior+1 = (nseg/nfp+1)/2.
     rr = 0.2
     nseg = vessel_id - 5000
     _nfp = axes[0].curve.nfp
     _stellsym = (null_type == 'DN')
-    _per = (2 * _nfp) if _stellsym else _nfp
-    if nseg % _per:
+    if nseg % _nfp:
         raise Exception(f"welded-pipe vessel nseg={nseg} (vessel_id-5000) must be a "
-                        f"multiple of {_per} for null={null_type} (nfp={_nfp})")
-    num_nodes = nseg // _per
+                        f"multiple of nfp={_nfp} for null={null_type}")
+    _q = nseg // _nfp
+    if _stellsym:
+        _boundary_node = bool(_q % 2)                       # odd legs/period -> boundary node
+        num_nodes = (_q + 1) // 2 if _boundary_node else _q // 2
+    else:
+        _boundary_node = False
+        num_nodes = _q
     sdf = HelicalCylinderVesselSDF.from_curve_xyz_fourier_symmetries(
-        axes[0].curve, rr, num_nodes=num_nodes, stellsym=_stellsym)
+        axes[0].curve, rr, num_nodes=num_nodes, stellsym=_stellsym,
+        boundary_node=_boundary_node)
 else:
     raise Exception('vessel not implemented')
 

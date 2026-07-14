@@ -25,7 +25,7 @@ configs=(0 1 2 3)
 # vessel_id - 5000 (so each nseg is a distinct device via the vesselID folder
 # field, no folder-name change). nfp=2, so nseg must be a multiple of 2*nfp=4 to
 # be valid for the DN (stellsym) devices: 5004/5008/5012 = 4/8/12 segments.
-vessel_values=(0 1 2 3 4 5004 5008 5012)
+vessel_values=(0 1 2 3 4 5004 5006 5008 5010 5012)
 # Null type: DN = double-null (stellsym, current behavior); SN = single-null
 # (drop stellsym, push the bottom X-point to the lower wall).
 null_values=(DN SN)
