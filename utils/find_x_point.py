@@ -32,7 +32,7 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
     points = np.linspace(0, length, n, endpoint=False).reshape((n, 1))
     oneton = np.asarray(range(0, n)).reshape((n, 1))
     fak = 2*np.pi / length
-    dists = fak * cdist(points, points, lambda a, b: a-b)
+    dists = fak * cdist(points, points, lambda a, b: (a-b).item())
     np.fill_diagonal(dists, 1e-10)  # to shut up the warning
     if n % 2 == 0:
         D = 0.5 \
