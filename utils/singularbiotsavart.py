@@ -252,6 +252,14 @@ class SingularBiotSavart(MagneticField):
         self._prepare()
         ddB[:] = self.modular.d2B_by_dXdX() + self._aux_bs.d2B_by_dXdX()
 
+    def _A_impl(self, A):
+        self._prepare()
+        A[:] = self.modular.A() + self._aux_bs.A()
+
+    def _dA_by_dX_impl(self, dA):
+        self._prepare()
+        dA[:] = self.modular.dA_by_dX() + self._aux_bs.dA_by_dX()
+
     def compute(self, derivatives=0):
         """Populate the B (and up to ``derivatives`` spatial-derivative) caches.
 
