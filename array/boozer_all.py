@@ -240,9 +240,9 @@ elif vessel_id >= 5000:
     else:
         _boundary_node = False
         num_nodes = _q
-    sdf = HelicalCylinderVesselSDF.from_curve_xyz_fourier_symmetries(
-        axes[0].curve, rr, num_nodes=num_nodes, stellsym=_stellsym,
-        boundary_node=_boundary_node)
+    sdf = HelicalCylinderVesselSDF(
+        num_nodes=num_nodes, rr=rr, curve=axes[0].curve,
+        stellsym=_stellsym, boundary_node=_boundary_node)
 else:
     raise Exception('vessel not implemented')
 
