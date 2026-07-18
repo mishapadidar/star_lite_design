@@ -28,11 +28,12 @@ from pyevtk.hl import gridToVTK  # pip install pyevtk
 # clipped by the bisector planes at its endpoints. Per query point/leg, project
 # onto the unrestricted cylinder; if the projection lies between the mitre planes
 # the radial distance is exact, else the closest point is on one of the two
-# elliptical mitre rings (fixed-count point-to-ellipse solve). The min unsigned
+# elliptical mitre curves (fixed-count point-to-ellipse solve). The min unsigned
 # distance over exposed patches is signed by membership in the union of clipped
 # solid cylinders (shared mitre disks are internal). Exact when legs are nonzero,
-# no 180-deg reversal, mitre cuts do not overlap, and nonadjacent pieces do not
-# intersect; _geometric_penalty enforces the local conditions.
+# no 180-deg reversal, a fully cylindrical section survives on each leg, and
+# nonadjacent pieces do not intersect; _geometric_penalty enforces the local
+# conditions.
 #
 # DOF LAYOUT: params = concat([node_0(xyz), ..., node_{n_free-1}(xyz), rr]).
 # ---------------------------------------------------------------------------
@@ -116,11 +117,6 @@ def _fundamental_t(n_free, nfp, stellsym, boundary_node):
     return (np.arange(n_free) + offset) / nseg
 
 
-def _miter_dot(a, b):
-    """Dot product over the Cartesian axis with leading-axis broadcasting."""
-    return jnp.sum(a * b, axis=-1)
-
-
 @jax.custom_jvp
 def _miter_safe_norm(x):
     """Euclidean norm with the zero vector assigned a zero subgradient."""
@@ -147,7 +143,7 @@ def _safe_normalize(v, fallback):
     return jnp.where(n > 0.0, v / safe, fallback)
 
 
-def _leg_geometry_full(P):
+def _leg_geometry(P):
     """Return starts, ends, lengths, tangents, and start mitre normals."""
     A = P
     B = jnp.roll(P, -1, axis=0)
@@ -159,109 +155,139 @@ def _leg_geometry_full(P):
     return A, B, lengths, u, n_bis
 
 
-def _leg_geometry(P):
-    """Compatibility helper returning ``(A, u, n_bis)`` as before."""
-    A, _B, _lengths, u, n_bis = _leg_geometry_full(P)
-    return A, u, n_bis
+def _miter_ellipse_closest_point(p, e0, e1):
+    """Closest point on the ellipse (x0/e0)^2 + (x1/e1)^2 = 1, e0 >= e1 > 0.
+
+    Notation follows Eberly (below): extents e0 >= e1, query point Y = (y0, y1)
+    reduced to the first quadrant, closest point X = (x0, x1). The strictly
+    monotone root G(s) = 0 (s = t/e1^2) is solved by a fixed number of bisection
+    iterations, making the routine JIT compatible.
+
+    ALL branches of Eberly's algorithm are evaluated to make things vectorized for JAX.
+    
+    Branch 1: query point lies in first quadrant + ellipse is not a circle
+    Branch 2: query point lies on the horizontal axis
+    Branch 3: query point lies on the vertical axis
+    Branch 4: ellipse is actually a circle
+
+    The most general branch could give the wrong answers:
+    e.g. say query point is (y0, 0).  Branch 1 will always return
+    that the closest point is (e0, 0), since it always returns a stationary point.
 
 
-def _miter_ellipse_closest_point(p, semimajor, semiminor):
-    """Closest point on x^2/a^2 + y^2/b^2 = 1 for a >= b > 0.
+    or unstable answers if query point lies on 
+    one of the axes, or the ellipse is actually a circle.
 
-    The strictly monotone Lagrange-multiplier equation is solved by a fixed
-    number of bisection iterations, making the routine JIT compatible.
+    Method: D. Eberly, "Distance from a Point to an Ellipse, an Ellipsoid, or a
+    Hyperellipsoid", Geometric Tools (2013, rev. 2020), Section 2.9 and Listing 2.
+    https://www.geometrictools.com/Documentation/DistancePointEllipseEllipsoid.pdf
     """
     p = jnp.asarray(p)
-    a = jnp.asarray(semimajor, dtype=p.dtype)
-    b = jnp.asarray(semiminor, dtype=p.dtype)
+    e0 = jnp.asarray(e0, dtype=p.dtype)
+    e1 = jnp.asarray(e1, dtype=p.dtype)
 
-    x = jnp.abs(p[..., 0])
-    y = jnp.abs(p[..., 1])
-    a, b, x, y = jnp.broadcast_arrays(a, b, x, y)
+    # Reduce the query to the first quadrant: Y = (y0, y1) with y0, y1 >= 0.
+    y0 = jnp.abs(p[..., 0])
+    y1 = jnp.abs(p[..., 1])
+    e0, e1, y0, y1 = jnp.broadcast_arrays(e0, e1, y0, y1)  # broadcast to a common shape
 
     finfo = jnp.finfo(p.dtype)
     eps = finfo.eps
 
     # Exact coordinate-axis cases are handled below. These floors protect only
     # the generic branch, which JAX may still evaluate under vectorization.
-    x_safe = jnp.where(x > 0.0, x, jnp.maximum(eps * a, finfo.tiny))
-    y_safe = jnp.where(y > 0.0, y, jnp.maximum(eps * b, finfo.tiny))
+    y0_safe = jnp.where(y0 > 0.0, y0, jnp.maximum(eps * e0, finfo.tiny))
+    y1_safe = jnp.where(y1 > 0.0, y1, jnp.maximum(eps * e1, finfo.tiny))
 
-    ratio2 = jnp.square(a / b)
-    z0 = x_safe / a
-    z1 = y_safe / b
-    n0 = ratio2 * z0
-    g0 = jnp.square(z0) + jnp.square(z1) - 1.0
+    # Scaled query z_i = y_i/e_i and ratio of squared extents r0 = e0^2/e1^2.
+    r0 = jnp.square(e0 / e1)
+    z0 = y0_safe / e0
+    z1 = y1_safe / e1
+    n0 = r0 * z0
+    g = jnp.square(z0) + jnp.square(z1) - 1.0    # G(0): >0 outside, <0 inside
 
-    # Root bracket for s = lambda / b^2.
-    lo = jnp.where(g0 < 0.0, z1 - 1.0, 0.0)
-    hi = jnp.where(g0 < 0.0, 0.0, jnp.hypot(n0, z1) - 1.0)
+    # Bracket [s0, s1] of the unique root of G(s), s = t/e1^2 (Eberly Eq. 24).
+    # the comment in figure 1 of the document + G is strictly decreasing meaning you can simplify the 
+    # initial bounds given to bisection
+    s0 = jnp.where(g < 0.0, z1 - 1.0, 0.0)
+    s1 = jnp.where(g < 0.0, 0.0, jnp.hypot(n0, z1) - 1.0)
 
     def bisect_body(_, state):
-        lo_i, hi_i = state
-        s = 0.5 * (lo_i + hi_i)
-        q0 = n0 / (s + ratio2)
-        q1 = z1 / (s + 1.0)
-        residual = q0 * q0 + q1 * q1 - 1.0
+        s0_i, s1_i = state
+        s = 0.5 * (s0_i + s1_i)
+        ratio0 = n0 / (s + r0)
+        ratio1 = z1 / (s + 1.0)
+        g = ratio0 * ratio0 + ratio1 * ratio1 - 1.0    # G(s)
         return (
-            jnp.where(residual > 0.0, s, lo_i),
-            jnp.where(residual > 0.0, hi_i, s),
+            jnp.where(g > 0.0, s, s0_i),
+            jnp.where(g > 0.0, s1_i, s),
         )
 
-    lo, hi = jax.lax.fori_loop(
+    s0, s1 = jax.lax.fori_loop(
         0,
         _MITER_ELLIPSE_BISECTION_ITERS,
         bisect_body,
-        (lo, hi),
+        (s0, s1),
     )
-    s = 0.5 * (lo + hi)
+    s = 0.5 * (s0 + s1)
+
+    # q_general is the closest point on the ellipse where (y0, y1) is in GENERAL
+    # position in the first quadrant.  Note subcases will be computed next. This is
+    # given by equation (10) in the document, but variable is
+    #  changed to s.
     q_general = jnp.stack(
         (
-            ratio2 * x_safe / (s + ratio2),
-            y_safe / (s + 1.0),
+            r0 * y0_safe / (s + r0),
+            y1_safe / (s + 1.0),
         ),
         axis=-1,
     )
 
-    # y == 0 can have an off-axis closest point inside the ellipse evolute.
-    denominator = jnp.square(a) - jnp.square(b)
-    denominator_safe = jnp.where(denominator > 0.0, denominator, 1.0)
-    u = jnp.clip(a * x / denominator_safe, 0.0, 1.0)
-    q_xaxis_off = jnp.stack(
-        (
-            a * u,
-            b * jnp.sqrt(jnp.maximum(0.0, 1.0 - u * u)),
-        ),
-        axis=-1,
+    # Section 2.5: query on the horizontal axis (y1 == 0). The two candidate closest
+    # points are the off-axis (x0, x1) and the vertex (e0, 0); the off-axis one wins
+    # only for y0 < (e0^2 - e1^2)/e0.
+    # if the ellipse is a circle, this difference is just numerical noise, which will ruin the accuracy
+    # of the formula for x0, due to catastrophic cancellation
+    e0_sq_minus_e1_sq = jnp.square(e0) - jnp.square(e1)
+    e0_sq_minus_e1_sq_safe = jnp.where(
+        e0_sq_minus_e1_sq > 0.0, e0_sq_minus_e1_sq, 1.0
     )
-    q_xaxis_end = jnp.stack((a, jnp.zeros_like(a)), axis=-1)
+    x0_over_e0 = jnp.clip(e0 * y0 / e0_sq_minus_e1_sq_safe, 0.0, 1.0)
+    x0 = e0 * x0_over_e0                                  # e0^2 y0/(e0^2 - e1^2)
+    x1 = e1 * jnp.sqrt(jnp.maximum(0.0, 1.0 - x0_over_e0 * x0_over_e0))
+    q_xaxis_off = jnp.stack((x0, x1), axis=-1)
+    q_xaxis_vertex = jnp.stack((e0, jnp.zeros_like(e0)), axis=-1)
     q_xaxis = jnp.where(
-        (a * x < denominator)[..., None],
+        (e0 * y0 < e0_sq_minus_e1_sq)[..., None],
         q_xaxis_off,
-        q_xaxis_end,
+        q_xaxis_vertex,
     )
 
-    # x == 0 has closest representative (0, b).
-    q_yaxis = jnp.stack((jnp.zeros_like(b), b), axis=-1)
+    # y0 == 0 has closest representative (0, e1), section 2.4 of document
+    q_yaxis = jnp.stack((jnp.zeros_like(e1), e1), axis=-1)
     q_ellipse = jnp.where(
-        (x == 0.0)[..., None],
+        (y0 == 0.0)[..., None],
         q_yaxis,
-        jnp.where((y == 0.0)[..., None], q_xaxis, q_general),
+        jnp.where((y1 == 0.0)[..., None], q_xaxis, q_general),
     )
 
-    # Stable limit for a circular section (straight joint).
-    circle_tolerance = 8.0 * eps * jnp.maximum(a, b)
-    is_circle = jnp.abs(a - b) <= circle_tolerance
-    p_radius = jnp.hypot(x, y)
-    p_radius_safe = jnp.where(p_radius > 0.0, p_radius, 1.0)
+    # Stable limit for a circular section (straight joint), section 2.2 of document
+    # when e0 and e1 correspond to within ~8 ULP, i.e. relative difference  < 8*eps,
+    # where ULP means unit in last place, i.e., the spacing between adjacent floating
+    # point numbers.  This is useful to activate to avoid catastrophic cancellation
+    # especially when the query point lies on horizontal axis (y0, 0)
+    circle_tolerance = 8.0 * eps * jnp.maximum(e0, e1)
+    is_circle = jnp.abs(e0 - e1) <= circle_tolerance
+    y_radius = jnp.hypot(y0, y1)
+    y_radius_safe = jnp.where(y_radius > 0.0, y_radius, 1.0)
     q_circle_radial = (
-        a[..., None]
-        * jnp.stack((x, y), axis=-1)
-        / p_radius_safe[..., None]
+        e0[..., None]
+        * jnp.stack((y0, y1), axis=-1)
+        / y_radius_safe[..., None]
     )
-    q_circle_center = jnp.stack((a, jnp.zeros_like(a)), axis=-1)
+    q_circle_center = jnp.stack((e0, jnp.zeros_like(e0)), axis=-1)
     q_circle = jnp.where(
-        (p_radius > 0.0)[..., None],
+        (y_radius > 0.0)[..., None],
         q_circle_radial,
         q_circle_center,
     )
@@ -302,20 +328,20 @@ def _miter_ellipse_curve_distance_jvp(primals, tangents):
     )
 
     derivative = (
-        _miter_dot(normal, dp)
+        jnp.sum(normal * dp, axis=-1)
         - normal[..., 0] * closest[..., 0] / a * da
         - normal[..., 1] * closest[..., 1] / b * db
     )
     return distance, derivative
 
 
-def _miter_ring_distance(points, vertex, tangent, miter_normal, radius):
-    """Exact Euclidean distance to one elliptical mitre ring."""
+def _miter_curve_distance(points, vertex, tangent, miter_normal, radius):
+    """Exact Euclidean distance to one elliptical mitre curve."""
     offset = points - vertex
     eps = jnp.finfo(offset.dtype).eps
 
-    cosine = jnp.clip(_miter_dot(tangent, miter_normal), eps, 1.0)
-    height = _miter_dot(offset, miter_normal)
+    cosine = jnp.clip(jnp.sum(tangent * miter_normal, axis=-1), eps, 1.0)
+    height = jnp.sum(offset * miter_normal, axis=-1)
     sine2 = jnp.maximum(0.0, 1.0 - cosine * cosine)
 
     major_axis = (
@@ -325,8 +351,8 @@ def _miter_ring_distance(points, vertex, tangent, miter_normal, radius):
 
     coordinates = jnp.stack(
         (
-            _miter_dot(offset, major_axis),
-            _miter_dot(offset, minor_axis),
+            jnp.sum(offset * major_axis, axis=-1),
+            jnp.sum(offset * minor_axis, axis=-1),
         ),
         axis=-1,
     )
@@ -338,7 +364,7 @@ def _miter_ring_distance(points, vertex, tangent, miter_normal, radius):
     )
     ellipse_distance = jnp.hypot(height, in_plane_distance)
 
-    # A straight joint has a circular ring in a plane normal to the tangent.
+    # A straight joint has a circular curve in a plane normal to the tangent.
     planar = offset - height[..., None] * miter_normal
     circle_distance = jnp.hypot(
         height,
@@ -351,21 +377,44 @@ def _miter_ring_distance(points, vertex, tangent, miter_normal, radius):
     )
 
 
-def _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr):
-    """Exact SDF of the valid closed polyline pipe described by leg geometry.
+def _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node=False):
+    """Exact signed distance to a valid welded, mitred polyline pipe.
 
-    The unsigned distance is the minimum distance to the exposed cylindrical
-    side patches. Internal mitre disks are used only for the global membership
-    test and are never included as boundary-distance candidates.
+    The unsigned distance is the minimum distance to the exposed cylindrical side
+    patches; the internal mitre disks enter only through the global inside/outside
+    sign, never as boundary-distance candidates.
+
+    Exactness requires positive radius, nonzero legs, no 180-degree reversal, a
+    fully cylindrical section on each leg (the two mitre setbacks not consuming
+    its whole length), and no overlap between nonadjacent pipe pieces.
+    ``_geometric_penalty`` enforces the local conditions; global self-intersection
+    must be excluded by the surrounding design constraints.
     """
     points = jnp.asarray(pts)
     if points.ndim < 1 or points.shape[-1] != 3:
         raise ValueError("pts must have shape (..., 3)")
+    dtype = jnp.result_type(points, jnp.asarray(params), jnp.float32)
+    points = points.astype(dtype)
+    params = jnp.asarray(params, dtype=dtype)
+
+    nodes, rr_raw = _unpack(params)
+    P = _all_joints(nodes, nfp, ntor, stellsym, boundary_node)
+    A, B, lengths, u, n_bis = _leg_geometry(P)
+
+    # Keep invalid optimization iterates finite. In the valid domain this is
+    # exactly rr_raw; the geometry penalty supplies the restoring gradient when
+    # rr_raw is nonpositive.
+    scale = jnp.maximum(1.0, jnp.max(lengths))
+    radius_floor = jnp.finfo(dtype).eps * scale
+    rr = jnp.maximum(rr_raw, radius_floor)
 
     output_shape = points.shape[:-1]
     points = points.reshape((-1, 3))
 
-    B = jnp.roll(A, -1, axis=0)
+    # Broadcast every query point against every leg: p is (Npts, 1, 3) and each
+    # per-leg array is (1, nseg, 3), so the arithmetic below covers all
+    # (point, leg) pairs at once. end_miter is the mitre normal at the leg's far
+    # vertex, i.e. the next leg's start mitre (n_bis rolled by one).
     p = points[:, None, :]
     a = A[None, :, :]
     b = B[None, :, :]
@@ -374,43 +423,51 @@ def _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr):
     end_miter = jnp.roll(n_bis, -1, axis=0)[None, :, :]
     segment_length = lengths[None, :]
 
+    # Cylindrical split of the point about each leg axis: axial is the signed
+    # position along the tangent, radial the perpendicular offset from the axis.
     relative = p - a
-    axial = _miter_dot(relative, tangent)
-    radial = relative - axial[..., None] * tangent
-    radial_length = _miter_safe_norm(radial)
-    radial_nonzero = radial_length > 0.0
-    safe_radial_length = jnp.where(radial_nonzero, radial_length, 1.0)
+    axial = jnp.sum(relative * tangent, axis=-1) # position along the axis from a.
+    radial = relative - axial[..., None] * tangent # radial vector from the axis to the point.
+    radial_length = _miter_safe_norm(radial)       # distance to the infinite axis
+    radial_nonzero = radial_length > 0.0            # off-axis: radial direction defined
+    safe_radial_length = jnp.where(radial_nonzero, radial_length, 1.0)  # guards /0 below
 
-    # Closest point on each unrestricted infinite cylindrical side surface.
+    # Closest point on each leg's infinite cylinder of radius rr: the axial foot
+    # a + axial*tangent, stepped out by rr along the unit radial direction.
     cylinder_point = (
         a
         + axial[..., None] * tangent
         + rr * radial / safe_radial_length[..., None]
     )
+    # That surface point counts only if it lies on the leg's EXPOSED side patch:
+    # off the axis (radial direction defined) and between the two mitre planes
+    # (past the start plane, before the end plane).
     projection_on_patch = (
         radial_nonzero
-        & (_miter_dot(cylinder_point - a, start_miter) >= 0.0)
-        & (_miter_dot(cylinder_point - b, end_miter) <= 0.0)
+        & (jnp.sum((cylinder_point - a) * start_miter, axis=-1) >= 0.0) # cylinder point must be ABOVE the miter plane centered at a
+        & (jnp.sum((cylinder_point - b) * end_miter, axis=-1) <= 0.0)   # cylinder point must be BELOW the miter plane centered at b
     )
+    # Exact distance to the infinite cylinder surface (radial gap to radius rr);
+    # this is the boundary distance when the projection lands on the clipped patch.
     unrestricted_cylinder_distance = jnp.abs(radial_length - rr)
 
     # If the unrestricted projection is not on the clipped patch, the
-    # constrained closest point lies on one of the two elliptical edge rings.
-    ring_at_vertex = _miter_ring_distance(
+    # constrained closest point lies on one of the two elliptical edge curves.
+    distance_to_miter_curve = _miter_curve_distance(
         p,
         a,
         tangent,
         start_miter,
         rr,
     )
-    ring_distance = jnp.minimum(
-        ring_at_vertex,
-        jnp.roll(ring_at_vertex, -1, axis=1),
+    min_miter_curve_distance = jnp.minimum(
+        distance_to_miter_curve,
+        jnp.roll(distance_to_miter_curve, -1, axis=1),
     )
 
     # On the axis, the unrestricted cylindrical projection is non-unique. For
     # an interference-free segment, an admissible side point is exactly rr away
-    # between its centerline endpoints. Outside that interval, the ring fallback
+    # between its centerline endpoints. Outside that interval, the mitre-curve fallback
     # gives the same result wherever an overhanging mitre section is admissible.
     axis_has_side_patch = (
         (~radial_nonzero)
@@ -420,16 +477,16 @@ def _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr):
     patch_distance = jnp.where(
         projection_on_patch,
         unrestricted_cylinder_distance,
-        jnp.where(axis_has_side_patch, rr, ring_distance),
+        jnp.where(axis_has_side_patch, rr, min_miter_curve_distance),
     )
 
     # Membership in the union of clipped solid cylinders supplies one global
     # sign. Shared mitre disks are internal to this union and therefore do not
     # participate in the unsigned boundary distance above.
     inside_piece = (
-        (_miter_dot(radial, radial) <= rr * rr)
-        & (_miter_dot(p - a, start_miter) >= 0.0)
-        & (_miter_dot(p - b, end_miter) <= 0.0)
+        (jnp.sum(radial * radial, axis=-1) <= rr * rr)
+        & (jnp.sum((p - a) * start_miter, axis=-1) >= 0.0)
+        & (jnp.sum((p - b) * end_miter, axis=-1) <= 0.0)
     )
 
     unsigned_distance = jnp.min(patch_distance, axis=1)
@@ -438,40 +495,7 @@ def _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr):
         -unsigned_distance,
         unsigned_distance,
     )
-    return signed_distance.reshape(output_shape)
-
-
-def _sdf_split(pts, A, u, n_bis, rr):
-    """Compatibility wrapper for the old private helper; now evaluates exactly."""
-    lengths = _miter_safe_norm(jnp.roll(A, -1, axis=0) - A)
-    return _sdf_exact_miter_pipe(pts, A, lengths, u, n_bis, rr)
-
-
-def _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node=False):
-    """Exact signed distance to a valid welded, mitred polyline pipe.
-
-    Exactness requires positive radius, nonzero legs, no 180-degree reversal,
-    nonoverlapping mitre cuts on each leg, and no overlap between nonadjacent
-    pipe pieces. ``_geometric_penalty`` enforces the local conditions; global
-    self-intersection must be excluded by the surrounding design constraints.
-    """
-    points = jnp.asarray(pts)
-    dtype = jnp.result_type(points, jnp.asarray(params), jnp.float32)
-    points = points.astype(dtype)
-    params = jnp.asarray(params, dtype=dtype)
-
-    nodes, rr_raw = _unpack(params)
-    P = _all_joints(nodes, nfp, ntor, stellsym, boundary_node)
-    A, _B, lengths, u, n_bis = _leg_geometry_full(P)
-
-    # Keep invalid optimization iterates finite. In the valid domain this is
-    # exactly rr_raw; the geometry penalty supplies the restoring gradient when
-    # rr_raw is nonpositive.
-    scale = jnp.maximum(1.0, jnp.max(lengths))
-    radius_floor = jnp.finfo(dtype).eps * scale
-    rr = jnp.maximum(rr_raw, radius_floor)
-
-    sdf = _sdf_exact_miter_pipe(points, A, lengths, u, n_bis, rr)
+    sdf = signed_distance.reshape(output_shape)
     return jnp.asarray(sign, dtype=dtype) * sdf
 
 
@@ -482,14 +506,15 @@ def _validity_components(params, nfp, ntor, stellsym, boundary_node=False):
 
         length[i] - start_setback[i] - end_setback[i].
 
-    Positive clearance means the two cuts do not overlap on that leg. Global
+    Positive clearance means a fully cylindrical section survives on that leg
+    (the two mitre setbacks do not consume its whole length). Global
     intersections between nonadjacent pipe pieces are intentionally not replaced
     by a conservative capsule test, since that test rejects valid finely sampled
     centerlines.
     """
     nodes, rr = _unpack(params)
     P = _all_joints(nodes, nfp, ntor, stellsym, boundary_node)
-    _A, _B, lengths, u, n_bis = _leg_geometry_full(P)
+    _A, _B, lengths, u, n_bis = _leg_geometry(P)
 
     scale = jnp.maximum(
         1.0,
@@ -498,14 +523,14 @@ def _validity_components(params, nfp, ntor, stellsym, boundary_node=False):
     radius = jnp.maximum(rr, 0.0)
 
     cos_turn = jnp.clip(
-        _miter_dot(jnp.roll(u, 1, axis=0), u),
+        jnp.sum(jnp.roll(u, 1, axis=0) * u, axis=-1),
         -1.0,
         1.0,
     )
 
-    start_cos = jnp.clip(_miter_dot(u, n_bis), 0.0, 1.0)
+    start_cos = jnp.clip(jnp.sum(u * n_bis, axis=-1), 0.0, 1.0)
     end_cos = jnp.clip(
-        _miter_dot(u, jnp.roll(n_bis, -1, axis=0)),
+        jnp.sum(u * jnp.roll(n_bis, -1, axis=0), axis=-1),
         0.0,
         1.0,
     )
@@ -532,7 +557,8 @@ def _geometric_penalty(params, nfp, ntor, stellsym, boundary_node=False):
     """Dimensionless LOCAL validity penalty for the exact SDF.
 
     It penalizes nonpositive radius, degenerate legs, near-reversal turns, and
-    overlapping mitre cuts. Exactness also requires that nonadjacent pipe pieces
+    legs with no surviving cylindrical section (mitre setbacks consuming the
+    whole leg). Exactness also requires that nonadjacent pipe pieces
     do not intersect; that global condition must be enforced by the surrounding
     design constraints or checked separately for the intended geometry.
     """
@@ -718,8 +744,9 @@ class HelicalCylinderVesselSDF(Optimizable):
     def minimum_miter_clearance(self):
         """Minimum leg length minus its two axial mitre setbacks.
 
-        A positive value means the start and end cuts do not overlap on any leg.
-        This is a local condition and does not test nonadjacent self-intersection.
+        A positive value means a fully cylindrical section survives on every leg
+        (the two mitre setbacks do not consume its length). This is a local
+        condition and does not test nonadjacent self-intersection.
         """
         P = self.joints()
         radius = max(self.rr, 0.0)
@@ -756,8 +783,9 @@ class HelicalCylinderVesselSDF(Optimizable):
     def geometric_violation(self):
         """Worst normalized LOCAL validity violation; zero means locally valid.
 
-        Checks radius positivity, nonzero legs, the turn cap, and overlap of the
-        two mitre cuts on each leg. Exactness additionally requires no intersection
+        Checks radius positivity, nonzero legs, the turn cap, and loss of a leg's
+        cylindrical section (mitre setbacks consuming its whole length). Exactness
+        additionally requires no intersection
         between nonadjacent pipe pieces; this method deliberately does not use the
         overly conservative capsule test that rejects valid fine discretizations.
         """
