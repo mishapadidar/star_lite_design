@@ -29,7 +29,7 @@ from pyevtk.hl import gridToVTK  # pip install pyevtk
 # onto the unrestricted cylinder; if the projection lies between the mitre planes
 # the radial distance is exact, else the closest point is on one of the two
 # elliptical mitre curves (fixed-count point-to-ellipse solve). The min unsigned
-# distance over exposed patches is signed by membership in the union of clipped
+# distance over exposed cylinder segments is signed by membership in the union of clipped
 # solid cylinders (shared mitre disks are internal). Exact when legs are nonzero,
 # no 180-deg reversal, a fully cylindrical section survives on each leg, and
 # nonadjacent pieces do not intersect; _geometric_penalty enforces the local
@@ -155,8 +155,9 @@ def _leg_geometry(P):
     return A, B, lengths, u, n_bis
 
 
-def _miter_ellipse_closest_point(p, e0, e1):
-    """Closest point on the ellipse (x0/e0)^2 + (x1/e1)^2 = 1, e0 >= e1 > 0.
+def _theta_star_on_ellipse(p, e0, e1):
+    """ Eccentric angle corresponding to the closest point on the
+    ellipse: (x0/e0)^2 + (x1/e1)^2 = 1, e0 >= e1 > 0.
 
     Notation follows Eberly (below): extents e0 >= e1, query point Y = (y0, y1)
     reduced to the first quadrant, closest point X = (x0, x1). The strictly
@@ -169,14 +170,6 @@ def _miter_ellipse_closest_point(p, e0, e1):
     Branch 2: query point lies on the horizontal axis
     Branch 3: query point lies on the vertical axis
     Branch 4: ellipse is actually a circle
-
-    The most general branch could give the wrong answers:
-    e.g. say query point is (y0, 0).  Branch 1 will always return
-    that the closest point is (e0, 0), since it always returns a stationary point.
-
-
-    or unstable answers if query point lies on 
-    one of the axes, or the ellipse is actually a circle.
 
     Method: D. Eberly, "Distance from a Point to an Ellipse, an Ellipsoid, or a
     Hyperellipsoid", Geometric Tools (2013, rev. 2020), Section 2.9 and Listing 2.
@@ -196,6 +189,7 @@ def _miter_ellipse_closest_point(p, e0, e1):
 
     # Exact coordinate-axis cases are handled below. These floors protect only
     # the generic branch, which JAX may still evaluate under vectorization.
+    # i.e. make it so that the generic branch does not fail.
     y0_safe = jnp.where(y0 > 0.0, y0, jnp.maximum(eps * e0, finfo.tiny))
     y1_safe = jnp.where(y1 > 0.0, y1, jnp.maximum(eps * e1, finfo.tiny))
 
@@ -263,12 +257,18 @@ def _miter_ellipse_closest_point(p, e0, e1):
         q_xaxis_vertex,
     )
 
-    # y0 == 0 has closest representative (0, e1), section 2.4 of document
+    # Section 2.4 of document
+    # y0 == 0 has closest representative (0, e1)
     q_yaxis = jnp.stack((jnp.zeros_like(e1), e1), axis=-1)
+    axis_tol0 = 8.0 * eps * e0
+    axis_tol1 = 8.0 * eps * e1
     q_ellipse = jnp.where(
-        (y0 == 0.0)[..., None],
-        q_yaxis,
-        jnp.where((y1 == 0.0)[..., None], q_xaxis, q_general),
+        (y0 <= axis_tol0)[..., None],
+        q_yaxis, # q_yaxis is well conditioned regardless where y1 is.
+        jnp.where((y1 <= axis_tol1)[..., None], 
+            q_xaxis, # q_xaxis is well conditioned regardless where y0 is if this is an ellipse.  q_xaxis has
+                     # catastrophic cancellation in the case where e0 approxeq e1.
+            q_general),
     )
 
     # Stable limit for a circular section (straight joint), section 2.2 of document
@@ -300,46 +300,21 @@ def _miter_ellipse_closest_point(p, e0, e1):
         ),
         axis=-1,
     )
-    return q_abs * signs
+    point_on_ellipse = q_abs * signs
+    theta_star = jnp.atan2(point_on_ellipse[..., 1]/e1, point_on_ellipse[..., 0]/e0)
+    return theta_star
 
+def _distance3D_to_miter(points, vertex, tangent, miter_normal, radius):
 
-@jax.custom_jvp
-def _miter_ellipse_curve_distance(p, semimajor, semiminor):
-    """Unsigned Euclidean distance from 2-D points to an ellipse curve."""
-    closest = _miter_ellipse_closest_point(p, semimajor, semiminor)
-    return _miter_safe_norm(p - closest)
-
-
-@_miter_ellipse_curve_distance.defjvp
-def _miter_ellipse_curve_distance_jvp(primals, tangents):
-    # The envelope theorem supplies the derivative without differentiating the
-    # discrete bisection decisions.
-    p, a, b = primals
-    dp, da, db = tangents
-
-    closest = _miter_ellipse_closest_point(p, a, b)
-    delta = p - closest
-    distance = _miter_safe_norm(delta)
-    safe_distance = jnp.where(distance > 0.0, distance, 1.0)
-    normal = jnp.where(
-        (distance > 0.0)[..., None],
-        delta / safe_distance[..., None],
-        0.0,
-    )
-
-    derivative = (
-        jnp.sum(normal * dp, axis=-1)
-        - normal[..., 0] * closest[..., 0] / a * da
-        - normal[..., 1] * closest[..., 1] / b * db
-    )
-    return distance, derivative
-
-
-def _miter_curve_distance(points, vertex, tangent, miter_normal, radius):
-    """Exact Euclidean distance to one elliptical mitre curve."""
     offset = points - vertex
     eps = jnp.finfo(offset.dtype).eps
-
+    
+    # theta is angle between u_k and u_{k+1}
+    # theta/2 is angle between u_k and miter_normal
+    # 0 \leq theta \leq 180
+    # 0 \leq theta/2 \leq 90
+    # 1 \geq cos(theta/2) \geq 0
+    # clipping to be below 1.0 ensures that e0 >= e1, clipping to eps just makes sure that e0 stays bounded.
     cosine = jnp.clip(jnp.sum(tangent * miter_normal, axis=-1), eps, 1.0)
     height = jnp.sum(offset * miter_normal, axis=-1)
     sine2 = jnp.maximum(0.0, 1.0 - cosine * cosine)
@@ -348,7 +323,8 @@ def _miter_curve_distance(points, vertex, tangent, miter_normal, radius):
         tangent - cosine[..., None] * miter_normal
     ) / jnp.sqrt(jnp.maximum(sine2, eps))[..., None]
     minor_axis = jnp.cross(miter_normal, major_axis)
-
+    
+    # project offset onto the major axis and the minor axis.
     coordinates = jnp.stack(
         (
             jnp.sum(offset * major_axis, axis=-1),
@@ -357,11 +333,26 @@ def _miter_curve_distance(points, vertex, tangent, miter_normal, radius):
         axis=-1,
     )
     semimajor = radius / cosine
-    in_plane_distance = _miter_ellipse_curve_distance(
+    theta_star = _theta_star_on_ellipse(
         coordinates,
-        semimajor,
-        radius,
+        semimajor, # major axis length
+        radius # minor axis length is radius
     )
+    theta_star = jax.lax.stop_gradient(theta_star) # treat theta^* as a constant wrt to the parameters
+    
+    # params = (p, semimajor, semiminor)
+    # since F(theta, params) = | p(params) - x(theta, params)|
+    # theta^*(params) = argmin_theta F(theta, params)
+    # i.e. (dF_dtheta)(theta^*) = 0.
+    
+    # distance2D_to_ellipse(params) = F(theta^*(params), params)
+    # d(distance2D_to_ellipse)_dparams = dF_dtheta * dtheta^*_dparams + dF_dparams
+    #                                  = dF_dparams
+    # i.e. to get ddistance2D_to_ellipse_dparams, we don't need to differentiate the closest point on the 
+    # ellipse wrt to the parameters since dF_dtheta(theta^*(params))=0
+
+    closest = jnp.stack([semimajor * jnp.cos(theta_star), radius * jnp.sin(theta_star)], axis=-1)
+    in_plane_distance = _miter_safe_norm(coordinates - closest)
     ellipse_distance = jnp.hypot(height, in_plane_distance)
 
     # A straight joint has a circular curve in a plane normal to the tangent.
@@ -380,8 +371,8 @@ def _miter_curve_distance(points, vertex, tangent, miter_normal, radius):
 def _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node=False):
     """Exact signed distance to a valid welded, mitred polyline pipe.
 
-    The unsigned distance is the minimum distance to the exposed cylindrical side
-    patches; the internal mitre disks enter only through the global inside/outside
+    The unsigned distance is the minimum distance to the exposed cylinder
+    segments; the internal mitre disks enter only through the global inside/outside
     sign, never as boundary-distance candidates.
 
     Exactness requires positive radius, nonzero legs, no 180-degree reversal, a
@@ -439,59 +430,56 @@ def _sdf_welded_helical(pts, params, sign, nfp, ntor, stellsym, boundary_node=Fa
         + axial[..., None] * tangent
         + rr * radial / safe_radial_length[..., None]
     )
-    # That surface point counts only if it lies on the leg's EXPOSED side patch:
+    # That surface point counts only if it lies on the leg's EXPOSED cylinder segment:
     # off the axis (radial direction defined) and between the two mitre planes
     # (past the start plane, before the end plane).
-    projection_on_patch = (
+    is_on_cylinder_not_on_axis = (
         radial_nonzero
         & (jnp.sum((cylinder_point - a) * start_miter, axis=-1) >= 0.0) # cylinder point must be ABOVE the miter plane centered at a
         & (jnp.sum((cylinder_point - b) * end_miter, axis=-1) <= 0.0)   # cylinder point must be BELOW the miter plane centered at b
     )
-    # Exact distance to the infinite cylinder surface (radial gap to radius rr);
-    # this is the boundary distance when the projection lands on the clipped patch.
-    unrestricted_cylinder_distance = jnp.abs(radial_length - rr)
-
-    # If the unrestricted projection is not on the clipped patch, the
-    # constrained closest point lies on one of the two elliptical edge curves.
-    distance_to_miter_curve = _miter_curve_distance(
-        p,
-        a,
-        tangent,
-        start_miter,
-        rr,
-    )
-    min_miter_curve_distance = jnp.minimum(
-        distance_to_miter_curve,
-        jnp.roll(distance_to_miter_curve, -1, axis=1),
-    )
-
-    # On the axis, the unrestricted cylindrical projection is non-unique. For
-    # an interference-free segment, an admissible side point is exactly rr away
-    # between its centerline endpoints. Outside that interval, the mitre-curve fallback
-    # gives the same result wherever an overhanging mitre section is admissible.
-    axis_has_side_patch = (
+    # On the axis, the unrestricted cylindrical projection is non-unique
+    is_on_axis_and_on_cylinder = (
         (~radial_nonzero)
         & (axial >= 0.0)
         & (axial <= segment_length)
     )
-    patch_distance = jnp.where(
-        projection_on_patch,
+    # Exact distance to the infinite cylinder surface (radial gap to radius rr);
+    # this is the boundary distance when the projection lands on the clipped cylinder segment.
+    unrestricted_cylinder_distance = jnp.abs(radial_length - rr)
+
+    # If the unrestricted projection is not on the clipped cylinder segment, the constrained
+    # closest point lies on one of the leg's two elliptical edge curves. Each ring
+    # is shared with the neighbouring leg, so roll by one along the leg axis and
+    # take the min to get, per leg, the nearer of its start- and end-vertex rings.
+    distance3D_to_miter = _distance3D_to_miter(p, a, tangent, start_miter, rr)
+    distance3D_to_miter = jnp.minimum(
+        distance3D_to_miter, jnp.roll(distance3D_to_miter, -1, axis=1)
+    )
+    
+    # query point to cylinder segment distance
+    cylinder_segment_distance = jnp.where(
+        is_on_cylinder_not_on_axis,
         unrestricted_cylinder_distance,
-        jnp.where(axis_has_side_patch, rr, min_miter_curve_distance),
+        jnp.where(is_on_axis_and_on_cylinder, rr, 
+            distance3D_to_miter), # if none of the above holds, the query point to segment
+                                  # is the point to the miter distance
     )
 
-    # Membership in the union of clipped solid cylinders supplies one global
-    # sign. Shared mitre disks are internal to this union and therefore do not
-    # participate in the unsigned boundary distance above.
-    inside_piece = (
+    # sign of which cylinder segment the query point is possibly a part of
+    inside_cylinder_segment = (
         (jnp.sum(radial * radial, axis=-1) <= rr * rr)
         & (jnp.sum((p - a) * start_miter, axis=-1) >= 0.0)
         & (jnp.sum((p - b) * end_miter, axis=-1) <= 0.0)
     )
-
-    unsigned_distance = jnp.min(patch_distance, axis=1)
+    
+    # compute the minimum distance from the query point to all the cylindrical
+    # segments
+    unsigned_distance = jnp.min(cylinder_segment_distance, axis=1)
+    
+    # if query is inside any of the cylinder segments, then the SDF is negative
     signed_distance = jnp.where(
-        jnp.any(inside_piece, axis=1),
+        jnp.any(inside_cylinder_segment, axis=1),
         -unsigned_distance,
         unsigned_distance,
     )
