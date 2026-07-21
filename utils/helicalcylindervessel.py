@@ -44,7 +44,7 @@ from pyevtk.hl import gridToVTK  # pip install pyevtk
 # quadrilateral (nseg=4) comfortable; the mitre term does the finer work.
 MAX_TURN_DEG = 150.0
 _COS_MIN_TURN = float(np.cos(np.radians(MAX_TURN_DEG)))   # cos(150 deg) ~ -0.866
-_MITER_ELLIPSE_BISECTION_ITERS = 48
+_MITER_ELLIPSE_MAX_ITERS = 200          # safety cap for the bisection while-loop
 _MIN_RELATIVE_GEOMETRY_SIZE = 1e-7
 
 
@@ -206,23 +206,31 @@ def _theta_star_on_ellipse(p, e0, e1):
     s0 = jnp.where(g < 0.0, z1 - 1.0, 0.0)
     s1 = jnp.where(g < 0.0, 0.0, jnp.hypot(n0, z1) - 1.0)
 
-    def bisect_body(_, state):
-        s0_i, s1_i = state
-        s = 0.5 * (s0_i + s1_i)
+    # Bisect until the bracket has converged to floating-point precision. A while
+    # loop (rather than a fixed count) adapts the number of iterations to the bracket,
+    # which for a very eccentric ellipse starts as wide as ~(e0/e1)^2. Stop when the
+    # difference between successive iterates -- the bracket width -- drops below a
+    # RELATIVE tolerance ~eps that depends on the float precision (float32 stops sooner
+    # than float64), or when the safety cap is reached. theta* is stop_gradient'd
+    # downstream, so the data-dependent while_loop is never differentiated.
+    tol = jnp.finfo(s0.dtype).eps
+
+    def bisect_cond(state):
+        lo, hi, it = state
+        width = hi - lo
+        scale = jnp.maximum(1.0, jnp.maximum(jnp.abs(lo), jnp.abs(hi)))
+        return jnp.logical_and(it < _MITER_ELLIPSE_MAX_ITERS,
+                               jnp.any(width > tol * scale))
+
+    def bisect_body(state):
+        lo, hi, it = state
+        s = 0.5 * (lo + hi)
         ratio0 = n0 / (s + r0)
         ratio1 = z1 / (s + 1.0)
         g = ratio0 * ratio0 + ratio1 * ratio1 - 1.0    # G(s)
-        return (
-            jnp.where(g > 0.0, s, s0_i),
-            jnp.where(g > 0.0, s1_i, s),
-        )
+        return (jnp.where(g > 0.0, s, lo), jnp.where(g > 0.0, hi, s), it + 1)
 
-    s0, s1 = jax.lax.fori_loop(
-        0,
-        _MITER_ELLIPSE_BISECTION_ITERS,
-        bisect_body,
-        (s0, s1),
-    )
+    s0, s1, _ = jax.lax.while_loop(bisect_cond, bisect_body, (s0, s1, 0))
     s = 0.5 * (s0 + s1)
 
     # q_general is the closest point on the ellipse where (y0, y1) is in GENERAL
@@ -245,7 +253,7 @@ def _theta_star_on_ellipse(p, e0, e1):
     e0_sq_minus_e1_sq = jnp.square(e0) - jnp.square(e1)
     e0_sq_minus_e1_sq_safe = jnp.where(
         e0_sq_minus_e1_sq > 0.0, e0_sq_minus_e1_sq, 1.0
-    )
+    ) # need this so this branch doesn't compute a NaN and pollute the other branchs' execution
     x0_over_e0 = jnp.clip(e0 * y0 / e0_sq_minus_e1_sq_safe, 0.0, 1.0)
     x0 = e0 * x0_over_e0                                  # e0^2 y0/(e0^2 - e1^2)
     x1 = e1 * jnp.sqrt(jnp.maximum(0.0, 1.0 - x0_over_e0 * x0_over_e0))
