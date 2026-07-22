@@ -4,7 +4,7 @@ from scipy.spatial.distance import cdist
 from scipy.optimize import fsolve
 from simsopt.geo import CurveRZFourier
 
-def find_x_point(biotsavart, r0, z0, nfp, order):
+def find_x_point(biotsavart, r0, z0, nfp, order, tol=1e-10, verbose=False):
     """Find the X-point curve. This function tries to find a closed field line
     of the biotsavart field.
 
@@ -16,11 +16,19 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
             n should be at least 2 * order + 1.
         nfp (int): number of field periods.
         order (int): order of the Fourier expansion.
+        tol (float, optional): residual-norm threshold used only to set the returned
+            ``ma_success`` flag; the fsolve step tolerance (xtol) is separate and fixed.
+            On a "hard" field (e.g. the virtual-casing field) fsolve may stall ("not making
+            good progress") with a residual that floors above ``tol``: the returned curve is
+            still the solver's best estimate of the X-point, only ``ma_success`` is False.
+            Defaults to 1e-10.
+        verbose (bool, optional): print the residual norm reached and the success flag.
+            Defaults to False.
 
     Returns:
         ma_fp (CurveRZFourier): closed curve on one field period.
         ma_ft (CurveRZFourier): closed curve on the full torus.
-        ma_success (bool): True if the X-point was found, False otherwise.
+        ma_success (bool): True if the residual norm is below ``tol``, False otherwise.
     """
     n = r0.size
     if n % 2 == 0:
@@ -107,8 +115,9 @@ def find_x_point(biotsavart, r0, z0, nfp, order):
 
     res = build_residual(soln)
     norm_res = np.sqrt(np.sum(res**2))
-    ma_success = norm_res < 1e-10
-    #print(norm_res)
+    ma_success = norm_res < tol
+    if verbose:
+        print(f"find_x_point: ||residual||={norm_res:.3e}  tol={tol:.1e}  success={ma_success}", flush=True)
 
     xyz = np.hstack((soln[:n, None]*np.cos(phi), soln[:n, None]*np.sin(phi), soln[n:, None]))
     quadpoints = np.linspace(0, 1/nfp, n, endpoint=False)
