@@ -3,6 +3,8 @@ from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.objectives import forward_backward
 import numpy as np
+import jax
+jax.config.update("jax_enable_x64", True)  # float64 (JAX defaults to float32); also set in utils/__init__.py
 import jax.numpy as jnp
 from jax import jit, grad
 
