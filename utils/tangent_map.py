@@ -223,27 +223,66 @@ def tangent_map_pure(B, gradB, L, D):
     T = jnp.concatenate((T1[:, :, None], T2[:, :, None], T3[:, :, None]), axis=-1)
     return T
 
-def monodromy_pure(B, gradB, L, gamma, D):
-    tangent = jnp.matmul(D, gamma)
-    fT = tangent/jnp.linalg.norm(tangent, axis=-1)[:, None]
-    
-    normal =  jnp.matmul(D, fT)
-    fN = normal/jnp.linalg.norm(normal, axis=-1)[:, None]
-    
-    binormal = jnp.cross(fT, fN)
-    fB = binormal/jnp.linalg.norm(binormal, axis=-1)[:, None]
-    
+def monodromy_pure(B, gradB, L, gamma, D, frame='NB'):
+    """Return map / monodromy along the field line, projected into a 2x2 frame.
 
-    NB = jnp.concatenate((fN[:, :, None], fB[:, :, None]), axis=-1)
-    NB_t = jnp.concatenate((fN[:, None, :], fB[:, None, :]), axis=-2)
+    frame='NB' (default): the moving normal-binormal frame of the axis,
+        M_NB = R^T(t_p) Phi(t_p) R(0)  with the columns of R being (N, B).
+    frame='RZ': the cylindrical (R, Z) Poincare-section frame. The embedding at
+        t=0 uses the primal poloidal basis [e_R(0), e_Z(0)], while the projection
+        at t_p uses the reciprocal (dual) covectors of the frame {e_R, e_Z, b}(t_p)
+        so that the flow's field-direction component is projected out (see
+        ~/Downloads/formula.png):
+            M_RZ = [e_R*(t_p)^T; e_Z*(t_p)^T] Phi(t_p) [e_R(0), e_Z(0)],
+            e_R* = e_R - (b_R/b_phi) e_phi,   e_Z* = e_Z - (b_Z/b_phi) e_phi,
+        with b = B/|B| the unit field and {e_R, e_phi, e_Z} the orthonormal
+        cylindrical basis (b_phi != 0 is required, true on a field-period axis).
 
+    P0 is the (3,2) embedding of R^2 into the plane at t=0; Pt is the (N,2,3)
+    projection back into the 2D frame at each collocation point.
+    """
     M = tangent_map_pure(B, gradB, L, D)
-    R = jnp.matmul(NB_t, jnp.matmul(M, NB[0]))
+
+    if frame == 'NB':
+        tangent = jnp.matmul(D, gamma)
+        fT = tangent/jnp.linalg.norm(tangent, axis=-1)[:, None]
+
+        normal =  jnp.matmul(D, fT)
+        fN = normal/jnp.linalg.norm(normal, axis=-1)[:, None]
+
+        binormal = jnp.cross(fT, fN)
+        fB = binormal/jnp.linalg.norm(binormal, axis=-1)[:, None]
+
+        P0 = jnp.concatenate((fN[:, :, None], fB[:, :, None]), axis=-1)[0]  # (3,2)
+        Pt = jnp.concatenate((fN[:, None, :], fB[:, None, :]), axis=-2)     # (N,2,3)
+    elif frame == 'RZ':
+        phi = jnp.arctan2(gamma[:, 1], gamma[:, 0])
+        cphi, sphi = jnp.cos(phi), jnp.sin(phi)
+        zero, one = jnp.zeros_like(cphi), jnp.ones_like(cphi)
+        eR   = jnp.stack([cphi, sphi, zero], axis=-1)    # (N,3)
+        ephi = jnp.stack([-sphi, cphi, zero], axis=-1)   # (N,3)
+        eZ   = jnp.stack([zero, zero, one], axis=-1)     # (N,3)
+
+        b = B/jnp.linalg.norm(B, axis=-1)[:, None]
+        bR   = jnp.sum(b*eR,   axis=-1)   # (N,)
+        bphi = jnp.sum(b*ephi, axis=-1)   # (N,)
+        bZ   = jnp.sum(b*eZ,   axis=-1)   # (N,)
+
+        # reciprocal covectors of {e_R, e_Z, b}: annihilate b, reproduce (R,Z) components
+        eR_star = eR - (bR/bphi)[:, None]*ephi   # (N,3)
+        eZ_star = eZ - (bZ/bphi)[:, None]*ephi   # (N,3)
+
+        P0 = jnp.stack([eR[0], eZ[0]], axis=-1)      # (3,2) primal embed at t=0
+        Pt = jnp.stack([eR_star, eZ_star], axis=-2)  # (N,2,3) dual project at t
+    else:
+        raise ValueError(f"frame must be 'NB' or 'RZ', got {frame!r}")
+
+    R = jnp.matmul(Pt, jnp.matmul(M, P0))
     return R
 
 
-def monodromy_eps_pure(B, gradB, L, gamma, D, eps, mtype):
-    R = monodromy_pure(B, gradB, L, gamma, D)
+def monodromy_eps_pure(B, gradB, L, gamma, D, eps, mtype, frame='NB'):
+    R = monodromy_pure(B, gradB, L, gamma, D, frame)
     Rf=R[-1]
 
     if mtype == 'identity':
@@ -254,31 +293,32 @@ def monodromy_eps_pure(B, gradB, L, gamma, D, eps, mtype):
         raise Exception('mtype not implemented')
     return jnp.mean(jnp.maximum(diff-eps, 0)**2)
 
-def monodromy_identity_pure(B, gradB, L, gamma, D):
-    R = monodromy_pure(B, gradB, L, gamma, D)
+def monodromy_identity_pure(B, gradB, L, gamma, D, frame='NB'):
+    R = monodromy_pure(B, gradB, L, gamma, D, frame)
     Rf=R[-1]
     return jnp.mean((Rf-jnp.eye(2))**2)
-def monodromy_matrix_pure(B, gradB, L, gamma, D):
-    R = monodromy_pure(B, gradB, L, gamma, D)
+def monodromy_matrix_pure(B, gradB, L, gamma, D, frame='NB'):
+    R = monodromy_pure(B, gradB, L, gamma, D, frame)
     Rf=R[-1]
     return Rf
 
 
-def iota_pure(B, gradB, L, gamma, D, nfp):
+def iota_pure(B, gradB, L, gamma, D, nfp, frame='NB'):
     """On-axis rotational transform from the one-field-period return map R[-1]. For an
     area-preserving elliptic 2x2 map tr(R[-1]) = 2*cos(theta), so
     theta = arctan2(sqrt(4 - tr^2), tr) is the rotation over one field period and
     iota = nfp*theta/(2*pi). Smooth in R[-1] (hence in B, gradB, L, gamma), so jax can
-    differentiate it for the on-axis-iota penalty."""
-    Rf = monodromy_matrix_pure(B, gradB, L, gamma, D)
+    differentiate it for the on-axis-iota penalty. Frame-independent to machine
+    precision (NB and RZ return maps are similar, so tr(R[-1]) is invariant)."""
+    Rf = monodromy_matrix_pure(B, gradB, L, gamma, D, frame)
     tr = Rf[0, 0] + Rf[1, 1]
     theta = jnp.arctan2(jnp.sqrt(jnp.maximum(4.0 - tr * tr, 0.0)), tr)
     return nfp * theta / (2.0 * jnp.pi)
 
 
 
-def eigenvalues_pure(B, gradB, L, gamma, D):
-    R = monodromy_pure(B, gradB, L, gamma, D).astype(complex)
+def eigenvalues_pure(B, gradB, L, gamma, D, frame='NB'):
+    R = monodromy_pure(B, gradB, L, gamma, D, frame).astype(complex)
     #tr = jnp.trace(R, axis1=1, axis2=2).astype(complex)
     # skip the nondifferentiable tr=2 in the IC
     a = R[1:, 0, 0]
@@ -290,8 +330,8 @@ def eigenvalues_pure(B, gradB, L, gamma, D):
     eigs2 = ((a+d) - jnp.sqrt((a-d)**2 + 4*b*c)) / 2.
     return eigs1, eigs2
 
-def elongation_pure(B, gradB, L, gamma, D):
-    R = monodromy_pure(B, gradB, L, gamma, D)
+def elongation_pure(B, gradB, L, gamma, D, frame='NB'):
+    R = monodromy_pure(B, gradB, L, gamma, D, frame)
     # get an eigenvector, then make S
     #v = jnp.linalg.eig(R[-1])[1][:, 0]
     #S = jnp.concatenate([v[:, None].real, v[:, None].imag], axis=1)
@@ -322,17 +362,23 @@ def elongation_pure(B, gradB, L, gamma, D):
     return s1 / s2
 
 class TangentMap(Optimizable):
-    def __init__(self, axis, biotsavart, threshold, mtype='identity', phi=0.0):
+    def __init__(self, axis, biotsavart, threshold, mtype='identity', phi=0.0, frame='NB'):
         """
         Evaluate the tangent map on a fieldline over ONE field period starting at the
         toroidal angle `phi` (in units of phi/2pi). The return map / monodromy /
         elongation are therefore anchored at `phi`, and sweeping `phi` traces out their
         toroidal profile; phi=0 reproduces the original [0, 1/nfp] window.
 
+        `frame` selects the 2x2 frame the return map is projected into: 'NB' (default)
+        for the moving normal-binormal frame of the axis, or 'RZ' for the cylindrical
+        Poincare-section frame (see monodromy_pure). The RZ frame gives the physical
+        (R, Z) cross-section elongation; iota is frame-independent.
+
         Args:
         """
         super().__init__(depends_on=[axis])
         self.biotsavart = biotsavart
+        self.frame = frame
         
         nfp = axis.curve.nfp
         # Integrate over one field period [phi, phi+1/nfp]; phi shifts the window so the
@@ -343,15 +389,15 @@ class TangentMap(Optimizable):
         self.xh = xh
         self.wh = wh
 
-        self.monodromy_matrix      = lambda B, gradB, L, gamma: monodromy_matrix_pure(B, gradB, L, gamma, self.D)
-        self.monodromy_jax       = lambda B, gradB, L, gamma: monodromy_eps_pure(B, gradB, L, gamma, self.D, threshold, mtype)
+        self.monodromy_matrix      = lambda B, gradB, L, gamma: monodromy_matrix_pure(B, gradB, L, gamma, self.D, self.frame)
+        self.monodromy_jax       = lambda B, gradB, L, gamma: monodromy_eps_pure(B, gradB, L, gamma, self.D, threshold, mtype, self.frame)
         self.monodromy_dB        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=0)(B, gradB, L, gamma)
         self.monodromy_dgradB    = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=1)(B, gradB, L, gamma)
         self.monodromy_dL        = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=2)(B, gradB, L, gamma)
         self.monodromy_dgamma    = lambda B, gradB, L, gamma: grad(self.monodromy_jax, argnums=3)(B, gradB, L, gamma)
 
         # on-axis iota (and its partials) from the same field-period return map.
-        self.iota_jax    = lambda B, gradB, L, gamma: iota_pure(B, gradB, L, gamma, self.D, nfp)
+        self.iota_jax    = lambda B, gradB, L, gamma: iota_pure(B, gradB, L, gamma, self.D, nfp, self.frame)
         self.iota_dB     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=0)(B, gradB, L, gamma)
         self.iota_dgradB = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=1)(B, gradB, L, gamma)
         self.iota_dL     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=2)(B, gradB, L, gamma)
@@ -593,7 +639,7 @@ class TangentMap(Optimizable):
         gradB = biotsavart.dB_by_dX()
         L = axis.res['length']
         gamma = curve.gamma()
-        return float(elongation_pure(B, gradB, L, gamma, self.D))
+        return float(elongation_pure(B, gradB, L, gamma, self.D, self.frame))
 
 class Monodromy(Optimizable):
     def __init__(self, tangent_map):
