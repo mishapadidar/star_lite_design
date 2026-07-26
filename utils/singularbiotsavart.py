@@ -41,11 +41,11 @@ a length-``nmu`` covector, the result is
 
     modular.B_vjp(v)                                   # dB_modular/dc
   + Derivative({fl: a on the FREE mu slots})           # dB_aux/dmu_indep
-  + sum_q a[dep_q] * fl.dmu_by_dindependent()[name_q]  # dB_aux/dmu_dep . dmu_dep/d(indep,c)
+  + sum_q a[dep_q] * fl.dmu_dep_by_ddesign()[name_q]  # dB_aux/dmu_dep . dmu_dep/d(indep,c)
 
 the last term being the implicit sensitivity of the dependent ``mu`` through the
 polish (so the gradient is consistent with the re-solve).  This requires the
-square (stage-2) partition for which ``dmu_by_dindependent`` is defined.
+square (stage-2) partition for which ``dmu_dep_by_ddesign`` is defined.
 """
 
 import numpy as np
@@ -59,7 +59,7 @@ from simsopt.geo import CurveLength, CurveXYZFourier
 # aux circles (built once, dofs synced from mu) for speed; only the mu-ADJOINT
 # keeps the jax aux derivatives (_dB_aux_by_dmu, _dgradB_aux_by_dmu).
 from star_lite_design.utils.singularperiodicfieldline import (
-    _dB_aux_by_dmu, _dgradB_aux_by_dmu, _mu_names, _CURRENT_SCALE)
+    _dB_aux_by_dmu, _dgradB_aux_by_dmu, _mu_names, _CURRENT_SCALE, _N_QUAD_AUX)
 
 __all__ = ['SingularBiotSavart']
 
@@ -113,7 +113,9 @@ class SingularBiotSavart(MagneticField):
         handled separately by the jax derivatives in B_vjp / B_and_dB_vjp."""
         mu = np.asarray(self.fl.mu)
         self._naux = (mu.shape[0] - 1) // 2
-        qp = np.linspace(0.0, 1.0, 160, endpoint=False)
+        # Same discretization as the jax aux field in singularperiodicfieldline
+        # (imported _N_QUAD_AUX) so the forward C++ field matches the polish.
+        qp = np.linspace(0.0, 1.0, _N_QUAD_AUX, endpoint=False)
         self._aux_base_curves = []
         self._aux_currents = []                  # inner Current objects (raw mu units)
         scaled = []
@@ -226,7 +228,7 @@ class SingularBiotSavart(MagneticField):
         # implicit: dependent (fixed) mu slots propagate through dmu/d(indep, c)
         dep_idx = np.where(~free_mask)[0]
         if dep_idx.size:
-            dmu = fl.dmu_by_dindependent()        # {name: Derivative}
+            dmu = fl.dmu_dep_by_ddesign()        # {name: Derivative}
             names = _mu_names(nmu)
             for q in dep_idx:
                 name = names[q]
@@ -242,7 +244,7 @@ class SingularBiotSavart(MagneticField):
         dBaux_dmu = np.asarray(_dB_aux_by_dmu(pts, fl.mu, stellsym=fl.stellsym_aux))  # (N,3,nmu)
         a = np.einsum('ij,ijk->k', vv, dBaux_dmu, optimize=True)
         # modular part FIRST (modular points are the eval points here); the mu
-        # term below calls dmu_by_dindependent, which re-points the modular field.
+        # term below calls dmu_dep_by_ddesign, which re-points the modular field.
         deriv = self.modular.B_vjp(vv)
         deriv = deriv + self._mu_to_derivative(a)
         return deriv

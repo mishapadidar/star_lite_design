@@ -22,7 +22,10 @@ Partitioned formulation (simsopt dofs)
 --------------------------------------
 The class is an :class:`Optimizable` whose LOCAL DOFS ARE mu, named
 ``'I1'..'IN', 'r1'..'rN', 'z'``.  The field-line variables (curve geometry,
-length, mu) are partitioned into *dependent* and *independent* variables:
+length, mu) are partitioned into *dependent* and *independent* variables.
+
+INDEPENDENT means that the variable is INPUT to the ODE solve;
+DEPENDENT means that the variable is OUTPUT from the ODE solve, i.e. SOLVED FOR and fully determined by the modular coils
 
   * the curve geometry dofs and the length are ALWAYS dependent;
   * a mu dof FIXED in the simsopt fashion (``fl.fix('z')``) is DEPENDENT: the
@@ -45,8 +48,10 @@ Gradients (implicit function theorem, adjoint)
 At the converged polish g(y_dep; y_indep, c) = 0.  Differentiating,
 
     dy_dep/d(.) = -(dg/dy_dep)^{-1} dg/d(.),     (.) in {independent mu, c}.
+    obtained by differentiating the constraint g(y_dep(y_indep), y_indep) = 0,
+    and solving for dy_dep/dy_indep
 
-For each dependent-mu output q, :meth:`dmu_by_dindependent` solves the SQUARE
+For each dependent-mu output q, :meth:`dmu_dep_by_ddesign` solves the SQUARE
 adjoint system
 
     (dg/dy_dep)^T lambda_q = e_q      (forward_backward on lu(Jm))
@@ -75,7 +80,7 @@ where e_q selects mu_q among the dependent variables, and assembles
         monodromy part lm_mon.  For the 'trace' constraint the single monodromy
         row is M00+M11-2, so dM_dB/dM_dgradB are combined as rows 0 and 3.
 
-:meth:`dmu_by_dindependent` returns one simsopt ``Derivative`` per dependent
+:meth:`dmu_dep_by_ddesign` returns one simsopt ``Derivative`` per dependent
 (fixed) mu dof:
 
     Derivative({self: dmu_q/dmu})  +  dmu_q/dc     (coil-dof VJP Derivative)
@@ -113,6 +118,12 @@ _MU0_4PI = 1.0e-7
 # Rescale auxiliary currents so I=1 here matches simsopt's
 # ScaledCurrent(Current(1.0), 1e7/(4*pi)) convention.
 _CURRENT_SCALE = 1.0e7 / (4.0 * np.pi)
+# Number of quadrature nodes around each auxiliary circular coil. Single source
+# of truth: the jax forward/adjoint here and the C++ forward in
+# SingularBiotSavart (which imports this) must use the SAME discretization so the
+# two field paths agree. The integrand is smooth and periodic (trapezoidal rule
+# is spectrally accurate), so this is well past convergence.
+_N_QUAD_AUX = 160
 
 
 # -----------------------------------------------------------------------------
@@ -203,7 +214,7 @@ def _B_double_circlesN(p, mu, n_quad):
 # -----------------------------------------------------------------------------
 
 @partial(jax.jit, static_argnames=("n_quad", "stellsym"))
-def _B_aux(pts, mu, n_quad=128, stellsym=True):
+def _B_aux(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     """
     pts : (Npts, 3)
     mu  : (2N+1,) = (I1..IN, r1..rN, Z)
@@ -214,7 +225,7 @@ def _B_aux(pts, mu, n_quad=128, stellsym=True):
 
 
 @partial(jax.jit, static_argnames=("n_quad", "stellsym"))
-def _dB_aux_by_dmu(pts, mu, n_quad=128, stellsym=True):
+def _dB_aux_by_dmu(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     """
     Jacobian of B wrt the parameter vector mu.
 
@@ -229,7 +240,7 @@ def _dB_aux_by_dmu(pts, mu, n_quad=128, stellsym=True):
 
 
 @partial(jax.jit, static_argnames=("n_quad", "stellsym"))
-def _dB_aux_by_dX(pts, mu, n_quad=128, stellsym=True):
+def _dB_aux_by_dX(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     """
     Spatial gradient of B in simsopt convention.
 
@@ -251,7 +262,7 @@ def _dB_aux_by_dX(pts, mu, n_quad=128, stellsym=True):
 
 
 @partial(jax.jit, static_argnames=("n_quad", "stellsym"))
-def _d2B_aux_by_dXdX(pts, mu, n_quad=128, stellsym=True):
+def _d2B_aux_by_dXdX(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     """
     Spatial Hessian of B in simsopt convention.
 
@@ -273,7 +284,7 @@ def _d2B_aux_by_dXdX(pts, mu, n_quad=128, stellsym=True):
 
 
 @partial(jax.jit, static_argnames=("n_quad", "stellsym"))
-def _dgradB_aux_by_dmu(pts, mu, n_quad=128, stellsym=True):
+def _dgradB_aux_by_dmu(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     """
     Mixed second derivative wrt spatial position and parameters, in simsopt convention.
 
@@ -408,6 +419,44 @@ def monodromy_pure(B, gradB, L, gammadash, gammadashdash, D):
     resampled band-limited data, where noise is a fixed absolute floor sitting
     in high modes whose true value is 0. Staying in coefficient form avoids it.
 
+    Amplification hierarchy (why coefficient form wins; numerically confirmed)
+    -------------------------------------------------------------------------
+    There are three ways to differentiate the (band-limited, smooth) curve,
+    ordered below by how much they amplify the 1e-16 round-off floor. The
+    relevant quantity is the AMPLIFICATION FACTOR ||D||_2 = sigma_max, i.e. the
+    ABSOLUTE gain ||D x|| <= sigma_max ||x|| -- NOT the condition number
+    kappa = sigma_max / sigma_min, which bounds RELATIVE error (rel. error out
+    <= kappa * rel. error in). They are different objects, and here the absolute
+    one is the right one: the round-off floor is ABSOLUTE (~1e-16 at every node)
+    and lives in the high modes where the true signal is ~0, so there is no
+    signal to make it a benign RELATIVE error -- the absolute gain sigma_max is
+    what blows it up. (Amplification factor and condition number coincide in
+    SCALE only because the smallest non-constant singular value is O(1): Fourier
+    sigma_min = 1 exactly, so kappa_restricted = sigma_max = N/2; Chebyshev
+    sigma_min ~ 1.14, so kappa_restricted ~ sigma_max / 1.14, same O(N^2). Every
+    differentiation operator is singular on the constant vector, so the
+    UNrestricted kappa is infinite for all three.) Values below are ||D||_2 at
+    N = 97 (= 6*order+1, the grid this code runs at for order 16):
+
+        operator                               ||D||_2         at N=97
+        -------------------------------------  --------------  -------
+        Fourier COEFFICIENT space (USED HERE)  ~order          ~16
+          diagonal scaling c_k -> 2*pi*i*k c_k, INDEPENDENT of N
+        Fourier differentiation MATRIX         ~N/2   = O(N)   ~48
+          circulant => NORMAL, eigenvalues i*k with |k| <= N/2
+        Chebyshev differentiation MATRIX       ~0.54 N^2       ~5000
+          strongly NON-normal, corner entries (2N^2+1)/6; D @ samples
+        Chebyshev applied TWICE (old frame)    ~N^4            ~1e8
+          tangent = D @ gamma, then normal = D @ fT
+
+    So the Chebyshev matrix is ~N times worse-conditioned than the FOURIER
+    matrix (O(N^2) vs O(N)), because Fourier is circulant/normal (nothing
+    amplifies past |k| ~ N/2) whereas Chebyshev is strongly non-normal with
+    O(N^2) corners. Staying in coefficient form (~order, N-independent) is
+    better still -- exactly the 1e-16 -> 1e-14 (coefficient) vs 1e-16 -> 1e-8
+    (Chebyshev-twice) gap seen in the Newton residual above. Fitted exponents on
+    N in [33, 257]: Fourier ||D|| ~ N^1.01, Chebyshev ||D|| ~ N^2.02.
+
     (The tangent-map SOLVE below still uses D once, inside a linear solve; that
     contributes only ~1e-15 to M -- a single, well-conditioned use, not a raw
     double differentiation of the curve. Only the frame construction was the
@@ -433,7 +482,7 @@ def monodromy_matrix_pure(B, gradB, L, gammadash, gammadashdash, D):
 # Residual and Jacobian
 # -----------------------------------------------------------------------------
 
-def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_fns,
+def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_fn,
                                  stellsym=True, monodromy_constraint='identity', target_monodromy=None,
                                  target_trace=2.0):
 
@@ -517,7 +566,7 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
 
     # Fused path: one primal tangent-map solve + one (vmapped) vjp pullback
     # yields M and all five derivative tensors together.
-    M, dM_dB, dM_dgradB, dM_dL, dM_dgd, dM_dgdd = monodromy_fns['all'](B, dB_by_dX, length, gd, gdd)
+    M, dM_dB, dM_dgradB, dM_dL, dM_dgd, dM_dgdd = monodromy_fn(B, dB_by_dX, length, gd, gdd)
     M = np.asarray(M)
     dM_dB = np.asarray(dM_dB).reshape((4,) + B.shape)
     dM_dgradB = np.asarray(dM_dgradB).reshape((4,) + dB_by_dX.shape)
@@ -601,7 +650,7 @@ class SingularPeriodicFieldline(Optimizable):
         for name in ('I1', 'I2', 'I3'):
             fl.fix(name)              # fixed mu = DEPENDENT (solved by Newton)
         res = fl.run_code(length)     # square -> LU; non-square -> pinv step
-        grads = fl.dmu_by_dindependent()   # {'I1': Derivative, 'I2': ..., 'I3': ...}
+        grads = fl.dmu_dep_by_ddesign()   # {'I1': Derivative, 'I2': ..., 'I3': ...}
         grads['I1'](opt)              # d I1 / d(free dofs of opt's graph):
                                       # independent mu + modular-coil dofs
     """
@@ -679,12 +728,15 @@ class SingularPeriodicFieldline(Optimizable):
         self.xh = xh  # store the Chebyshev nodes.
         self.wh = wh  # keep the quadrature weights for consistency with TangentMap.
         self.curve_tm = CurveXYZFourierSymmetries(self.xh, curve.order, curve.nfp, curve.stellsym, ntor=curve.ntor, dofs=curve.dofs)  # monodromy is evaluated on a Chebyshev-grid copy of the curve.
+        
+        # the rule of thumb for JAX is jit on the exterior, and AD on the interior
 
-        # Build the AD transforms ONCE and jit them: the lambda closes over the
-        # (constant) Chebyshev matrix D and shapes are fixed per object, so each
-        # function compiles on its first call and runs as XLA afterwards.
+        # Build the AD transform ONCE and jit it: the lambda closes over the
+        # (constant) Chebyshev matrix D and shapes are fixed per object, so it
+        # compiles on its first call and runs as XLA afterwards.
+        # _mono is the primal-only monodromy; it is not jitted or exposed on its
+        # own -- it is the function reverse-differentiated inside _mono_all below.
         _mono = lambda B, gradB, L, gd, gdd: monodromy_matrix_pure(B, gradB, L, gd, gdd, self.D)
-        self.monodromy_matrix_jax = jit(_mono)   # primal only (used by residual_norm_no_aux)
 
         # Fused evaluation: M is 2x2 (4 outputs) while B/gradB/gd/gdd have
         # ~3N/9N/3N/3N inputs, so reverse mode is the right AD direction.  ONE
@@ -692,15 +744,14 @@ class SingularPeriodicFieldline(Optimizable):
         # cotangents of ALL five inputs at once (dM/dB, dM/dgradB, dM/dL,
         # dM/dgammadash, dM/dgammadashdash), sharing the primal tangent-map solve.
         def _mono_all(B, gradB, L, gd, gdd):
+            
+            #Mij, vjp(dMij)
             M, pullback = jax.vjp(_mono, B, gradB, L, gd, gdd)
+            
+            # d dMij / d input by reverse mode autodifferentiation
             dB, dgradB, dL, dgd, dgdd = jax.vmap(pullback)(jnp.eye(4).reshape((4, 2, 2)))
             return M, dB, dgradB, dL, dgd, dgdd
         self.monodromy_matrix_all = jit(_mono_all)
-
-        self.monodromy_fns = {
-            'jax': self.monodromy_matrix_jax,
-            'all': self.monodromy_matrix_all,
-        }
 
         # Reconstructed from a saved file with results present: expose them via
         # self.res and don't re-solve. We deliberately do NOT set 'success' —
@@ -713,7 +764,7 @@ class SingularPeriodicFieldline(Optimizable):
 
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
-        self._dmu_cache = None       # invalidate the cached dmu_by_dindependent() dict
+        self._dmu_cache = None       # invalidate the cached dmu_dep_by_ddesign() dict
         self._partials_cache = None  # invalidate the cached _field_partials() tensors
 
     @property
@@ -753,10 +804,7 @@ class SingularPeriodicFieldline(Optimizable):
         length) and num_aux=3 (nmu=7): 'trace' has 101 constraint rows
         -> 6 free mu (fix 1); 'identity' has 103 -> 4 free mu (fix 3).
         """
-        return self._num_independent_mu(self.local_full_dof_size, monodromy_constraint)
-
-    def _num_independent_mu(self, nmu, monodromy_constraint):
-        """num_independent_mu for an explicit nmu."""
+        nmu = self.local_full_dof_size
         if monodromy_constraint not in ('identity', 'trace', 'target_monodromy'):
             raise ValueError(f"Unknown monodromy_constraint {monodromy_constraint!r}; "
                              "must be 'identity' or 'trace'.")
@@ -824,7 +872,7 @@ class SingularPeriodicFieldline(Optimizable):
                 # R M R^-1 = M^-1), so the second diagonal equation is redundant too:
                 # constrain only the two off-diagonals M[0,1] = M[1,0] = 0.
                 row_mask[-1] = False
-        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
+        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_matrix_all, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
 
         b = r[row_mask]
         Jm = J[row_mask][:, col_mask]
@@ -849,7 +897,7 @@ class SingularPeriodicFieldline(Optimizable):
             length = x[-(nmu + 1)]
             mu = x[-nmu:]
             i += 1
-            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_fns, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
+            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_matrix_all, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
             b = r[row_mask]
             Jm = J[row_mask][:, col_mask]
             #if verbose:
@@ -962,45 +1010,6 @@ class SingularPeriodicFieldline(Optimizable):
         print(f'iter {i:3d}  ||r||={np.linalg.norm(b):.3e}  cond(J)={np.linalg.cond(Jm):.3e}  M={M_str}{extra}')
         print(f'  mu: {self._format_mu(mu, col_mask)}')
 
-    def residual_norm_no_aux(self, biotsavart, length=None):
-        """Evaluate the periodic field-line + monodromy residual at self.curve
-        and self.curve_tm using `biotsavart` directly. No auxiliary coils, no
-        Newton iteration, no Jacobian. Returns (r, M)."""
-        if length is None:
-            length = CurveLength(self.curve).J()
-        curve = self.curve
-        curve_tm = self.curve_tm
-
-        # periodic-field-line residual
-        pts = curve.gamma()
-        biotsavart.set_points(pts.reshape((-1, 3)))
-        B = biotsavart.B()
-        modB = np.linalg.norm(B, axis=1)
-        res_fl = (curve.gammadash() / length - B / modB[:, None]).flatten()
-        if not curve.stellsym:
-            res_fl = np.concatenate((res_fl, [curve.gamma()[0, 1]]))
-
-        # monodromy residual on the Chebyshev-grid curve
-        pts_tm = curve_tm.gamma()
-        biotsavart.set_points(pts_tm.reshape((-1, 3)))
-        B_tm = biotsavart.B()
-        dB_tm = biotsavart.dB_by_dX()
-        M = np.asarray(self.monodromy_matrix_jax(B_tm, dB_tm, length,
-                                                 curve_tm.gammadash(), curve_tm.gammadashdash()))
-
-        mon_constraint = self.options.get('monodromy_constraint', 'identity')
-        if mon_constraint == 'trace':
-            r_mon = np.array([float(M[0, 0] + M[1, 1] - self.options.get('target_trace', 2.0))])
-        elif mon_constraint == 'identity':
-            r_mon = (M - np.eye(2)).reshape(4)
-        elif mon_constraint == 'target_monodromy':
-            r_mon = (M - np.asarray(self.options['target_monodromy'])).reshape(4)
-        else:
-            raise ValueError(f"Unknown monodromy_constraint {mon_constraint!r}.")
-
-        r = np.concatenate((res_fl, r_mon))
-        return r, M
-
     def _field_partials(self):
         """Recompute the field-dependence partials of the residual at the
         converged state.
@@ -1039,7 +1048,7 @@ class SingularPeriodicFieldline(Optimizable):
         B_tm = field.B() + np.asarray(_B_aux(pts_tm, mu, stellsym=stellsym))
         dB_tm = field.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts_tm, mu, stellsym=stellsym))
 
-        _, dM_dB, dM_dgradB, _, _, _ = self.monodromy_fns['all'](
+        _, dM_dB, dM_dgradB, _, _, _ = self.monodromy_matrix_all(
             B_tm, dB_tm, length, self.curve_tm.gammadash(), self.curve_tm.gammadashdash())
         dM_dB = np.asarray(dM_dB).reshape((4,) + B_tm.shape)
         dM_dgradB = np.asarray(dM_dgradB).reshape((4,) + dB_tm.shape)
@@ -1054,7 +1063,16 @@ class SingularPeriodicFieldline(Optimizable):
 
     def _lm_to_vjp(self, lm_active, row_mask, n_mon, dres2_dB, dM_dB, dM_dgradB):
         """Given an adjoint vector on the active (masked) residual rows, return
-        the Derivative  lm^T dg/dc  over the modular-coil dofs."""
+        the Derivative  lm^T dg/dc  over the modular-coil dofs.
+        
+        (lm^T dg/dB) * dB/dc
+        ^^^^^^^^^^^
+        we are computing the premultiplier here, has dimension (*, 3) 
+
+        (lm^T dg/dgradB) * dgradB/dc
+        we are computing the premultiplier here, has dimension (*, 3, 3) 
+        ^^^^^^^^^^^
+        """
         field = self.biotsavart
         stellsym = self.curve.stellsym
 
@@ -1062,9 +1080,9 @@ class SingularPeriodicFieldline(Optimizable):
         lm_full = np.zeros(row_mask.shape[0])
         lm_full[row_mask] = lm_active
 
-        base = row_mask.shape[0] - n_mon          # size of the field-line block
-        lm_fl_flat = lm_full[:base]
-        lm_mon = lm_full[base:]                    # length n_mon (a masked entry may be 0)
+        base = row_mask.shape[0] - n_mon           # size of the field-line block
+        lm_fl_flat = lm_full[:base]                # part of lm of the fieldline constraints
+        lm_mon = lm_full[base:]                    # part of lm of the monodromy constraints, length n_mon (a masked entry may be 0)
 
         # --- field-line block:  B_vjp at curve.gamma() ------------------------
         if not stellsym:
@@ -1087,7 +1105,7 @@ class SingularPeriodicFieldline(Optimizable):
         return deriv
 
     # --------------------------------------------------------------- gradients
-    def dmu_by_dindependent(self):
+    def dmu_dep_by_ddesign(self):
         r"""Adjoint gradients of the DEPENDENT (fixed) mu dofs with respect to
         the independent variables: the FREE mu dofs and the modular-coil dofs.
 
@@ -1113,7 +1131,7 @@ class SingularPeriodicFieldline(Optimizable):
         """
         if self.need_to_run_code:
             raise RuntimeError("Polish the field line (run_code) before "
-                               "requesting dmu_by_dindependent.")
+                               "requesting dmu_dep_by_ddesign.")
         # cached result from a previous call at this converged state (cleared
         # by recompute_bell whenever anything upstream or the dofs change)
         if getattr(self, '_dmu_cache', None) is not None:
@@ -1131,7 +1149,7 @@ class SingularPeriodicFieldline(Optimizable):
         # both the dependent block (square Jm) and the independent-mu columns.
         _, J, _ = singular_field_line_residual(
             self.curve, self.curve_tm, length, self.biotsavart, mu,
-            self.monodromy_fns, stellsym=self.stellsym_aux,
+            self.monodromy_matrix_all, stellsym=self.stellsym_aux,
             monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'],
             target_trace=self.options['target_trace'])
         J_act = J[row_mask]
@@ -1197,7 +1215,7 @@ class DependentMu(Optimizable):
     polish (re-running the Newton solve first if anything upstream changed).
     ``dJ()`` returns its gradient with respect to the independent variables
     (the free mu dofs and the modular-coil dofs): the simsopt ``Derivative``
-    produced by ``fl.dmu_by_dindependent()[name]``.  Following the simsopt
+    produced by ``fl.dmu_dep_by_ddesign()[name]``.  Following the simsopt
     convention, ``dJ(partials=True)`` returns the ``Derivative`` object itself
     and plain ``dJ()`` the gradient array over the free dofs.
 
@@ -1252,7 +1270,7 @@ class DependentMu(Optimizable):
                 f"mu dof {self.name!r} is FREE (independent); DependentMu requires "
                 f"a dependent (fixed) dof. Call fl.fix({self.name!r}) and re-solve.")
         self._J = float(fl.mu[self._idx])
-        self._dJ = fl.dmu_by_dindependent()[self.name]
+        self._dJ = fl.dmu_dep_by_ddesign()[self.name]
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -1293,9 +1311,16 @@ class AuxCoilDistance(Optimizable):
 
     over all distinct aux circles.  J = J_mod + J_aux.
 
-    Only the geometry (radii r_k, height Z) enters, all of which are independent
-    (free) mu design variables, so J/dJ need no Newton solve; the aux currents
-    do not affect the distance and receive zero gradient.
+    Only the geometry (radii r_k, height Z) enters; the aux currents do not
+    affect the distance and receive zero gradient, and J/dJ need no Newton solve.
+    :meth:`dJ` deposits d J/d(geometry) DIRECTLY on fl's mu slots, which is
+    correct only if those geometry dofs are FREE (independent) design variables.
+    If a radius or Z were a DEPENDENT (fixed) dof it would be an implicit function
+    of the design variables through the polish, and its gradient would have to
+    route through :meth:`SingularPeriodicFieldline.dmu_dep_by_ddesign` (as
+    :meth:`SingularBiotSavart._mu_to_derivative` does); this penalty does not do
+    that, so :meth:`dJ` RAISES if any geometry dof is dependent rather than
+    return a silently wrong gradient.
 
     Typical use::
 
@@ -1312,6 +1337,48 @@ class AuxCoilDistance(Optimizable):
         self.threshold = float(threshold)
         # minimum aux-coil <-> aux-coil separation (defaults to the modular one)
         self.aux_threshold = float(threshold if aux_threshold is None else aux_threshold)
+        self._build_jax()
+
+    def _build_jax(self):
+        """Build (once) the jitted JAX value and value-and-grad of the clearance
+        penalty. The lambda closes over the (constant) N, thresholds and stellsym
+        flag; the traced inputs are mu (fl's dofs) and the modular-curve point
+        clouds. J = J_mod + J_aux; the gradients wrt mu (-> radii, Z; the currents
+        get 0) and wrt each curve gamma (-> the dgamma_by_dcoeff_vjp seed) come
+        straight from autodiff, replacing the hand-written derivatives."""
+        N = (self.fl.local_full_dof_size - 1) // 2
+        thr, athr = self.threshold, self.aux_threshold
+        stellsym = bool(self.fl.stellsym_aux)
+
+        def _J(mu, gammas):
+            radii = mu[N:2 * N]
+            Z = mu[-1]
+            heights = (Z, -Z) if stellsym else (Z,)   # +Z coil (+ stellsym -Z partner)
+            total = jnp.asarray(0.0)
+            # aux-coil <-> modular-coil clearance
+            for g in gammas:
+                rho = jnp.hypot(g[:, 0], g[:, 1])
+                z = g[:, 2]
+                for k in range(N):
+                    for Zs in heights:
+                        d = jnp.sqrt((rho - radii[k]) ** 2 + (z - Zs) ** 2)
+                        total = total + jnp.sum(jnp.maximum(thr - d, 0.0) ** 2)
+            # aux-coil <-> aux-coil clearance (coaxial circles)
+            circ = [(radii[k], h) for k in range(N) for h in heights]
+            for i in range(len(circ)):
+                ra, za = circ[i]
+                for j in range(i + 1, len(circ)):
+                    rb, zb = circ[j]
+                    d = jnp.sqrt((ra - rb) ** 2 + (za - zb) ** 2)
+                    total = total + jnp.maximum(athr - d, 0.0) ** 2
+            return total
+
+        self._jax_J = jit(_J)
+        self._jax_valgrad = jit(jax.value_and_grad(_J, argnums=(0, 1)))
+
+    def _gammas(self):
+        """Modular-curve point clouds as a tuple of jax arrays (traced input)."""
+        return tuple(jnp.asarray(c.gamma()) for c in self.curves)
 
     def _geom(self):
         """Return the aux radii (array), N, and the aux-circle heights as
@@ -1352,76 +1419,42 @@ class AuxCoilDistance(Optimizable):
         return dmin
 
     def J(self):
-        radii, N, heights = self._geom()
-        thr = self.threshold
-        total = 0.0
-        for c in self.curves:
-            g = c.gamma()
-            rho = np.hypot(g[:, 0], g[:, 1])
-            z = g[:, 2]
-            for rk in radii:
-                for Zs, _ in heights:
-                    d = np.sqrt((rho - rk) ** 2 + (z - Zs) ** 2)
-                    total += float(np.sum(np.maximum(thr - d, 0.0) ** 2))
-        # aux-coil <-> aux-coil clearance (coaxial circles)
-        athr = self.aux_threshold
-        circ = [(radii[k], Zs) for k in range(N) for (Zs, _) in heights]
-        for i in range(len(circ)):
-            ra, za = circ[i]
-            for j in range(i + 1, len(circ)):
-                rb, zb = circ[j]
-                d = np.sqrt((ra - rb) ** 2 + (za - zb) ** 2)
-                total += max(athr - d, 0.0) ** 2
-        return total
+        return float(self._jax_J(jnp.asarray(self.fl.mu), self._gammas()))
 
     @derivative_dec
     def dJ(self):
-        radii, N, heights = self._geom()
-        thr = self.threshold
-        eps = 1e-30
-        g_mu = np.zeros(self.fl.local_full_dof_size)
-        curve_deriv = None
-        for c in self.curves:
-            g = c.gamma()
-            x, y, z = g[:, 0], g[:, 1], g[:, 2]
-            rho = np.hypot(x, y)
-            inv_rho = 1.0 / np.maximum(rho, eps)
-            seed = np.zeros_like(g)            # dJ/d(curve point), for the curve vjp
-            for k, rk in enumerate(radii):
-                for Zs, sZ in heights:
-                    dr = rho - rk
-                    dz = z - Zs
-                    d = np.sqrt(dr ** 2 + dz ** 2)
-                    viol = np.maximum(thr - d, 0.0)
-                    # coef = (dJ/dd)/d = -2 viol / d   (zero where not violated)
-                    coef = np.where(viol > 0.0, -2.0 * viol / np.maximum(d, eps), 0.0)
-                    seed[:, 0] += coef * dr * x * inv_rho
-                    seed[:, 1] += coef * dr * y * inv_rho
-                    seed[:, 2] += coef * dz
-                    # mu gradient: r_k (slot N+k) and Z (last slot). Z_s = sZ*Z,
-                    # so d(dz)/dZ = -sZ; currents (slots 0..N-1) do not move d.
-                    g_mu[N + k] += float(np.sum(coef * (-dr)))
-                    g_mu[-1] += float(np.sum(coef * dz * (-sZ)))
-            cd = c.dgamma_by_dcoeff_vjp(seed)
-            curve_deriv = cd if curve_deriv is None else curve_deriv + cd
-        # aux-coil <-> aux-coil clearance: gradient lands on the radii (slots
-        # N..2N-1) and Z (last slot) only -- coaxial-circle distance has no
-        # modular-curve term. z_a = sZ_a * Z, so d(dz)/dZ = (sZ_a - sZ_b).
-        athr = self.aux_threshold
-        circ = [(k, Zs, sZ) for k in range(N) for (Zs, sZ) in heights]
-        for i in range(len(circ)):
-            ka, za, sa = circ[i]
-            for j in range(i + 1, len(circ)):
-                kb, zb, sb = circ[j]
-                dr = float(radii[ka] - radii[kb])
-                dz = za - zb
-                d = float(np.sqrt(dr ** 2 + dz ** 2))
-                viol = athr - d
-                if viol > 0.0:
-                    coef = -2.0 * viol / max(d, eps)   # (dJ/dd)/d
-                    g_mu[N + ka] += coef * dr
-                    g_mu[N + kb] += -coef * dr
-                    g_mu[-1] += coef * dz * (sa - sb)
-        return Derivative({self.fl: g_mu}) + curve_deriv
+        # dJ deposits d J/d(geometry) directly on fl's mu slots -- correct ONLY if
+        # the aux geometry dofs (radii r_k, height Z) are FREE (independent). A
+        # DEPENDENT (fixed) geometry dof is an implicit function of the design
+        # variables through the Newton polish: its direct deposit would be dropped
+        # by simsopt AND miss the implicit term d J/d(geo) . d(geo)/d(design) that
+        # fl.dmu_dep_by_ddesign() supplies (as SingularBiotSavart._mu_to_derivative
+        # does). We depend on geometry only (not the currents), so require it free
+        # and fail loudly rather than return a silently wrong gradient.
+        nmu = self.fl.local_full_dof_size
+        N = (nmu - 1) // 2
+        free = np.asarray(self.fl.local_dofs_free_status, dtype=bool)
+        fixed_geo = [i for i in range(N, nmu) if not free[i]]   # radii N..2N-1, Z at 2N
+        if fixed_geo:
+            names = _mu_names(nmu)
+            raise RuntimeError(
+                "AuxCoilDistance.dJ requires the aux geometry dofs (radii, z) to be "
+                f"FREE (independent); these are DEPENDENT (fixed): "
+                f"{[names[i] for i in fixed_geo]}. A dependent geometry dof flows "
+                "through the singular polish, so its gradient must route through "
+                "fl.dmu_dep_by_ddesign() (which this penalty does not do). Keep the "
+                "radii/z free, or extend dJ to split the geometry covector into "
+                "free (direct) and dependent (implicit) parts.")
+        # Autodiff the JAX penalty: dJ/dmu (radii, Z; currents get 0) lands on
+        # fl's mu slots, and dJ/d(curve gamma) is the seed for each curve's
+        # dgamma_by_dcoeff vjp -- same two-part Derivative as the hand-written
+        # version, now from JAX instead of closed-form derivatives.
+        mu = jnp.asarray(self.fl.mu)
+        gammas = self._gammas()
+        _, (g_mu, seeds) = self._jax_valgrad(mu, gammas)
+        deriv = Derivative({self.fl: np.asarray(g_mu)})
+        for c, seed in zip(self.curves, seeds):
+            deriv = deriv + c.dgamma_by_dcoeff_vjp(np.asarray(seed))
+        return deriv
 
     return_fn_map = {'J': J, 'dJ': dJ}
