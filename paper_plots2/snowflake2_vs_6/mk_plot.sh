@@ -1,0 +1,3 @@
+./mk_manifolds.py jsons/design_polished_final_59354326.json
+./mk_manifolds.py jsons/design_unpolished_final_1625253525.json
+./plot_manifolds_row.py jsons/design_polished_final_59354326_allmanifolds.txt jsons/design_unpolished_final_1625253525_allmanifolds.txt
