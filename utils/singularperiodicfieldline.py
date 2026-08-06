@@ -305,6 +305,47 @@ def _dgradB_aux_by_dmu(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     return H.transpose(0, 2, 1, 3)  # -> [i, k_spatial, j_Bcomp, l_mu]
 
 
+@partial(jax.jit, static_argnames=("n_quad", "stellsym"))
+def _d3B_aux_by_dXdXdX(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
+    """
+    Third spatial derivative of the aux field, in simsopt convention.
+
+    Returns
+    -------
+    T : (Npts, 3, 3, 3, 3)
+        T[i, k1, k2, k3, j] = d^3 B_j / (dx_k1 dx_k2 dx_k3)  at point i.
+        (First three free indices = spatial directions, last = B component.)
+
+    Matches the layout of BiotSavart.d3B_by_dXdXdX so the two can be summed for
+    the total-field third derivative (used in the curve-motion path of the
+    snowflake-discriminant adjoint, see utils/discriminant.py).
+    """
+    kernel = _B_double_circlesN if stellsym else _B_single_circlesN
+    d3_single = jax.jacfwd(jax.jacfwd(jax.jacfwd(kernel, argnums=0), argnums=0), argnums=0)
+    T = jax.vmap(d3_single, in_axes=(0, None, None))(pts, mu, n_quad)  # [i, j, k1, k2, k3]
+    return T.transpose(0, 2, 3, 4, 1)  # -> [i, k1, k2, k3, j]
+
+
+@partial(jax.jit, static_argnames=("n_quad", "stellsym"))
+def _dgradgradB_aux_by_dmu(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
+    """
+    d/dmu of the spatial Hessian of the aux field, in simsopt convention.
+
+    Returns
+    -------
+    H : (Npts, 3, 3, 3, len(mu))
+        H[i, k1, k2, j, l] = d^2 (d B_j / dx_k1 dx_k2) / dmu_l  at point i.
+
+    Same (k1, k2, j) layout as _d2B_aux_by_dXdX, with the mu index appended;
+    used for the mu-path of the snowflake-discriminant adjoint.
+    """
+    kernel = _B_double_circlesN if stellsym else _B_single_circlesN
+    hess = jax.jacfwd(jax.jacfwd(kernel, argnums=0), argnums=0)   # (3,) -> [j, k1, k2]
+    outer = jax.jacfwd(hess, argnums=1)                           # -> [j, k1, k2, l]
+    H = jax.vmap(outer, in_axes=(0, None, None))(pts, mu, n_quad)  # [i, j, k1, k2, l]
+    return H.transpose(0, 2, 3, 1, 4)  # -> [i, k1, k2, j, l]
+
+
 # -----------------------------------------------------------------------------
 # Chebyshev collocation, tangent map and monodromy
 # -----------------------------------------------------------------------------

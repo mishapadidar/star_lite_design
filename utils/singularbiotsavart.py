@@ -46,6 +46,60 @@ a length-``nmu`` covector, the result is
 the last term being the implicit sensitivity of the dependent ``mu`` through the
 polish (so the gradient is consistent with the re-solve).  This requires the
 square (stage-2) partition for which ``dmu_dep_by_ddesign`` is defined.
+
+VJP chaining: nested adjoints under BoozerSurface / PeriodicFieldLine
+--------------------------------------------------------------------
+A gradient through this field is a TWO-LEVEL adjoint.  Hand a
+``SingularBiotSavart`` to ``BoozerSurface(field, ...)`` or
+``PeriodicFieldLine(field, ...)`` and they solve their OWN state (the surface,
+or the field-line curve/iota) in the TOTAL field, unaware it is anything but a
+``BiotSavart``.  When an outer objective built on them (Volume, iota,
+VesselDistance, FieldLineMeanZ, ...) is differentiated w.r.t. the modular-coil
+dofs, the pullback runs
+
+    outer objective
+      -> BoozerSurface / PeriodicFieldLine adjoint      (OUTER)
+        -> SingularBiotSavart.B_vjp / B_and_dB_vjp
+          -> singular-polish adjoint                    (INNER)
+
+  (1) OUTER adjoint.  BoozerSurface / PeriodicFieldLine each expose a
+      ``res['vjp']``; simsopt's ``forward_backward`` turns the objective into a
+      cotangent seed ON THE FIELD at their quadrature points -- ``v = dJ/dB``
+      (and ``vgrad = dJ/d(gradB)`` for the rows that use grad B) -- then call
+      this field's ``B_vjp(v)`` / ``B_and_dB_vjp(v, vgrad)``.
+
+  (2) FIELD split (B_vjp).  With ``B_total = B_modular + B_aux(mu)`` the seed is
+      pulled back two ways:
+        * ``modular.B_vjp(v)``  -- v onto the modular-coil dofs through B_modular
+                                   (an ordinary BiotSavart vjp);
+        * ``a = v . dB_aux/dmu``  -- v onto the length-nmu mu covector through the
+                                   auxiliary field (jax ``_dB_aux_by_dmu``;
+                                   ``B_and_dB_vjp`` adds ``vgrad . dgradB_aux/dmu``).
+      ``_mu_to_derivative(a)`` finishes the aux part.
+
+  (3) mu split (_mu_to_derivative).  ``a`` is split by fl's fixed/free dof state:
+        * FREE (independent) mu   -> deposited directly, ``Derivative({fl: a_free})``;
+        * FIXED (dependent) mu    -> these are OUTPUTS of the polish (implicit
+                                     functions of the design vars), so they are
+                                     routed through the INNER adjoint,
+                                     ``a[dep_q] * fl.dmu_dep_by_ddesign()[name_q]``.
+
+  (4) INNER adjoint (fl.dmu_dep_by_ddesign).  For each dependent ``mu_q`` it
+      solves the polish's own adjoint ``Jm^T lambda_q = e_q`` (an LU +
+      forward_backward of the converged Newton Jacobian) and assembles
+      ``-lambda_q^T dg/d(design)`` with ITS OWN field vjps (``_lm_to_vjp``:
+      ``modular.B_vjp`` at the field-line points + ``modular.B_and_dB_vjp`` at the
+      monodromy points).  Each such Derivative lands on the free mu AND the
+      modular coils, is scaled by ``a[dep_q]`` and summed in.
+
+Net effect: the OUTER adjoint sees the total field, and the INNER adjoint adds
+the fact that the DEPENDENT aux currents are re-solved whenever a coil (or a free
+mu) moves.  Summing (2)-(4) is the exact TOTAL derivative of the outer objective
+w.r.t. the modular coils and the free mu -- consistent with the forward, which
+re-polishes ``fl`` on every coil change (see "Re-solve on coil change").  Because
+every piece is a summable simsopt ``Derivative``, the outer objective composes it
+with the rest of its gradient with no special handling; it never needs to know a
+singular field line sits underneath.
 """
 
 import numpy as np

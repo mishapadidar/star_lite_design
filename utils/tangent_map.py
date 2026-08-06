@@ -66,118 +66,64 @@ def cheb(Npts, a, b):
 
 
 
-# FROM CHATGPT
-def hess_b_pure(B, gradB, gradgradB):
-    """
-    Hessian of b = B / |B|.
+def reduced_frame_pure(B, gamma, D, frame='NB'):
+    """Embedding P0 and projection Pt for the reduced 2x2 map, in the chosen frame.
 
-    Inputs
-    ------
-    B         : (N,3)
-    gradB     : (N,3,3)      gradB[:,i,j] = d B_i / d x_j
-    gradgradB : (N,3,3,3)    gradgradB[:,i,j,k] = d^2 B_i / d x_j d x_k
+    Shared by monodromy_pure and discriminant.quadratic_jet_pure so both use
+    identical embeddings.
 
     Returns
     -------
-    Hb : (N,3,3,3)           Hb[:,i,j,k] = d^2 b_i / d x_j d x_k
+    P0 : (3,2)     embedding of R^2 into the plane at t=0 (columns are the two
+                   in-plane basis vectors).
+    Pt : (N,2,3)   projection back into the 2D frame at each collocation point.
+    n  : (N,3)     unit normal of the Poincare section at each collocation point
+                   (fT for 'NB', e_phi for 'RZ'). Needed by the return-time
+                   correction in quadratic_jet_pure; unused by monodromy_pure.
+
+    frame='NB' (default): moving normal-binormal frame of the axis. Pt is the
+        ORTHOGONAL projection onto the {N,B} plane (i.e. along the tangent fT).
+    frame='RZ': cylindrical (R,Z) Poincare-section frame. The embedding at t=0 uses
+        the primal poloidal basis [e_R(0), e_Z(0)]; the projection at t uses the
+        reciprocal (dual) covectors of {e_R, e_Z, b}(t), which project the field
+        direction b out (b_phi != 0 required). See monodromy_pure for the formula.
     """
-    modB = jnp.linalg.norm(B, axis=-1)                              # (N,)
-    g = jnp.einsum('ni,nij->nj', B, gradB) / modB[:, None]          # d|B|/dx_j
+    if frame == 'NB':
+        tangent = jnp.matmul(D, gamma)
+        fT = tangent / jnp.linalg.norm(tangent, axis=-1)[:, None]
 
-    # Hessian of |B|
-    hm = (
-        jnp.einsum('nik,nij->nkj', gradB, gradB)
-        + jnp.einsum('ni,nijk->njk', B, gradgradB)
-        - g[:, :, None] * g[:, None, :]
-    ) / modB[:, None, None]
+        normal = jnp.matmul(D, fT)
+        fN = normal / jnp.linalg.norm(normal, axis=-1)[:, None]
 
-    m1 = modB[:, None, None, None]
-    Hb = gradgradB / m1
-    Hb -= gradB[:, :, :, None] * g[:, None, None, :] / (m1**2)      # - dB_i/dx_j * g_k / m^2
-    Hb -= gradB[:, :, None, :] * g[:, None, :, None] / (m1**2)      # - dB_i/dx_k * g_j / m^2
-    Hb -= B[:, :, None, None] * hm[:, None, :, :] / (m1**2)         # - B_i * h_{jk} / m^2
-    Hb += 2.0 * B[:, :, None, None] * g[:, None, :, None] * g[:, None, None, :] / (m1**3)
-    return Hb
+        binormal = jnp.cross(fT, fN)
+        fB = binormal / jnp.linalg.norm(binormal, axis=-1)[:, None]
 
+        P0 = jnp.concatenate((fN[:, :, None], fB[:, :, None]), axis=-1)[0]  # (3,2)
+        Pt = jnp.concatenate((fN[:, None, :], fB[:, None, :]), axis=-2)     # (N,2,3)
+        n  = fT                                                             # (N,3)
+    elif frame == 'RZ':
+        phi = jnp.arctan2(gamma[:, 1], gamma[:, 0])
+        cphi, sphi = jnp.cos(phi), jnp.sin(phi)
+        zero, one = jnp.zeros_like(cphi), jnp.ones_like(cphi)
+        eR   = jnp.stack([cphi, sphi, zero], axis=-1)    # (N,3)
+        ephi = jnp.stack([-sphi, cphi, zero], axis=-1)   # (N,3)
+        eZ   = jnp.stack([zero, zero, one], axis=-1)     # (N,3)
 
-def second_var_residual_pure(Q, B, gradB, gradgradB, L, T1, T2, D):
-    """
-    Residual for the second variational equation:
-        Q' / L - A Q - Hb[T1,T2] = 0,
-    with Q(0)=0.
-    """
-    A = A_pure(B, gradB)
-    Hb = hess_b_pure(B, gradB, gradgradB)
+        b = B / jnp.linalg.norm(B, axis=-1)[:, None]
+        bR   = jnp.sum(b*eR,   axis=-1)   # (N,)
+        bphi = jnp.sum(b*ephi, axis=-1)   # (N,)
+        bZ   = jnp.sum(b*eZ,   axis=-1)   # (N,)
 
-    AQ = jnp.einsum('nij,nj->ni', A, Q)
-    src = jnp.einsum('nijk,nj,nk->ni', Hb, T1, T2)
-    Qprime = jnp.matmul(D, Q)
+        # reciprocal covectors of {e_R, e_Z, b}: annihilate b, reproduce (R,Z) components
+        eR_star = eR - (bR/bphi)[:, None]*ephi   # (N,3)
+        eZ_star = eZ - (bZ/bphi)[:, None]*ephi   # (N,3)
 
-    residual = Qprime / L - AQ - src
-    ic0 = Q[0]  # Q(0)=0
-    return jnp.concatenate((ic0[None, :], residual[1:]), axis=0)
-
-
-def quadratic_jet_pure(B, gradB, gradgradB, L, gamma, D):
-    """
-    Quadratic jet of the reduced 2D map in the normal-binormal plane.
-
-    Returns
-    -------
-    K : (N,2,2,2)
-        K[s, :, a, b] is the quadratic jet at collocation point s,
-        projected into the local (N,B) frame, with initial coordinates
-        taken in the (N,B) frame at s=0.
-
-        The final return-map quadratic jet is K[-1].
-    """
-    tangent = jnp.matmul(D, gamma)
-    fT = tangent / jnp.linalg.norm(tangent, axis=-1)[:, None]
-
-    normal = jnp.matmul(D, fT)
-    fN = normal / jnp.linalg.norm(normal, axis=-1)[:, None]
-
-    binormal = jnp.cross(fT, fN)
-    fB = binormal / jnp.linalg.norm(binormal, axis=-1)[:, None]
-
-    NB = jnp.concatenate((fN[:, :, None], fB[:, :, None]), axis=-1)     # (N,3,2)
-    NB_t = jnp.concatenate((fN[:, None, :], fB[:, None, :]), axis=-2)   # (N,2,3)
-
-    # Full 3x3 tangent map in Cartesian coordinates
-    Tfull = tangent_map_pure(B, gradB, L, D)                             # (N,3,3)
-
-    # Linear operator for Q is the same as for T
-    Npts = B.shape[0]
-    Q0 = jnp.zeros_like(B)
-    Lop = jacfwd(second_var_residual_pure, argnums=0)(
-        Q0, B, gradB, gradgradB, L,
-        jnp.zeros_like(B), jnp.zeros_like(B), D
-    ).reshape((3*Npts, 3*Npts))
-
-    K = jnp.zeros((Npts, 2, 2, 2))
-
-    for a in range(2):
-        for b in range(2):
-            ia = NB[0, :, a]   # initial Cartesian direction for reduced coord a
-            ib = NB[0, :, b]   # initial Cartesian direction for reduced coord b
-
-            Ta = jnp.einsum('nij,j->ni', Tfull, ia)   # first variation along ia
-            Tb = jnp.einsum('nij,j->ni', Tfull, ib)   # first variation along ib
-
-            rhs = -second_var_residual_pure(Q0, B, gradB, gradgradB, L, Ta, Tb, D).ravel()
-            Qab = jnp.linalg.solve(Lop, rhs).reshape((Npts, 3))
-
-            # project final displacement into local (N,B) frame
-            Kab = jnp.einsum('nij,nj->ni', NB_t, Qab)   # (N,2)
-            K = K.at[:, :, a, b].set(Kab)
-
-    return K
-
-
-def quadratic_jet_matrix_pure(B, gradB, gradgradB, L, gamma, D):
-    return quadratic_jet_pure(B, gradB, gradgradB, L, gamma, D)[-1]
-
-# FROM CHATGPT^
+        P0 = jnp.stack([eR[0], eZ[0]], axis=-1)      # (3,2) primal embed at t=0
+        Pt = jnp.stack([eR_star, eZ_star], axis=-2)  # (N,2,3) dual project at t
+        n  = ephi                                    # (N,3) section {phi=const} normal
+    else:
+        raise ValueError(f"frame must be 'NB' or 'RZ', got {frame!r}")
+    return P0, Pt, n
 
 
 
@@ -242,41 +188,7 @@ def monodromy_pure(B, gradB, L, gamma, D, frame='NB'):
     projection back into the 2D frame at each collocation point.
     """
     M = tangent_map_pure(B, gradB, L, D)
-
-    if frame == 'NB':
-        tangent = jnp.matmul(D, gamma)
-        fT = tangent/jnp.linalg.norm(tangent, axis=-1)[:, None]
-
-        normal =  jnp.matmul(D, fT)
-        fN = normal/jnp.linalg.norm(normal, axis=-1)[:, None]
-
-        binormal = jnp.cross(fT, fN)
-        fB = binormal/jnp.linalg.norm(binormal, axis=-1)[:, None]
-
-        P0 = jnp.concatenate((fN[:, :, None], fB[:, :, None]), axis=-1)[0]  # (3,2)
-        Pt = jnp.concatenate((fN[:, None, :], fB[:, None, :]), axis=-2)     # (N,2,3)
-    elif frame == 'RZ':
-        phi = jnp.arctan2(gamma[:, 1], gamma[:, 0])
-        cphi, sphi = jnp.cos(phi), jnp.sin(phi)
-        zero, one = jnp.zeros_like(cphi), jnp.ones_like(cphi)
-        eR   = jnp.stack([cphi, sphi, zero], axis=-1)    # (N,3)
-        ephi = jnp.stack([-sphi, cphi, zero], axis=-1)   # (N,3)
-        eZ   = jnp.stack([zero, zero, one], axis=-1)     # (N,3)
-
-        b = B/jnp.linalg.norm(B, axis=-1)[:, None]
-        bR   = jnp.sum(b*eR,   axis=-1)   # (N,)
-        bphi = jnp.sum(b*ephi, axis=-1)   # (N,)
-        bZ   = jnp.sum(b*eZ,   axis=-1)   # (N,)
-
-        # reciprocal covectors of {e_R, e_Z, b}: annihilate b, reproduce (R,Z) components
-        eR_star = eR - (bR/bphi)[:, None]*ephi   # (N,3)
-        eZ_star = eZ - (bZ/bphi)[:, None]*ephi   # (N,3)
-
-        P0 = jnp.stack([eR[0], eZ[0]], axis=-1)      # (3,2) primal embed at t=0
-        Pt = jnp.stack([eR_star, eZ_star], axis=-2)  # (N,2,3) dual project at t
-    else:
-        raise ValueError(f"frame must be 'NB' or 'RZ', got {frame!r}")
-
+    P0, Pt, _ = reduced_frame_pure(B, gamma, D, frame)
     R = jnp.matmul(Pt, jnp.matmul(M, P0))
     return R
 
@@ -374,6 +286,11 @@ class TangentMap(Optimizable):
         Poincare-section frame (see monodromy_pure). The RZ frame gives the physical
         (R, Z) cross-section elongation; iota is frame-independent.
 
+        The second-order objects (the quadratic jet, snowflake leg directions and
+        discriminant) now live in utils/discriminant.py: pass this TangentMap to
+        discriminant.tangent_map_jet2 / snowflake_angles_from_jet2 /
+        snowflake_discriminant_pure.
+
         Args:
         """
         super().__init__(depends_on=[axis])
@@ -403,7 +320,6 @@ class TangentMap(Optimizable):
         self.iota_dL     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=2)(B, gradB, L, gamma)
         self.iota_dgamma = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=3)(B, gradB, L, gamma)
 
-        self.quadratic_jet_matrix = lambda B, gradB, gradgradB, L, gamma: quadratic_jet_matrix_pure(B, gradB, gradgradB, L, gamma, self.D)
 
         self.axis = axis
         curve = axis.curve
@@ -413,30 +329,8 @@ class TangentMap(Optimizable):
         self._monodromy = None
         self._dmonodromy_dcoils = None
         self._matrix = None
-        self._jet2 = None
         self._iota = None
         self._diota_dcoils = None
-    
-    @property
-    def jet2(self):
-        if self._jet2 is None:
-            axis = self.axis
-            curve = self.curve
-            biotsavart = self.biotsavart
-            
-            if axis.need_to_run_code:
-                res = axis.res
-                axis.run_code(res['length'])
-
-            biotsavart.set_points(curve.gamma())
-            B = biotsavart.B()
-            gradB = biotsavart.dB_by_dX()
-            gradgradB = biotsavart.d2B_by_dXdX()
-            L = axis.res['length']
-            gamma = curve.gamma()
-            self._jet2 = self.quadratic_jet_matrix(B, gradB, gradgradB, L, gamma)
-            self._matrix = self.monodromy_matrix(B, gradB, L, gamma)
-        return self._jet2
     
     @property
     def matrix(self):
@@ -452,10 +346,8 @@ class TangentMap(Optimizable):
             biotsavart.set_points(curve.gamma())
             B = biotsavart.B()
             gradB = biotsavart.dB_by_dX()
-            gradgradB = biotsavart.d2B_by_dXdX()
             L = axis.res['length']
             gamma = curve.gamma()
-            self._jet2 = self.quadratic_jet_matrix(B, gradB, gradgradB, L, gamma)
             self._matrix = self.monodromy_matrix(B, gradB, L, gamma)
         return self._matrix
     
@@ -560,67 +452,6 @@ class TangentMap(Optimizable):
         diota_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
         self._diota_dcoils = diota_dcoils
 
-
-    def snowflake_angles_from_jet2(self, ntheta=512, xtol=1e-12, tangent_tol=1e-6):
-        """
-        Roots of f(θ) = v × K(v,v) with v = (cos θ, sin θ) — snowflake leg directions.
-    
-        Refines each bracketed sign change with brentq (machine-precision roots),
-        and also detects tangent (double) zeros that lie at sign-preserving local
-        minima of |f|, which the sign-change method misses near bifurcations.
-    
-        Returns
-        -------
-        np.ndarray of root angles in [0, 2π), sorted ascending.
-        """
-        from scipy.optimize import brentq, minimize_scalar
-    
-        K = np.asarray(self.jet2)
-    
-        def f(t):
-            v = np.array([np.cos(t), np.sin(t)])
-            q = np.einsum('iab,a,b->i', K, v, v)
-            return v[0]*q[1] - v[1]*q[0]
-    
-        th = np.linspace(0.0, 2*np.pi, ntheta, endpoint=False)
-        vals = np.array([f(t) for t in th])
-        scale = float(np.max(np.abs(vals))) + 1e-300
-    
-        roots = []
-    
-        def _add(r):
-            r = r % (2*np.pi)
-            for rr in roots:
-                d = abs(r - rr)
-                if min(d, 2*np.pi - d) < 1e-6:
-                    return
-            roots.append(r)
-    
-        # --- sign-change roots: refine with brentq on each bracket ---
-        for i in range(ntheta):
-            j = (i + 1) % ntheta
-            a = th[i]
-            b = th[j] if j != 0 else 2*np.pi
-            if vals[i] == 0.0:
-                _add(a)
-                continue
-            if vals[i] * vals[j] < 0.0:
-                _add(brentq(f, a, b, xtol=xtol, rtol=1e-14))
-    
-        # --- tangent roots: local minima of |f| that are essentially zero ---
-        av = np.abs(vals)
-        for i in range(ntheta):
-            im, ip = (i - 1) % ntheta, (i + 1) % ntheta
-            if av[i] < av[im] and av[i] < av[ip] and av[i] / scale < 1e-2:
-                a = th[im] if im < i else th[im] - 2*np.pi
-                c = th[ip] if ip > i else th[ip] + 2*np.pi
-                res = minimize_scalar(lambda t: abs(f(t)), bounds=(a, c),
-                                      method='bounded',
-                                      options={'xatol': xtol})
-                if abs(f(res.x)) / scale < tangent_tol:
-                    _add(res.x)
-    
-        return np.sort(np.asarray(roots))
 
     @property
     def elongation(self):

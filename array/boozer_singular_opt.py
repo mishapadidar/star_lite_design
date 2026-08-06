@@ -74,6 +74,7 @@ from star_lite_design.utils.singularperiodicfieldline import (
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
 from star_lite_design.utils.mubound import MuBound
 from star_lite_design.utils.tangent_map import TangentMap, AxisIota
+from star_lite_design.utils.discriminant import SnowflakeDiscriminant
 
 
 def _rel_vio(a, b):
@@ -100,6 +101,10 @@ parser.add_argument("design_json",
                          ".yaml in the same directory supplies all parameters)")
 parser.add_argument("--num-aux", type=int, default=NUM_AUX_DEFAULT,
                     help=f"number of planar circular auxiliary coils (default {NUM_AUX_DEFAULT})")
+parser.add_argument("--discriminant", type=int, default=0, choices=(0, 1),
+                    help="1 to add the snowflake-discriminant inequality constraint "
+                         "Delta > DISCRIMINANT_THRESHOLD (identity polish only); "
+                         "0 (default) off. Recorded in the output filename (_disc<0|1>).")
 args = parser.parse_args()
 
 _in = os.path.abspath(args.design_json)
@@ -115,6 +120,8 @@ if mon_constraint not in ('trace', 'identity'):
                      f"got {mon_constraint!r}")
 num_aux = int(args.num_aux)
 config['NUM_AUX'] = num_aux   # record it in the (output) yaml
+discriminant = int(args.discriminant)  # 1 = add the snowflake-discriminant constraint
+config['DISCRIMINANT'] = discriminant  # record it in the (output) yaml
 # N_DEP_CURRENTS (number of dependent aux currents = number of monodromy constraints
 # solved for) is chosen after the X-point stellsym-defect check below: a stellsym
 # singular field line has one fewer identity constraint (M[0,0] == M[1,1]).
@@ -125,10 +132,13 @@ TASK_NAME = os.path.basename(os.path.dirname(_in)) or os.path.basename(_in)
 # Device ID = crc32 of the folder name (matches boozer_all.py / device_browser.py),
 # embedded in the output json/yaml names: design_polished_final_<DEVICE_ID>.json.
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
+# Tag used in the OUTPUT filenames so a run WITH the snowflake-discriminant constraint
+# (--discriminant 1) does not overwrite one without it: design_..._<DEVICE_ID>_disc<0|1>.
+DEVICE_TAG = f'{DEVICE_ID}_disc{discriminant}'
 print(f"Task: {TASK_NAME}")
 print(f"Input: {_in}")
 print(f"Output dir: {OUT_DIR}")
-print(f"constraint={mon_constraint}  num_aux={num_aux}  config_id={config_id}")
+print(f"constraint={mon_constraint}  num_aux={num_aux}  discriminant={discriminant}  config_id={config_id}")
 
 print("Running SINGULAR-POLISH Optimization")
 print("================================")
@@ -388,10 +398,10 @@ boozer_surfaces, axes = new_boozer_surfaces, new_axes
 # copies it off scratch regardless of whether the polished device passes its gate.
 os.makedirs(OUT_DIR, exist_ok=True)
 save([boozer_surfaces, iota_Gs, axes, sing_fls, sdf],
-     OUT_DIR + f'design_unpolished_final_{DEVICE_ID}.json')
-with open(OUT_DIR + f'design_unpolished_final_{DEVICE_ID}.yaml', 'w') as f:
+     OUT_DIR + f'design_unpolished_final_{DEVICE_TAG}.json')
+with open(OUT_DIR + f'design_unpolished_final_{DEVICE_TAG}.yaml', 'w') as f:
     yaml.dump(config, f, default_flow_style=False)
-print(f"wrote {OUT_DIR}design_unpolished_final_{DEVICE_ID}.json (initial device with aux coils, unpolished)")
+print(f"wrote {OUT_DIR}design_unpolished_final_{DEVICE_TAG}.json (initial device with aux coils, unpolished)")
 
 
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
@@ -552,6 +562,30 @@ J_fieldline_mean_distance = VesselDistance(
     metric='distance',
 )
 
+# Snowflake discriminant Delta of the reduced return-map quadratic jet on each
+# singular field line (utils/discriminant.py). Delta > 0 <-> 6-legged snowflake;
+# its sign/size decides the leg structure. Built for ALL polishes (reported in the
+# callback), but CONSTRAINED only for the identity (monodromy = I) polish, where a
+# genuine snowflake is the target: keep Delta >= DISCRIMINANT_THRESHOLD via a
+# one-sided QuadraticPenalty (penalizes Delta < threshold). SnowflakeDiscriminant
+# takes the MODULAR field (it adds the aux field internally and needs BiotSavart's
+# d2B/d3B vjps); each gets its own BiotSavart(coils) so point caches stay independent.
+discriminants = [SnowflakeDiscriminant(fl, BiotSavart(fl.biotsavart.coils), frame='RZ')
+                 for fl in sing_fls]
+# The constraint is opt-in (--discriminant 1) and only defined for the identity polish.
+if discriminant == 1 and mon_constraint != 'identity':
+    print("WARNING: --discriminant 1 ignored: the snowflake-discriminant constraint is "
+          "only defined for the identity (monodromy = I) polish.")
+discriminant_enabled = (discriminant == 1 and mon_constraint == 'identity')
+if discriminant_enabled:
+    config.setdefault('DISCRIMINANT_THRESHOLD', 1e4)
+    config.setdefault('DISCRIMINANT_WEIGHT', 1e-8)
+    DISCRIMINANT_THRESHOLD = config['DISCRIMINANT_THRESHOLD']
+    DISCRIMINANT_WEIGHT = Weight(config['DISCRIMINANT_WEIGHT'])
+    J_discriminant = sum(QuadraticPenalty(d, DISCRIMINANT_THRESHOLD, 'min') for d in discriminants)
+else:
+    DISCRIMINANT_THRESHOLD, DISCRIMINANT_WEIGHT, J_discriminant = None, None, None
+
 # sum the objectives together (the bare-field monodromy/tangent-map penalty is
 # gone: the singular polish enforces the monodromy constraint exactly).
 JF = (J_nonQSRatio
@@ -579,6 +613,10 @@ JF = (J_nonQSRatio
 # On-axis iota constraint (only for --AR 1/2 devices).
 if axis_iota_enabled:
     JF = JF + AXIS_IOTA_WEIGHT * J_axis_iota
+
+# Snowflake discriminant constraint Delta > DISCRIMINANT_THRESHOLD (--discriminant 1, identity only).
+if discriminant_enabled:
+    JF = JF + DISCRIMINANT_WEIGHT * J_discriminant
 
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -646,6 +684,13 @@ if axis_iota_enabled:
     penalties['on-axis iota'] = AXIS_IOTA_WEIGHT * J_axis_iota
     penalty_weights['on-axis iota'] = AXIS_IOTA_WEIGHT
     states['on-axis iota'] = AXIS_IOTA_LIST
+
+# Snowflake discriminant constraint enters the objective / escalation / weight-scaling
+# tables ONLY when enabled (--discriminant 1, identity polish). Its VALUE is still
+# printed in the callback either way.
+if discriminant_enabled:
+    penalties['snowflake discriminant'] = DISCRIMINANT_WEIGHT * J_discriminant
+    penalty_weights['snowflake discriminant'] = DISCRIMINANT_WEIGHT
 
 # fix some currents
 for bbsurf in boozer_surfaces:
@@ -751,6 +796,9 @@ def callback(dofs):
                        '  '.join([f'r{k+1}={radii[k]:+.4f}' for k in range(num_aux)] + [f'z={z:+.4f}']))
     table2.add_row('singular polish monodromy', ' '.join(
         [f'{np.array2string(np.asarray(fl.res["monodromy_matrix"]))}' for fl in sing_fls]))
+    # snowflake discriminant Delta per singular field line (value only; constrained
+    # to Delta > DISCRIMINANT_THRESHOLD in the identity polish).
+    table2.add_row('snowflake discriminant', ' '.join([f'{d.value():.4e}' for d in discriminants]))
     table2.add_row('well', ' '.join([f'{w.well().max():.3e}' for w in magnetic_wells]))
     table2.add_row('currents', ' '.join([f'{curr:.3e}' for curr in currents_list]))
     table2.add_row('curvatures', ' '.join([f'{curv:.3e}' for curv in kappas]))
@@ -1129,6 +1177,14 @@ for j in range(5):
     if fieldline_mean_distance_err > 0.001 and FIELDLINE_MEANDIST_WEIGHT.value !=0.:
         print("FIELDLINE MEAN DIST ERROR", fieldline_mean_distance_err)
         FIELDLINE_MEANDIST_WEIGHT*=10
+    # snowflake discriminant Delta > DISCRIMINANT_THRESHOLD (identity polish only):
+    # relative shortfall below the threshold, max over the singular field lines.
+    if discriminant_enabled and DISCRIMINANT_WEIGHT.value != 0.:
+        discriminant_err = max([max(DISCRIMINANT_THRESHOLD - d.value(), 0.) / np.abs(DISCRIMINANT_THRESHOLD)
+                                for d in discriminants], default=0.)
+        if discriminant_err > 0.001:
+            DISCRIMINANT_WEIGHT *= 10
+            print("SNOWFLAKE DISCRIMINANT ERROR", discriminant_err)
 
     # Refresh the failed-evaluation barrier anchor with the JUST-ESCALATED weights.
     # callback() above captured dat_dict['J']/['dJ'] BEFORE these weight bumps, so on
@@ -1196,7 +1252,7 @@ curves_to_vtk([fl.curve for fl in sing_fls], OUT_DIR + f"xpoint_singular_curves_
 curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_final")
 for idx, boozer_surface in enumerate(boozer_surfaces):
     boozer_surface.surface.to_vtk(OUT_DIR + f"surf_opt_{idx}_final")
-with open(OUT_DIR + f'design_polished_final_{DEVICE_ID}.yaml', 'w') as f:
+with open(OUT_DIR + f'design_polished_final_{DEVICE_TAG}.yaml', 'w') as f:
     yaml.dump(config, f, default_flow_style=False)
 # design_polished_final_<DEVICE_ID>.json is written by the FINALIZE step at the end of the
 # script (boozer surfaces and axes re-solved on the COMBINED modular+aux coil
@@ -1337,14 +1393,14 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
     bs_res = bs_out.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
     if not bs_res['success'] or bs_out.surface.is_self_intersecting():
         print(f"ERROR: idx={idx}: BoozerSurface re-solve on the combined coil set failed")
-        print(f"ABORT: design_polished_final_{DEVICE_ID}.json will not be written.")
+        print(f"ABORT: design_polished_final_{DEVICE_TAG}.json will not be written.")
         raise SystemExit(1)
 
     new_ax = PeriodicFieldLine(field, ax.curve)
     ax_res = new_ax.run_code(CurveLength(ax.curve).J())
     if not ax_res['success']:
         print(f"ERROR: idx={idx}: magnetic-axis re-solve on the combined coil set failed")
-        print(f"ABORT: design_polished_final_{DEVICE_ID}.json will not be written.")
+        print(f"ABORT: design_polished_final_{DEVICE_TAG}.json will not be written.")
         raise SystemExit(1)
 
     out_boozer_surfaces.append(bs_out)
@@ -1356,5 +1412,5 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces, ax
 # standard 5-entry layout consumed by mk_manifolds.py: the boozer surfaces and
 # axes carry the COMBINED (modular + aux) coils, and the singular-polish field
 # lines sit in the x-point slot.
-save([out_boozer_surfaces, out_iota_Gs, out_axes, sing_fls, sdf], OUT_DIR + f'design_polished_final_{DEVICE_ID}.json')
-print(f"wrote {OUT_DIR}design_polished_final_{DEVICE_ID}.json (combined modular+aux coil set)")
+save([out_boozer_surfaces, out_iota_Gs, out_axes, sing_fls, sdf], OUT_DIR + f'design_polished_final_{DEVICE_TAG}.json')
+print(f"wrote {OUT_DIR}design_polished_final_{DEVICE_TAG}.json (combined modular+aux coil set)")
