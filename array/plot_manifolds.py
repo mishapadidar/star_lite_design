@@ -287,6 +287,7 @@ for i, ax in enumerate(axes.flat):
 # bounding box. Use a SQUARE window (equal R/Z span) centred on that box so the
 # shared equal-aspect, wspace=hspace=0 grid stays gap-free. Fall back to the old
 # fixed window if no vessel data is present.
+_zoom_scale = 1.0
 _vR, _vZ = [], []
 for _fv in glob.glob(str(p.parent / "vessel_cross_*.txt")):
     _vd = np.atleast_2d(np.loadtxt(_fv, delimiter=',', skiprows=1))
@@ -301,8 +302,24 @@ if _vR:
     axes[0, 0].set_xlim([_cx - _half, _cx + _half])
     axes[0, 0].set_ylim([_cy - _half, _cy + _half])
 else:
-    axes[0, 0].set_xlim([0, 1])
-    axes[0, 0].set_ylim([-0.5, 0.5])
+    # No vessel (combined-stage devices): frame the outermost geometry drawn instead -- coil crossings, optimization
+    # surface, LCFS, fixed points -- and scale the X-point zoom with the window (designA-size vessels: ~0.22 m half).
+    _gR, _gZ = [], []
+    for _pat in ("coil_cross_*.txt", "surface_cross_*.txt", "LCFS_cross_*.txt", "fixed_points_*.txt"):
+        for _fg in glob.glob(str(p.parent / _pat)):
+            _gd = np.atleast_2d(np.loadtxt(_fg, delimiter=',', skiprows=1))
+            if _gd.size:
+                _gR.append(_gd[:, 0]); _gZ.append(_gd[:, 1])
+    if _gR:
+        _R = np.concatenate(_gR); _Z = np.concatenate(_gZ)
+        _cx = 0.5 * (_R.min() + _R.max()); _cy = 0.5 * (_Z.min() + _Z.max())
+        _half = 0.5 * max(_R.max() - _R.min(), _Z.max() - _Z.min()) * 1.10
+        axes[0, 0].set_xlim([_cx - _half, _cx + _half])
+        axes[0, 0].set_ylim([_cy - _half, _cy + _half])
+        _zoom_scale = _half / 0.22
+    else:
+        axes[0, 0].set_xlim([0, 1])
+        axes[0, 0].set_ylim([-0.5, 0.5])
 
 # With wspace=0 the panels abut, so the boundary R-tick labels (R=0 of one panel,
 # R=1 of its neighbour) overlap. Prune the edge ticks so only interior R labels
@@ -316,7 +333,7 @@ for ax in axes[:, 0]:  ax.set_ylabel('Z')
 # structure: top X-point box top-right, bottom (stellsym-partner) box bottom-right.
 # Hyperbolic X-points get a wider zoom window (zoomed out a bit) since their
 # manifold structure spreads further than the snowflake/parabolic case.
-ZOOM_HALF = 0.025 if _xpoint_type == 'hyperbolic' else 0.01
+ZOOM_HALF = (0.025 if _xpoint_type == 'hyperbolic' else 0.01) * _zoom_scale
 print(f"X-point type: {_xpoint_type or '(unknown: xpoint_type.txt missing — rerun mk_manifolds.py)'}"
       f"  ->  ZOOM_HALF = {ZOOM_HALF}")
 

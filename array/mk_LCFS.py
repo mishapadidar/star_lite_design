@@ -75,13 +75,15 @@ print(f"wrote {out}")
 # the sdf sign there marks "inside"; flag if ANY LCFS surface point has the opposite sign
 # (the surface has crossed the wall). sdf is the vessel signed-distance loaded with the
 # design. This mirrors mk_manifolds.py's inward-manifold/vessel test.
-_axis_pt = axes[0].curve.gamma()[0]
-_inside_sign = float(np.sign(sdf.eval(np.array([_axis_pt[0]]), np.array([_axis_pt[1]]),
-                                      np.array([_axis_pt[2]]))[0]))
-_g = bs.surface.gamma().reshape((-1, 3))
-_d = np.asarray(sdf.eval(_g[:, 0], _g[:, 1], _g[:, 2]), dtype=float)
-lcfs_hits_vessel = bool(_inside_sign != 0.0 and np.any(_inside_sign * _d < 0.0))
-print(f"LCFS {device_id}: hits vessel = {int(lcfs_hits_vessel)}")
+lcfs_hits_vessel = None          # combined-stage devices carry no vessel (sdf is None): flag omitted
+if sdf is not None:
+    _axis_pt = axes[0].curve.gamma()[0]
+    _inside_sign = float(np.sign(sdf.eval(np.array([_axis_pt[0]]), np.array([_axis_pt[1]]),
+                                          np.array([_axis_pt[2]]))[0]))
+    _g = bs.surface.gamma().reshape((-1, 3))
+    _d = np.asarray(sdf.eval(_g[:, 0], _g[:, 1], _g[:, 2]), dtype=float)
+    lcfs_hits_vessel = bool(_inside_sign != 0.0 and np.any(_inside_sign * _d < 0.0))
+    print(f"LCFS {device_id}: hits vessel = {int(lcfs_hits_vessel)}")
 
 # Nested frac*tf_LCFS surfaces (90/80/70%): each by continuation from the OPTIMIZATION
 # surface (`orig`). continue_to_flux returns (state, reached) and leaves bs at `state`; we
@@ -114,8 +116,9 @@ for frac in TF_FRACS:
 summary = p.parent / 'summary.txt'
 with open(summary, 'a') as f:
     f.write(f"  {'LCFS_aspect_ratio':<30s} {ar:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
-    f.write(f"  {'LCFS_hits_vessel':<30s} "
-            f"{(1.0 if lcfs_hits_vessel else 0.0):.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
+    if lcfs_hits_vessel is not None:
+        f.write(f"  {'LCFS_hits_vessel':<30s} "
+                f"{(1.0 if lcfs_hits_vessel else 0.0):.6e}   {'n/a':>16s}   {'n/a':>16s}\n")
     # Rotational transform on the LCFS and on each nested toroidal-flux-fraction surface
     # that was reached (90/80/70%). Surfaces that the continuation did not reach are omitted.
     f.write(f"  {'LCFS_iota':<30s} {iota_lcfs:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")

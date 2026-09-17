@@ -400,13 +400,15 @@ p = Path(_args.data_file)
 dat = load(p)
 
 [boozer_surfaces, iota_Gs, axes, xpoints, sdf] = dat
-xpoint=xpoints[0]
+# Combined-stage devices (combined_stage/postprocess/mk_device_archive.py) may carry no X-point (xpoints == []) and no
+# vessel (sdf is None); the X-point and vessel steps below are skipped for them.
+xpoint = xpoints[0] if xpoints else None
 boozer_surface = boozer_surfaces[0]
 
 # For SN (non-stellsym surface) up-down symmetry is lost, so the stellsym
 # half-period phi/2pi in [0, 0.25] is no longer representative: trace/plot over
 # the full nfp=2 field period [0, 0.5]. DN keeps the half-period [0, 0.25].
-PHI_MAX = 0.25 if boozer_surface.surface.stellsym else 0.5
+PHI_MAX = (0.5 if boozer_surface.surface.stellsym else 1.0) / boozer_surface.surface.nfp   # nfp 2: 0.25 / 0.5
 NPHI = 9
 PHIS = np.linspace(0, PHI_MAX, NPHI)   # panel grid, phi/2pi
 PHIS[0] = PHIS[0] + 1e-10
@@ -427,36 +429,36 @@ _sc_surface = SurfaceXYZTensorFourier(
 _sc_surface.fit_to_curve(axes[0].curve, 0.45, flip_theta=False)
 surface_classifier = SurfaceClassifier(_sc_surface, h=0.05, p=2)
 
-# convert to RZFourier
+# convert to RZFourier over one field period (nfp 2: the original [0, 0.5) grid)
 order=16
-quadpoints=np.linspace(0, 0.5, 2*order+1, endpoint=False)
-nfp=2
+nfp = boozer_surface.surface.nfp
 stellsym=False
-
-XYZ = []
-for phi in quadpoints:
-    xyz, success = evaluate_at_phi(xpoint.curve, phi)
-    assert success
-    XYZ.append(xyz)
-xpoint_RZ = CurveRZFourier(quadpoints, order, nfp, stellsym)
-xpoint_RZ.least_squares_fit(XYZ)
-
-res = compute(xpoint_RZ, boozer_surface.biotsavart, tol=CLASSIFY_TOL)
+res = None
+if xpoint is not None:
+    quadpoints=np.linspace(0, 1.0 / nfp, 2*order+1, endpoint=False)
+    XYZ = []
+    for phi in quadpoints:
+        xyz, success = evaluate_at_phi(xpoint.curve, phi)
+        assert success
+        XYZ.append(xyz)
+    xpoint_RZ = CurveRZFourier(quadpoints, order, nfp, stellsym)
+    xpoint_RZ.least_squares_fit(XYZ)
+    res = compute(xpoint_RZ, boozer_surface.biotsavart, tol=CLASSIFY_TOL)
 
 OUT_DIR = str(p.parent) + "/"   # write next to singular.json so plot + sync find the files
 os.makedirs(OUT_DIR, exist_ok=True)
 
-g0 = xpoint.curve.gamma()[0]
-nfp = xpoint.curve.nfp
+g0 = xpoint.curve.gamma()[0] if xpoint is not None else None
 
 
 if comm_world is None or comm_world.rank == 0:
-    print_fixed_point_info("X-point", res)
-
-    np.savetxt(OUT_DIR + 'xpoint.txt', g0[None, :])
     # Single source of truth for the panel phi grid (plot_manifolds.py reads this
     # so DN half-period [0,0.25] vs SN full-period [0,0.5] always agree).
     np.savetxt(OUT_DIR + 'phis.txt', PHIS)
+if (comm_world is None or comm_world.rank == 0) and xpoint is not None:
+    print_fixed_point_info("X-point", res)
+
+    np.savetxt(OUT_DIR + 'xpoint.txt', g0[None, :])
     # X-point classification, so plot_manifolds.py can pick the zoom window
     # (hyperbolic uses a wider zoom).
     with open(OUT_DIR + 'xpoint_type.txt', 'w') as fh:
@@ -638,8 +640,8 @@ def trace_fieldlines(bfield, g0, res):
     axis_dir = np.array([np.hypot(_axis_pt[0], _axis_pt[1]) - R_xp, _axis_pt[2] - Z_xp])
     # The X-point sits inside the vessel; record which sdf sign that is so an inward
     # leg that reaches the OUTSIDE (opposite sign) can be detected.
-    inside_sign = float(np.sign(sdf.eval(np.array([g0[0]]), np.array([g0[1]]),
-                                         np.array([g0[2]]))[0]))
+    inside_sign = 0.0 if sdf is None else float(np.sign(sdf.eval(np.array([g0[0]]), np.array([g0[1]]),
+                                                                 np.array([g0[2]]))[0]))
     inward_hits = False   # does any inward (plasma-pointing) leg cross the vessel wall?
     dirs = [] if res['directions'] is None else res['directions']
     for k, v2 in enumerate(dirs):
@@ -832,14 +834,15 @@ def save_fixed_points(axis_curve, xp_curve):
     bottom row is appended (DN only) when its evaluate_at_phi also succeeds."""
     for ii, phi in enumerate(PHIS):
         a_xyz, a_ok = evaluate_at_phi(axis_curve, phi)
-        x_xyz, x_ok = evaluate_at_phi(xp_curve, phi)
+        x_xyz, x_ok = evaluate_at_phi(xp_curve, phi) if xp_curve is not None else (None, True)
         if not (a_ok and x_ok):
             proc0_print(f"  fixed_points: evaluate_at_phi failed at phi/2pi={phi:.4f}; skipping")
             continue
-        rows = [[np.hypot(a_xyz[0], a_xyz[1]), a_xyz[2]],
-                [np.hypot(x_xyz[0], x_xyz[1]), x_xyz[2]]]
+        rows = [[np.hypot(a_xyz[0], a_xyz[1]), a_xyz[2]]]
+        if xp_curve is not None:
+            rows.append([np.hypot(x_xyz[0], x_xyz[1]), x_xyz[2]])
         # bottom X-point = stellsym image (DN only): top curve at -phi, Z negated.
-        if not is_sn:
+        if not is_sn and xp_curve is not None:
             b_xyz, b_ok = evaluate_at_phi(xp_curve, -phi)
             if b_ok:
                 rows.append([np.hypot(b_xyz[0], b_xyz[1]), -b_xyz[2]])
@@ -882,21 +885,31 @@ def coil_cross_sections(coils):
 if comm_world is None or comm_world.rank == 0:
     surface_cross_sections(boozer_surface.surface)
     lcfs_cross_sections()   # overlay the LCFS (if LCFS_*.json was written before render)
-    extract_vessel_cross_sections(sdf)
-    save_fixed_points(axes[0].curve, xpoint.curve)
+    if sdf is not None:
+        extract_vessel_cross_sections(sdf)
+    save_fixed_points(axes[0].curve, xpoint.curve if xpoint is not None else None)
     # Record where the modular coils cross each phi-plane so plot_manifolds can mark
     # (on every device) where the coils lie relative to the cross section.
     coil_cross_sections(boozer_surface.biotsavart.coils)
 
-inward_hits = trace_fieldlines(boozer_surface.biotsavart, g0, res)
-trace_interior(boozer_surface.biotsavart, axes[0].curve.gamma()[0], g0)
+if xpoint is not None:
+    inward_hits = trace_fieldlines(boozer_surface.biotsavart, g0, res)
+    interior_end = g0
+else:
+    # no X-point: seed the interior from the axis to 30 % beyond the outboard optimization-surface point at phi = 0
+    inward_hits = None
+    _xs = boozer_surface.surface.cross_section(PHIS[0], thetas=NTHETA_CROSS)
+    _out = _xs[np.argmax(np.hypot(_xs[:, 0], _xs[:, 1]))]
+    _ax = axes[0].curve.gamma()[0]
+    interior_end = _ax + 1.3 * (_out - _ax)
+trace_interior(boozer_surface.biotsavart, axes[0].curve.gamma()[0], interior_end)
 
 # Append the inward-manifold / vessel-intersection flag to summary.txt (written
 # earlier by boozer_all.py / boozer_singular_opt.py, in this same device dir). Value
 # 1 = at least one inward (plasma-pointing) X-point manifold leg reaches the vacuum
 # vessel; 0 = none do. Same 4-column "metric value threshold rel_error" format the
 # rest of summary.txt uses, so device_browser.py parses it like any other metric.
-if comm_world is None or comm_world.rank == 0:
+if (comm_world is None or comm_world.rank == 0) and sdf is not None and inward_hits is not None:
     _val = 1.0 if inward_hits else 0.0
     with open(OUT_DIR + 'summary.txt', 'a') as _f:
         _f.write(f"  {'inward_manifold_hits_vessel':<30s} {_val:.6e}   {'n/a':>16s}   {'n/a':>16s}\n")

@@ -242,11 +242,14 @@ renwin.SetOffScreenRendering(1)
 renwin.SetAlphaBitPlanes(1)
 renwin.SetMultiSamples(0)
 
-renderer.AddActor(show_vessel_zero_levelset(vessel_file))
+# combined-stage devices (combined_stage/postprocess) have no vessel and may have no X-point: draw what exists
+if vessel_file.exists():
+    renderer.AddActor(show_vessel_zero_levelset(vessel_file))
 renderer.AddActor(show_surface(surface_file, [0.1, 0.35, 0.9], 0.55))
 renderer.AddActor(show_curve_as_tube(coils_file, [0.85, 0.15, 0.05], 0.006))
 renderer.AddActor(show_curve_as_tube(axis_file, [0.0, 0.0, 0.0], 0.004))
-renderer.AddActor(show_curve_as_tube(xpoint_file, [0.1, 0.6, 0.1], 0.004))
+if xpoint_file.exists():
+    renderer.AddActor(show_curve_as_tube(xpoint_file, [0.1, 0.6, 0.1], 0.004))
 
 # Auxiliary coils added by the polish step (one .vtu per xpoint index).
 for aux_file in sorted(glob.glob(str(outdir / "aux_coils_*.vtu"))):
@@ -275,7 +278,20 @@ def save_view(png_name, position, view_up, parallel_scale):
     writer.Write()
 
 
-# A slightly larger scale helps avoid cropping of wide structures.
-save_view(outdir / "scene_top.png", (0.0, 0.0, 5.0), (0.0, 1.0, 0.0), 1.8)
-save_view(outdir / "scene_left.png", (5.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.8)
+def fitted_scale(view, minimum=1.8, margin=1.05):
+    """Parallel scale (half-height) that holds every drawn actor: the campaign's fixed 1.8 m unless the device is larger."""
+    b = renderer.ComputeVisiblePropBounds()          # xmin, xmax, ymin, ymax, zmin, zmax
+    aspect = renwin.GetSize()[0] / renwin.GetSize()[1]
+    half_x, half_y, half_z = (max(abs(b[i]), abs(b[i + 1])) for i in (0, 2, 4))
+    need = max(half_y, half_x / aspect) if view == "top" else max(half_z, half_y / aspect)
+    return max(minimum, margin * need)
+
+
+# A slightly larger scale helps avoid cropping of wide structures. Campaign devices (with a vessel) keep the fixed 1.8;
+# combined-stage devices (no vessel, e.g. the R = 1.2 m HSX-size ones) are fitted so the coils are not cut off.
+top_scale = left_scale = 1.8
+if not vessel_file.exists():
+    top_scale, left_scale = fitted_scale("top"), fitted_scale("left")
+save_view(outdir / "scene_top.png", (0.0, 0.0, 5.0), (0.0, 1.0, 0.0), top_scale)
+save_view(outdir / "scene_left.png", (5.0, 0.0, 0.0), (0.0, 0.0, 1.0), left_scale)
 
