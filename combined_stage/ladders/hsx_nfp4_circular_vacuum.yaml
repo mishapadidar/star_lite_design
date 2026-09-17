@@ -1,0 +1,59 @@
+# HSX-size QA variant built from scratch: nfp = 4, circular modular coils, single stage throughout.
+# Seed: ../../../../runs/combined_stage/seeds/input.qa_nfp4_R1p2_A8 (R = 1.2 m, a = 0.15 m, B0 = 1.0 T, vacuum).
+# Coils: 4 base coils per half period (32 total), circles of radius 2.5 a around the seed axis, currents
+# sized to B0 from PHIEDGE. Engineering limits are one-sided penalties, i.e. ranges, at HSX size.
+# No double null yet: circular coils have no X-point to track. The double-null terms come in a later ladder,
+# seeded from a fixed-point search in the coil field this ladder produces (README, "nfp=4 from circular coils").
+config: ../config.yaml
+common:
+  - coil_seed.type=circular
+  - coil_seed.ncoils=4
+  - coil_seed.order=6
+  - coil_seed.minor_radius_factor=2.5
+  - double_null.enabled=false
+  - scaling.mode=jacobi
+  - vmex.mpol=6
+  - vmex.ntor=6
+  - vmex.nphi=32
+  - vmex.ntheta=32
+  - vmex.plasma_field=vacuum
+  - consistency.field_strength=toroidal_flux
+  # the constrained B.n block must cover the coil ripple: with m<=4/|n|<=4 only 0.6 % of the B.n energy was
+  # constrained (rms B.n/B 5.7e-3, max 2.1e-2; 55 % at |n|=8 = 8 coils per period). The same 32 coils reach
+  # rms 7e-5 on that boundary within all ranges (_proto/ripple_feasibility.py), so widen, don't add coils.
+  - consistency.mpol=6
+  - consistency.ntor=9
+  - plasma_objective.aspect_target=8.0
+  - plasma_objective.iota_weight=10.0
+  # coil limits at R = 1.2 m (seed: circle length 2.36 m, curvature 2.7 /m, 187.5 kA per coil,
+  # 0.16 m inboard centre-line spacing, 0.225 m coil-plasma gap)
+  - coils.length_threshold=3.5
+  - coils.curvature_threshold=10.0
+  - coils.msc_threshold=20.0
+  - coils.coil_coil_threshold=0.08
+  - coils.coil_plasma_threshold=0.15
+  - coils.current_threshold=250000.0
+  - augmented_lagrangian.penalty=1000.0
+  - augmented_lagrangian.eta0=1.0e-3
+  - augmented_lagrangian.omega0=1.0e-2
+  - augmented_lagrangian.penalty_growth=2.0
+  - augmented_lagrangian.penalty_max=1.0e+6
+  - augmented_lagrangian.outer_maxiter=25
+  - augmented_lagrangian.inner_maxiter=100
+# Intermediate stages get a budget and a looser feasibility target: at max_mode 1 the plasma has 8 dofs and stage 0
+# flattened (f_QS 0.0079 -> 0.0076, rms B.n/B 7.8e-4 -> 6.2e-4 over outer 3-5 at ~20 min each). outer_maxiter is a
+# total per stage (a resumed stage continues counting), so a resubmit past the budget finalizes the stage.
+stages:
+  - name: m1_iota0.15
+    set: [vmex.max_mode=1, plasma_objective.iota_floor=0.15, augmented_lagrangian.outer_maxiter=6,
+          augmented_lagrangian.ctol=1.0e-4]
+  - name: m2_iota0.25
+    set: [vmex.max_mode=2, plasma_objective.iota_floor=0.25, augmented_lagrangian.outer_maxiter=10,
+          augmented_lagrangian.ctol=1.0e-4]
+  - name: m3_iota0.35
+    set: [vmex.max_mode=3, plasma_objective.iota_floor=0.35, augmented_lagrangian.outer_maxiter=10,
+          augmented_lagrangian.ctol=1.0e-4]
+  - name: m3_iota0.42
+    # finalized after outer 8: B.n was shrinking ~10 % per outer iteration (max harmonic 4.0e-4 -> 3.4e-4) while f_QS
+    # rose ~10 % (0.0107 -> 0.0123); the double-null ladder that follows loosens B.n again anyway
+    set: [vmex.max_mode=3, plasma_objective.iota_floor=0.42, augmented_lagrangian.outer_maxiter=9]

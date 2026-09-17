@@ -1,0 +1,121 @@
+# designA scaled x 2 (R 0.5 -> 1.0 m, a 0.075 -> 0.15 m, A 6.67, nfp 2, 6 coils), coil currents x 2 (same |B|), BETA 1 %,
+# double null TRACKED (designA's solved X-point field lines, scaled with the device), single stage VMEX + simsopt.
+# Seeds (tools/scale_device.py, runs/combined_stage/seeds/prep_designA_L2.sh):
+#   design  runs/combined_stage/seeds/designA_L2.json  = convert/designA_after_scaled.json x 2 (currents x 2)
+#   SEED    runs/combined_stage/seeds/input.designA_L2_beta1 = seeds/input.designA_opt_beta0p03_mpol11.fixed (designA's
+#           optimization surface) x 2, PHIEDGE x 4, p = PRES_SCALE (1 - s) calibrated to beta 1 % (tools/make_beta_seed.py)
+# Vacuum field lines of the scaled device are designA's x 2; beta 1 % reshapes the equilibrium, and the optimizer
+# re-fits coils + boundary with the X-point pair kept. Coupling is the vacuum one (B.n from the coils, toroidal flux):
+# the plasma's own external field is neglected, virtual casing in VMEX is not usable (README).
+# Ranges = designA's config.yaml ranges x 2 in length (length 8 m, coil-boundary 0.24 m, X-point distance 0.06-0.28 m)
+# except curvature / msc / coil-coil, set just outside the scaled designA coils (see coils:); the current cap is lifted
+# from designA's 60 kA to 120 kA (the scaled currents are 55 / 82 kA).
+# Launch: CONFIG=configs/designA_L2_beta1.yaml SEED=$R/seeds/input.designA_L2_beta1 OUTDIR=$R/designA_L2_beta1 \
+#   sbatch --job-name=cs_dA_L2_b1 --output=$R/designA_L2_beta1/logs/slurm_%j.out sbatch/run_stage.sbatch
+design: /data/common/raffael.wendlinger/simflare/runs/combined_stage/seeds/designA_L2.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 6                   # WARNING (audit 2026-09-15): truncates designA's MPOL 11 / NTOR 10 boundary, moving it
+  ntor: 6                   # 3.1 mm max / 1.1 mm rms from designA's Boozer surface; job 826 ran on that truncated shape
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 32                  # >= Nyquist of the mpol 11 / ntor 10 seed boundary and of the B.n harmonics below
+  ntheta: 32
+  vc_digits: 3
+  plasma_field: vacuum
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null       # hold the seed's aspect ratio (designA's 6.67 is scale invariant)
+  aspect_weight: 1.0
+  # beta 1 % at designA's shape (A 6.67, zero net current) drops |iota| from 0.225 / 0.192 (axis / edge, vacuum-like
+  # seed) to 0.154 / 0.137 (seeds/logs/prep_designA_L2_825.out): the floor holds that instead of forcing the vacuum
+  # iota back, which would need a different shape. CAUTION: those are ns 16, mpol 6 values; converged (mpol 14, ns 101)
+  # min |iota| is 0.120, below this floor (_proto/logs/rc_designA_beta1_831.out)
+  iota_floor: 0.13
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 6                   # m <= 4 / |n| <= 4 hid most of the B.n mismatch on earlier runs (README); 123 constraints
+  ntor: 9
+  field_strength: toroidal_flux
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0: 0.001
+  omega0: 0.01
+  ctol: 1.0e-05
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  # scaled designA coils (prep job 825): length 6.19 m, max curvature 5.23 /m, msc 5.00 /m^2, coil-coil 0.298 m,
+  # coil-boundary 0.265 m, |I| 82 kA. designA's own coils already exceed its config.yaml curvature (10.47 vs 8.67 /m)
+  # and sit at its coil-coil 0.15 m, so those two ranges (and msc) are set just outside the scaled designA values:
+  # no worse than designA, but no reshaping of the coils just to satisfy ranges designA never met
+  length_threshold: 8.0
+  length_weight: 1000.0
+  curvature_threshold: 5.3
+  curvature_weight: 0.001
+  msc_threshold: 5.1
+  msc_weight: 0.01
+  coil_coil_threshold: 0.29
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.24
+  coil_plasma_weight: 10000.0
+  current_threshold: 120000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 100.0
+  plasma_factor: 0.1        # trial E: smaller boundary steps kept whole mixed steps from being rejected
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: track
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: null
+  hyperbolicity_margin: 0.2         # designA tr M 2.99 (scale invariant)
+  hyperbolicity_weight: 100.0
+  distance_min: 0.06                # designA 0.03 .. 0.14 m x 2 (designA's X-point 4.8-9.7 cm outside its boundary)
+  distance_max: 0.28
+  distance_weight: 10000.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.1
+  nphi: 8
+  ntheta: 512

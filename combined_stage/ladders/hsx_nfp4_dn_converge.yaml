@@ -1,0 +1,54 @@
+# HSX-size QA nfp = 4 double null, converge only: restart of `dn_converge` from its outer-1 state.
+# The first dn_converge run (runs/combined_stage/hsx_nfp4_dn_free/_superseded_fallback_bug/01_dn_converge) was good
+# through outer 1 (f_QS 0.0269, rms B.n/B 5.7e-3, flux 1.5e-5, X-line residual 1.7e-4, tr M 4.84, 5.9-8.0 cm out), then
+# jumped at outer 2 through a driver bug (the post-inner fallback took the most recent solved trial, an oversized step
+# the line search had rejected: L 0.08 -> 5.7; now the lowest-L evaluation). checkpoint.npz only held the bad x, so this
+# ladder starts a fresh augmented Lagrangian from the outer-1 files:
+#   S=simflare/runs/combined_stage/seeds
+#   LADDER=ladders/hsx_nfp4_dn_converge.yaml SEED=$S/input.hsx_nfp4_dn_converge_outer001 \
+#     COILS=$S/coils.hsx_nfp4_dn_converge_outer001.json XPOINT=$S/xpoint.hsx_nfp4_dn_converge_outer001.json \
+#     OUTDIR=simflare/runs/combined_stage/hsx_nfp4_dn_converge sbatch --cpus-per-task=12 sbatch/ladder.sbatch
+# Settings are those of ladders/hsx_nfp4_dn_free.yaml (see the reasons there).
+config: ../config.yaml
+common:
+  - coil_seed.type=circular
+  - scaling.mode=jacobi
+  - vmex.max_mode=3
+  - vmex.mpol=6
+  - vmex.ntor=6
+  - vmex.nphi=32
+  - vmex.ntheta=32
+  - vmex.plasma_field=vacuum
+  - consistency.field_strength=toroidal_flux
+  - consistency.mpol=6
+  - consistency.ntor=9
+  - plasma_objective.aspect_target=8.0
+  - plasma_objective.iota_floor=0.37
+  - plasma_objective.iota_weight=1000.0
+  - plasma_objective.iota_escalate=true
+  - coils.length_threshold=3.5
+  - coils.curvature_threshold=10.0
+  - coils.msc_threshold=20.0
+  - coils.coil_coil_threshold=0.08
+  - coils.coil_plasma_threshold=0.15
+  - coils.current_threshold=250000.0
+  - double_null.enabled=true
+  - double_null.mode=free
+  - double_null.free_order=10
+  - double_null.free_offset=0.06
+  - double_null.hyperbolicity_margin=0.2
+  - double_null.hyperbolicity_weight=1.0e-3
+  - double_null.distance_min=0.04
+  - double_null.distance_max=0.12
+  - double_null.distance_weight=1.0e+2
+  - double_null.fieldline_penalty=1000.0
+  - double_null.free_prefit_maxiter=0
+  - augmented_lagrangian.penalty=1000.0
+  - augmented_lagrangian.eta0=1.0e-3
+  - augmented_lagrangian.omega0=1.0e-2
+  - augmented_lagrangian.penalty_growth=2.0
+  - augmented_lagrangian.penalty_max=1.0e+6
+  - augmented_lagrangian.inner_maxiter=100
+stages:
+  - name: dn_converge
+    set: [augmented_lagrangian.outer_maxiter=25, augmented_lagrangian.ctol=1.0e-5]

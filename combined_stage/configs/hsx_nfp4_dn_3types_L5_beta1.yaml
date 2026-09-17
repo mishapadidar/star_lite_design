@@ -1,0 +1,107 @@
+# HSX-size QA double null, 3 coil types per half period (24 coils, nfp 4), FINITE-BETA (1 %) EQUILIBRIUM.
+# = configs/hsx_nfp4_dn_3types_L5p25.yaml (trial E settings, 24 coils, current limit 333 kA) except
+#   coils.length_threshold 5.0 m and history_every 5.
+# Seed (2026-09-15, job 816): seeds/input.trialE_final_repaired_m2_normal_beta1 = trial E's final boundary with its
+# self-intersecting phi = 0 loop removed (tools/repair_boundary.py, max_mode 2, normal objective: 4.2 mm max / 1.3 mm rms
+# shape change, volume +0.5 %, min speed ratio 0.148) plus pressure; it solves cold, so no --plasma-target walk. The
+# boundary guard (driver default, min speed ratio 0.1) rejects trial boundaries that fold again.
+# VMEX solves the beta = 1 % equilibrium (tools/make_beta_seed.py: p = PRES_SCALE (1 - s), PRES_SCALE 8485.2 Pa,
+# CURTOR 0), but the coil-plasma coupling is the vacuum one: B.n from the coils only (vmex.plasma_field vacuum) and the
+# toroidal-flux field-strength condition. The plasma's own external field, an O(beta) correction, is neglected: virtual
+# casing in VMEX was too inaccurate and expensive (runs/combined_stage/_proto/vc_sanity_probe.py, job 798: |B_plasma|
+# 2 % of |B| with ZERO pressure and outliers up to 3.5 T; 229 GB and 126 s per value + gradient; jobs 794/795 OOM-killed).
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: circular
+  ncoils: 3
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 6
+  ntor: 6
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 32
+  ntheta: 32
+  vc_digits: 3
+  plasma_field: vacuum
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: 8.0
+  aspect_weight: 1.0
+  iota_floor: 0.37
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 6
+  ntor: 9
+  field_strength: toroidal_flux
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0: 0.001
+  omega0: 0.01
+  ctol: 1.0e-05
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 5.0
+  length_weight: 1000.0
+  curvature_threshold: 10.0
+  curvature_weight: 0.001
+  msc_threshold: 20.0
+  msc_weight: 0.01
+  coil_coil_threshold: 0.08
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.15
+  coil_plasma_weight: 10000.0
+  current_threshold: 333333.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 100.0
+  plasma_factor: 0.1
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: free
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: 1000.0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  distance_min: 0.04
+  distance_max: 0.12
+  distance_weight: 100.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5

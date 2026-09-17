@@ -1,0 +1,112 @@
+# HSX-size QA double null (4 coil types, 32 coils, nfp 4, vacuum), CLEAN LINEAGE with the boundary guard.
+# = runs/combined_stage/dn_trial_E_plasma_step/config_used.yaml (trial E: max_mode 2, plasma_factor 0.1, HSX coil ranges,
+#   25 outer, ctol 1e-5) + history_every 5 + boundary_guard, restarted from dn_introduce OUTER 1
+#   (runs/combined_stage/_archive/hsx_nfp4_dn_free/00_dn_introduce/{input.combined_stage,coils_,xpoint_}outer001*).
+# Why: dn_introduce folded the phi = 0 outboard tip of the boundary into a self-intersecting loop at outer 4 (min
+# |dx/dtheta| ratio 0.45, 0.35, 0.19, 0.084, 5e-3 over outers 0-4); trial E and everything after inherited it
+# (degenerate VMEC sqrt(g), virtual casing / pressure balance garbage, cold-unsolvable checkpoints). Outer 1 is still
+# clean (ratio 0.35, curvature 7 /m). The guard rejects every trial boundary with ratio < 0.1 or a self-intersecting
+# cross-section before VMEX solves it, so the optimizer cannot take that route again.
+# Launch (2026-09-15, user asked for both the repaired-boundary runs and this clean lineage):
+#   R=runs/combined_stage; I=$R/_archive/hsx_nfp4_dn_free/00_dn_introduce
+#   CONFIG=configs/hsx_nfp4_dn_clean_guard.yaml SEED=$I/input.combined_stage_outer001 COILS=$I/coils_outer001.json \
+#   XPOINT=$I/xpoint_outer001.json OUTDIR=$R/dn_clean_guard sbatch sbatch/run_stage.sbatch
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: circular
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 6
+  ntor: 6
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 32
+  ntheta: 32
+  vc_digits: 3
+  plasma_field: vacuum
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: 8.0
+  aspect_weight: 1.0
+  iota_floor: 0.37
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 6
+  ntor: 9
+  field_strength: toroidal_flux
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0: 0.001
+  omega0: 0.01
+  ctol: 1.0e-05
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 3.5
+  length_weight: 1000.0
+  curvature_threshold: 10.0
+  curvature_weight: 0.001
+  msc_threshold: 20.0
+  msc_weight: 0.01
+  coil_coil_threshold: 0.08
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.15
+  coil_plasma_weight: 10000.0
+  current_threshold: 250000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 100.0
+  plasma_factor: 0.1
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: free
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: 1000.0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  distance_min: 0.04
+  distance_max: 0.12
+  distance_weight: 100.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.1
+  nphi: 8
+  ntheta: 512

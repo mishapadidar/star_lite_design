@@ -1,0 +1,133 @@
+# Combined stage-1/2 optimization with VMEX + augmented Lagrangian.
+# Units: m, T, A.  Paths are relative to this file unless absolute.
+
+design: ../convert/designA_after_scaled.json   # simsopt archive: seed coils (entry 0) + X-point lines (entry 3)
+config_id: 0                                   # which BoozerSurface's coil set to use
+vmec_input: null                               # seed fixed-boundary namelist (or --vmec-input)
+
+coil_seed:                # where the seed coils come from when --coils is not given
+  type: archive           # archive (entry 0 of `design`) | circular (planar circles, nfp of the seed namelist)
+  ncoils: 4               # circular: base coils per half field period (stellarator symmetric)
+  order: 6                # circular: CurveXYZFourier order
+  R1: null                # circular: coil radius, m (null = minor_radius_factor x seed minor radius)
+  minor_radius_factor: 2.5
+
+vmex:
+  ns: 16                  # radial grid used during optimization (single grid)
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2             # boundary modes varied: m, |n| <= max_mode
+  mpol: null              # equilibrium resolution override (null = the seed namelist's). Lower = much
+  ntor: null              # faster (mpol=ntor=8: ~3.4x per evaluation on designA) but drops higher harmonics
+  current_dofs: null      # current-profile dofs (null = fixed profile)
+  vary_major_radius: false
+  nphi: 16                # virtual-casing grid per field period
+  ntheta: 16
+  vc_digits: 3
+  plasma_field: vacuum    # vacuum (B_plasma = 0) | virtual_casing (finite beta; its boundary-shape
+                          # gradient is gauge-sensitive at the few-% level -- see README.md)
+  problem_kwargs: {}      # forwarded to VmecProblem.from_tuples (e.g. adjoint_tol)
+
+plasma_objective:         # f_QS = 0.5 |r|^2 of these VMEX terms
+  qs_surfaces: [0.1, 0.9, 8]
+  helicity_m: 1
+  helicity_n: 0           # 0 = QA
+  aspect_target: null     # null = hold the seed's aspect ratio
+  aspect_weight: 1.0
+  iota_floor: null        # one-sided floor on min|iota|
+  iota_weight: 10.0
+  iota_escalate: false    # true: the iota floor is weighted outside VMEX (VmexTermCost) and escalated like the coil
+                          # ranges (coils.escalation_*); needed with a double null, which keeps pulling iota down
+  beta_target: null
+  beta_weight: null       # null = 1/beta_target (scale-free)
+
+consistency:              # equality constraints enforced by the augmented Lagrangian
+  mode: fourier           # fourier (B.n harmonics) | points
+  mpol: 4                 # B.n harmonics m <= mpol, |n| <= ntor
+  ntor: 4
+  field_strength: toroidal_flux  # pins the total poloidal coil current. toroidal_flux: coil flux through
+                                # the phi=0 boundary cross-section = PHIEDGE (exact gradients, vacuum);
+                                # pressure_balance: finite beta (|B_in|^2 gradient is gauge-sensitive, README)
+  p_edge: 0.0
+
+augmented_lagrangian:
+  penalty: 10.0
+  penalty_growth: 10.0
+  penalty_max: 1.0e+8
+  eta0: null              # first feasibility tolerance (null = 1/rho0^0.1, sized for O(1) constraints;
+                          # our B.n harmonics start ~1e-5-1e-2, so set it explicitly, e.g. 1.0e-3)
+  omega0: null            # first inner gradient tolerance (null = 1/rho0)
+  ctol: 1.0e-5            # final |constraint|_inf per block
+  gtol: 1.0e-6            # final |grad L|_inf (scaled variables)
+  outer_maxiter: 30
+  inner_maxiter: 200
+
+coils:                    # engineering penalties (thresholds as in array/boozer_all.py)
+  fix_currents: false
+  length_threshold: 4.0
+  length_weight: 1.0e+3
+  curvature_threshold: 8.6705190086
+  curvature_weight: 1.0e-3
+  msc_threshold: 20.0
+  msc_weight: 1.0e-2
+  coil_coil_threshold: 0.15
+  coil_coil_weight: 1.0e+7
+  coil_plasma_threshold: 0.12
+  coil_plasma_weight: 1.0e+4
+  current_threshold: 60000.0
+  current_weight: 1.0e+6
+  escalate: true          # array/boozer_all.py practice: after each outer iteration multiply the weight of every
+  escalation_factor: 10.0 # range violated by more than escalation_tol (relative) by escalation_factor
+  escalation_tol: 1.0e-2  # (fixed weights lose to the growing augmented-Lagrangian terms: on the nfp=4
+  weight_max: 1.0e+12     #  circular-coil smoke, curvature weight 1e-3 let max kappa run 2.7 -> 20 /m)
+  escalation_max_factor: 1.0e+4  # cap: weight <= this x its starting value. With boozer_all's 0.1 % tolerance and no
+                          # cap, nfp=4 stage 2 pushed coil-coil to 1e9 for a 0.14 % (0.1 mm) gap violation and
+                          # curvature to 100 for 1 %: L 0.02 -> 0.88, 9-iteration inner solves, rejected steps
+
+scaling:                  # optimizer variables u: x = x_seed + D * u
+  mode: fixed             # fixed (plasma_step * ESS scales, coil_step) | jacobi (D_j = jacobi_step / constraint
+                          # Jacobian column norm, capped at jacobi_cap x median) -- see README
+  jacobi_step: 1.0e-2
+  jacobi_cap: 100.0
+  plasma_factor: 1.0      # jacobi: extra factor on the plasma dofs' scale (< 1 = smaller boundary steps per iteration)
+  plasma_step: 1.0        # times VMEX's ESS scales for each boundary mode
+  coil_step: 1.0e-2
+barrier_retreat: 0.5      # failed-solve barrier, as in array/boozer_all.py
+
+double_null:              # keep the (stellarator-symmetric) double-null X-point pair
+  enabled: true           # track: needs a solved X-point (archive, e.g. ../convert/designA_after_scaled.json, or --xpoint)
+  mode: track             # track (Newton-solved PeriodicFieldLine) | free (curve + length are dofs, made a field line
+                          # by an augmented-Lagrangian equality: for coil sets without an X-point yet)
+  free_order: 10          # free: CurveXYZFourierSymmetries order of the X-line (2*order+1 points per period)
+  free_offset: 0.06       # free: initial X-line = top of each boundary cross-section raised by this, m
+  free_prefit_maxiter: 0  # free: least-squares field-line fit of that curve on the frozen coils first (0 = off).
+                          # Off: with no X-point in the coil field the fit slides onto the magnetic axis (tr M 1.846,
+                          # 10 cm INSIDE the boundary; the free X-line distance is signed so that now also violates d_min)
+  fieldline_penalty: null # free: starting AL penalty of the X-line block (null = augmented_lagrangian.penalty); the
+                          # smoke with rho 1000 and residual 0.42 bent the coils to 39 /m in 3 iterations
+  hyperbolicity_margin: 0.2        # |tr M| >= 2 + margin   (designA: tr M = 2.99)
+  hyperbolicity_weight: 1.0e+2
+  distance_min: 0.03               # X-point line to plasma boundary, m   (designA: 0.048 .. 0.097)
+  distance_max: 0.14
+  distance_weight: 1.0e+4
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+# snapshot (coils, VMEX boundary, magnetic axis, X-point line -> <outdir>/snapshots/) every N L-BFGS-B iterations; 0 = off
+history_every: 5
+# reject trial boundaries (before the VMEX solve) that self-intersect or whose poloidal speed |dx/dtheta| drops below
+# min_speed_ratio x its cross-section median; 0 switches it off (trial E's boundary: a 0.2 mm loop, ratio 7e-3)
+boundary_guard:
+  min_speed_ratio: 0.1
+  nphi: 8
+  ntheta: 512
+# Smooth counterpart of the guard: |dx/dtheta| / its cross-section MEAN >= min_speed_ratio as an augmented-Lagrangian
+# INEQUALITY block, so the requirement has a gradient and a multiplier. The guard only rejects, which is invisible to
+# the optimizer: once the phi = 0 tip reached it, runs 816 / 817 / 823 spent every remaining outer iteration doing 0
+# inner iterations. Keep boundary_guard enabled (at a lower floor, e.g. 0.05) as the safety net -- this block
+# discourages a fold, it cannot forbid one inside a line search. Costs one jitted Fourier sum per evaluation (no
+# equilibrium solve, no adjoint) and is excluded from the Jacobi scaling.
+boundary_regularity:
+  enabled: false
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64

@@ -1,0 +1,36 @@
+# HSX-size QA double-null variant, stage 1 (vacuum reshaping at designA scale, R = 0.5 m).
+# Target after scaling by L = 1.2 / 0.5 = 2.4:  R = 1.2 m, A ~ 8, B0 = 1.0 T, beta = 1 % (stage 3).
+# The aspect ratio here is VMEC's aspect of the optimized boundary (designA's optimization surface,
+# A = 6.66). The iota floor steps toward the ~0.33-0.53 that 1 % beta needs at A = 8 (README).
+config: ../config.yaml
+common:
+  - vmex.max_mode=3
+  - scaling.mode=jacobi      # equilibrate constraint-Jacobian columns: feasible descent 0.6 % -> 51 %, cond 718 -> 84
+  - vmex.mpol=6             # equilibrium resolution: ~6x faster per evaluation than mpol 11/ntor 10 (benchmark). WARNING
+  - vmex.ntor=6             # (audit 2026-09-15): TRUNCATES designA's boundary, 3.1 mm max / 1.1 mm rms off its Boozer
+                            # surface; the dropped m = 9-10 content is shape, not an angle-fit tail (README, resolution audit)
+  - vmex.nphi=32            # >= Nyquist for the mpol 11 / ntor 10 boundary: no aliasing of B.n into the
+  - vmex.ntheta=32          # constrained m<=4 harmonics (16x16 under-resolves it)
+  - vmex.plasma_field=vacuum
+  - consistency.field_strength=toroidal_flux
+  - plasma_objective.iota_weight=10.0
+  # penalty sized to the constraint scale (rho0=10 let B.n drift to 2e-2 in the first 2 outer iterations of the
+  # original run while the coils moved 2 mm); tolerance schedule sized to ~1e-3 constraints; short inner solves
+  - augmented_lagrangian.penalty=1000.0
+  - augmented_lagrangian.eta0=1.0e-3
+  - augmented_lagrangian.omega0=1.0e-2
+  # growth x10 with 40-iteration inner solves ran the penalty to 1e7 and froze the design at the seed:
+  # grow gently, cap lower, and give the inner solves room to actually converge
+  - augmented_lagrangian.penalty_growth=2.0
+  - augmented_lagrangian.penalty_max=1.0e+6
+  - augmented_lagrangian.outer_maxiter=25
+  - augmented_lagrangian.inner_maxiter=100
+stages:
+  - name: A7.0_iota0.24
+    set: [plasma_objective.aspect_target=7.0, plasma_objective.iota_floor=0.24]
+  - name: A7.5_iota0.30
+    set: [plasma_objective.aspect_target=7.5, plasma_objective.iota_floor=0.30]
+  - name: A8.0_iota0.36
+    set: [plasma_objective.aspect_target=8.0, plasma_objective.iota_floor=0.36]
+  - name: A8.0_iota0.42
+    set: [plasma_objective.aspect_target=8.0, plasma_objective.iota_floor=0.42]

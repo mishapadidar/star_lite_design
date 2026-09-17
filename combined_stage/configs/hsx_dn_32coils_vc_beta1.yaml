@@ -1,0 +1,119 @@
+# HSX-size QA double null, 32 coils (trial E's 4 coil types), beta 1 %, WITH VIRTUAL CASING (2026-09-17).
+# Continues the clean lineage: seed / coils / X-line = runs/combined_stage/dn_clean_32coils_L5_beta1 finals (job 824).
+# Changes against that run, all from the convergence investigation (README "Why the runs did not converge"):
+#   * plasma_field virtual_casing + field_strength pressure_balance: the coils now see the plasma's own field. VMEX's VC
+#     plasma gradient was verified against the FROZEN-PATH finite difference (the valid reference for solver-sensitive
+#     outputs): Bn_plasma 6.4e-5, Bin_mag2 4.3e-5 relative (job 886). The 24 x 20 grid at 3 digits costs ~7 GB and
+#     ~7.6 s + 27.5 s per value + gradient on a clean boundary (job 828), against ~6 s for vacuum coupling.
+#   * consistency.mpol 6 -> 8: in every earlier run the DOMINANT B.n harmonic was m = 7, one mode above the constrained
+#     block, so the optimizer pushed the error where it could not see it (824 ended with max|constrained harmonic|
+#     3.1e-4 but 2.7e-3 at (m 7, n 0), 94 % of the B.n energy outside the block). 161 constraints < 248 dofs.
+#   * ctol / eta0 = 3.0e-4: the MEASURED floor of this coil set on its own boundary (_proto/bn_inblock_capability.py,
+#     job 872: 3.03e-4). The old 1e-5 was 30x below anything reachable, so the B.n block never met its gate, its
+#     multiplier stayed at 0 and the augmented Lagrangian degenerated into a capped penalty method.
+#   * boundary_regularity on (smooth inequality, floor 0.15) with boundary_guard lowered to 0.05 as the safety net:
+#     the hard guard stopped 816/817/823 dead (0 inner iterations per outer) once the phi = 0 tip reached it.
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 6                   # the HSX lineage boundaries are native 6/6: nothing is truncated (resolution audit)
+  ntor: 6
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 24                  # virtual-casing grid per field period (verified at 24 x 20, digits 3)
+  ntheta: 20
+  vc_digits: 3
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.37
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 8                   # covers the m = 7 modes that dominated every earlier run
+  ntor: 9
+  field_strength: pressure_balance
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0: 3.0e-04
+  omega0: 0.01
+  ctol: 3.0e-04
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 5.0
+  length_weight: 1000.0
+  curvature_threshold: 10.0
+  curvature_weight: 0.001
+  msc_threshold: 20.0
+  msc_weight: 0.01
+  coil_coil_threshold: 0.08
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.15
+  coil_plasma_weight: 10000.0
+  current_threshold: 250000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 100.0
+  plasma_factor: 0.1
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: free
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: 1000.0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  distance_min: 0.04
+  distance_max: 0.12
+  distance_weight: 100.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05     # safety net only; the smooth constraint below carries the requirement
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64

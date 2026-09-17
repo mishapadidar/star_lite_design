@@ -1,0 +1,121 @@
+# designA scaled x 2 (R 1.0 m, a 0.15 m, A 6.67, nfp 2, 6 coils, currents x 2), beta 1 %, WITH VIRTUAL CASING,
+# tracked double null (designA's own periodic field lines). Replaces job 826, which failed at outer 7 (2026-09-17).
+# Every change below comes from diagnosing that failure and the resolution audit (README):
+#   * vmex.mpol 12 / ntor 10: designA's seed is MPOL 11 / NTOR 10, so NOTHING is truncated (mpol 12 keeps m <= 11).
+#     826 ran at 6 / 6, which cut the boundary 3.1 mm max / 1.1 mm rms away from designA's actual Boozer surface; the
+#     native 11 / 10 solve is itself unconverged at beta 1 % (edge iota -0.151 vs -0.136 at 12 / 12 and 14 / 14).
+#   * scaling.plasma_factor 0.1 -> 1.0 and jacobi_cap 100 -> 10: in 826 the plasma boundary NEVER MOVED (0.000 mm change
+#     in its coefficients against 182 mm of coil motion) because the Jacobi scaling gave coil dofs 0.133 against
+#     2.1e-4 for plasma dofs -- a factor 6000, where the HSX runs sit near 30 -- with cond(J) 4.5e7.
+#   * plasma_field virtual_casing + pressure_balance, gradients verified against the frozen-path reference (job 886).
+#   * consistency.mpol 6 -> 8 (m = 7 was the dominant unconstrained harmonic in every HSX run); 161 constraints vs
+#     224 dofs. designA's own coil field on this boundary reaches max|constrained harmonic| 3.6e-4 (job 874), so
+#     ctol / eta0 = 3.6e-4 is the achievable target; 826 was given 1e-5, 36x below it.
+#   * iota_floor 0.115: at beta 1 % the converged (mpol 14, ns 101) min |iota| of this shape is 0.120, and 826's floor
+#     of 0.13 -- read off an ns 16 / mpol 6 solve -- was ABOVE what the equilibrium actually has.
+#   * the X-point fallback bug that crashed 826 at outer 7 is fixed in combined_stage_vmex.py (the best-point fallback
+#     now restores the X-point curve, not only VMEX's solve cache).
+design: /data/common/raffael.wendlinger/simflare/runs/combined_stage/seeds/designA_L2.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 12                  # keeps every mode of the MPOL 11 seed; 6/6 truncated designA's shape by 1.1 mm rms
+  ntor: 10
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 24
+  ntheta: 20
+  vc_digits: 3
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.115         # converged min |iota| at beta 1 % is 0.120 (mpol 14, ns 101)
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 8
+  ntor: 9
+  field_strength: pressure_balance
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0: 3.6e-04
+  omega0: 0.01
+  ctol: 3.6e-04
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 8.0
+  length_weight: 1000.0
+  curvature_threshold: 5.3
+  curvature_weight: 0.001
+  msc_threshold: 5.1
+  msc_weight: 0.01
+  coil_coil_threshold: 0.29
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.24
+  coil_plasma_weight: 10000.0
+  current_threshold: 120000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 10.0          # 826: the cap let coil dofs reach scale 0.133 while plasma dofs sat at 2.1e-4
+  plasma_factor: 1.0        # 826: with 0.1 on top of that, the boundary never moved at all
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: track
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: null
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 100.0
+  distance_min: 0.06
+  distance_max: 0.28
+  distance_weight: 10000.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64

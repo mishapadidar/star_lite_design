@@ -1,0 +1,78 @@
+# HSX-size QA nfp = 4: bring in the double null on the coils grown from circles (single stage throughout).
+# Seed: the last stage of ladders/hsx_nfp4_circular_vacuum.yaml, e.g.
+#   H=simflare/runs/combined_stage/hsx_nfp4_circular_vacuum/03_m3_iota0.42
+#   LADDER=ladders/hsx_nfp4_dn_free.yaml SEED=$H/input.combined_stage_final COILS=$H/coils_final.json \
+#     OUTDIR=simflare/runs/combined_stage/hsx_nfp4_dn_free sbatch --cpus-per-task=12 sbatch/ladder.sbatch
+# Those coils have no X-point anywhere 3-20 cm outside the boundary (_proto/xpoint_search.py on stage 1), so the
+# X-line is FREE: a one-period curve + length (dofs) starting at the top of each cross-section 6 cm out, made a field
+# line by an augmented-Lagrangian equality, kept hyperbolic (|tr M| >= 2.2) and 4-12 cm from the boundary. Its
+# stellarator-symmetric image is the lower null. Stage 1 continues from stage 0's xpoint_final.json.
+config: ../config.yaml
+common:
+  - coil_seed.type=circular            # only used without --coils; the ladder is run with COILS=
+  - scaling.mode=jacobi
+  - vmex.max_mode=3
+  - vmex.mpol=6
+  - vmex.ntor=6
+  - vmex.nphi=32
+  - vmex.ntheta=32
+  - vmex.plasma_field=vacuum
+  - consistency.field_strength=toroidal_flux
+  - consistency.mpol=6
+  - consistency.ntor=9
+  - plasma_objective.aspect_target=8.0
+  # hold iota where the seed is while the X-line forms: the circular-coil ladder ended at |iota| 0.379 (axis) .. 0.400
+  # (s=0.5) .. 0.385 (edge), 0.04 short of its 0.42 floor at weight 10. A 0.42 floor at weight 1e3 would open with an
+  # iota penalty ~0.84 (80x the QS term) on top of creating the X-line; raise it in a later stage instead.
+  - plasma_objective.iota_floor=0.37
+  # the double null drags the boundary toward the coil field's non-rotating diamond surfaces: in trial B (weight 10)
+  # |iota| fell UNIFORMLY 0.25-0.28 -> 0.18-0.19 (minimum at the axis) over 4 outer iterations, the floor term growing
+  # 0 -> 2.4e-2 against a QS term ~1.7e-2. 1e3 makes a 0.01 shortfall cost about as much as the QS term.
+  - plasma_objective.iota_weight=1000.0
+  # escalate the iota floor like the ranges: at a fixed 1e3 trial C's min |iota| still slid 0.249 -> 0.239 below its
+  # floor. (Job 580 was launched before this option existed and runs with the fixed weight; a resubmit resumes with it.)
+  - plasma_objective.iota_escalate=true
+  - coils.length_threshold=3.5
+  - coils.curvature_threshold=10.0
+  - coils.msc_threshold=20.0
+  - coils.coil_coil_threshold=0.08
+  - coils.coil_plasma_threshold=0.15
+  - coils.current_threshold=250000.0
+  - double_null.enabled=true
+  - double_null.mode=free
+  - double_null.free_order=10
+  - double_null.free_offset=0.06
+  - double_null.hyperbolicity_margin=0.2
+  # FIELD LINE FIRST (trial B, runs/combined_stage/dn_free_trial_B): X-line block at rho 1000, hyperbolicity weight
+  # 1e-3 (escalates x10 while |tr M| < 2.2). From the stage-1 coils one outer iteration took the residual 0.42 -> 1e-3
+  # with tr M 2.68, and the line Newton-solves as a genuine hyperbolic X-point (tr M +2.684, 5.5-8.4 cm outside, above
+  # the plasma at phi=0; _proto/verify_xline.py). Leading with the hyperbolicity (trial A: rho 10, weight 1) raised
+  # tr M on a curve that is not a field line (residual 0.11, Newton diverges). A pre-fit of the curve on the frozen coils
+  # slides onto the magnetic axis (smoke 559), so none.
+  - double_null.hyperbolicity_weight=1.0e-3
+  - double_null.distance_min=0.04
+  - double_null.distance_max=0.12
+  - double_null.distance_weight=1.0e+2
+  - double_null.fieldline_penalty=1000.0
+  - double_null.free_prefit_maxiter=0
+  - augmented_lagrangian.penalty=1000.0
+  - augmented_lagrangian.eta0=1.0e-3
+  - augmented_lagrangian.omega0=1.0e-2
+  - augmented_lagrangian.penalty_growth=2.0
+  - augmented_lagrangian.penalty_max=1.0e+6
+  - augmented_lagrangian.inner_maxiter=100
+stages:
+  - name: dn_introduce
+    # finalized after outer 6: outers 4-6 stalled at the same state (f_QS 0.0393, rms B.n 5.5e-3, trM 4.91, X-line
+    # residual 2.5e-3) with 27 VMEX status-1 (failed-solve) trials while the AL doubled its penalties to 128000;
+    # dn_converge restarts from that state with fresh penalties and scaling
+    set: [augmented_lagrangian.outer_maxiter=7, augmented_lagrangian.ctol=1.0e-4]
+  - name: dn_converge
+    # max_mode 2: at max_mode 3 the double-null state kept stalling on unsolvable trial boundaries (VmecJacobianError
+    # INITIAL JACOBIAN CHANGED SIGN on the first L-BFGS step; stage 0 outers 4-6, dn_converge outer 2-3 even with the
+    # fixed fallback). Trials B and C created and held their X-points at max_mode 2 with rare Jacobian failures.
+    # plasma_factor 0.1: even at max_mode 2 the first L-BFGS step kept producing unsolvable boundaries (whole step,
+    # coil motion included, rejected: B.n stuck at 2.85e-3, relaxed coil ranges changed nothing — trial D). With the
+    # plasma dofs' scale x0.1 (trial E, runs/combined_stage/dn_trial_E_plasma_step) no trial was rejected and B.n
+    # max 2.85e-3 -> 2.67e-3 -> 2.41e-3, f_QS 0.035 -> 0.029 over outers 1-3 with the X-point kept (tr M 4.9)
+    set: [vmex.max_mode=2, scaling.plasma_factor=0.1, augmented_lagrangian.outer_maxiter=25, augmented_lagrangian.ctol=1.0e-5]
