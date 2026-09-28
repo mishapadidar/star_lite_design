@@ -45,7 +45,7 @@ from star_lite_design.utils.vmex_double_null import (FreeXLine, FreeXLineHyperbo
                                                      fieldline_snapshot, fit_xline_to_field, free_xline_from_plasma)
 from simsopt.objectives import QuadraticPenalty, Weight
 
-from star_lite_design.utils.augmented_lagrangian import AugmentedLagrangian
+from star_lite_design.utils.augmented_lagrangian import AugmentedLagrangian, BandConstraint, SubsetConstraint
 import run_layout as layout   # coils/, xpoints/, inputs/, state/, wout/ subfolders (reads old flat runs too)
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.vmex_combined_stage import (
@@ -304,6 +304,23 @@ def main():
     vmex_cfg = plasma.problem.metadata.get("config")   # key of VMEX's process-local solve / hot-restart caches
     if args.plasma_target:
         walk_plasma_to(plasma, cfg, args.plasma_target)
+    # virtual-casing sanity gate: at beta of a few percent the plasma's own field is ~1 % of |B|. Run 911 (2026-09-17)
+    # started with a corrupt virtual-casing evaluation (B.n 1.25e8, pressure balance 2.3e18) that the SAME inputs do not
+    # reproduce four days later -- cause unexplained -- and burned an hour at L ~ 1e28 before it was noticed.
+    if plasma.plasma_field == "virtual_casing":
+        out0 = plasma.outputs()
+        bp = np.linalg.norm(np.asarray(out0["B_plasma"], dtype=float).reshape(3, -1), axis=0)
+        b_in = np.sqrt(np.asarray(out0["Bin_mag2"], dtype=float).ravel())
+        vc_ratio = bp / np.maximum(b_in, 1e-300)
+        vc_max = float(cfg.get("vc_sanity_max_ratio", 0.2))
+        # the MAXIMUM matters too: run 1072 passed a median-only gate at 2.4 % while one grid point read 30x |B|, and that
+        # local spike alone corrupted the Jacobi scaling (plasma column norms 1.6e17) -- the run never moved
+        vc_max_point = float(cfg.get("vc_sanity_max_point_ratio", 1.0))
+        print(f"virtual casing at the start: |B_plasma|/|B_in| median {np.median(vc_ratio):.3e}, max {np.max(vc_ratio):.3e} "
+              f"(gate: median <= {vc_max}, max <= {vc_max_point})", flush=True)
+        if not np.all(np.isfinite(vc_ratio)) or np.median(vc_ratio) > vc_max or np.max(vc_ratio) > vc_max_point:
+            raise SystemExit("virtual-casing field is implausible at the start (see the line above); refusing to optimize "
+                             "with it -- rerun, or check the boundary regularity and the VC grid")
     # boundary guard: trials whose VMEX boundary self-intersects or whose poloidal speed |dx/dtheta| collapses
     # (degenerate VMEC Jacobian) are rejected before any solve; min_speed_ratio 0 switches it off
     gcfg = dict(dict(min_speed_ratio=0.1, nphi=8, ntheta=512), **(cfg.get("boundary_guard") or {}))
@@ -361,7 +378,12 @@ def main():
         J_iota = VmexTermCost(plasma, "iota_floor")
         terms.append((weights["iota_floor"], J_iota))
     J_hyp = J_xdist = xline_constraint = None
-    constraints = [interface]
+    # consistency.bnormal_band = tau: the B.n harmonics become a BAND |h| <= tau (two inequality rows each) instead of
+    # equalities h = 0. As equalities their multipliers keep pulling toward an unreachable zero after the target is met,
+    # and quasi-symmetry pays (v2a / v2b: f_QS 0.024 -> 0.116 and 0.022 -> 0.21 once B.n had met its target); inside the
+    # band there is no force at all. The field-strength condition stays an equality (SubsetConstraint), index 0 as before.
+    band_tau = ccfg.get("bnormal_band")
+    constraints = [SubsetConstraint(interface, exclude=("bnormal",))] if band_tau else [interface]
     if xpoint is not None:
         if tracked:
             J_hyp = XpointHyperbolicity(xpoint, BiotSavart(coils), margin=dn_cfg["hyperbolicity_margin"])
@@ -396,6 +418,14 @@ def main():
         print(f"boundary regularity constraint: {regularity.residuals()['boundary_regularity'].size} rows on "
               f"{rcfg['nphi']} x {rcfg['ntheta']}, floor {rcfg['min_speed_ratio']}; worst ratio now {ratio_now:.3f} at "
               f"(phi, theta)/2pi = ({where_now[0]:.3f}, {where_now[1]:.3f})", flush=True)
+    band = None
+    if band_tau:
+        band = BandConstraint(interface, "bnormal", float(band_tau))
+        constraints.append(band)
+        h0 = np.asarray(interface.residuals()["bnormal"], dtype=float)
+        print(f"B.n band: |harmonic| <= {float(band_tau):.2e} on {h0.size} harmonics ({2 * h0.size} inequality rows); "
+              f"max |harmonic| now {np.max(np.abs(h0)):.2e} ({int(np.sum(np.abs(h0) > float(band_tau)))} outside)",
+              flush=True)
     initial_weights = {key: float(w.value) for key, w in weights.items()}   # config values, before resume/escalation
     objective = WeightedSum(terms)
     acfg = cfg["augmented_lagrangian"]
@@ -421,7 +451,9 @@ def main():
         t0 = time.time()
         # the regularity block is excluded: its hundreds of nearly parallel rows would dominate the column norms and
         # shrink every plasma step, and the scaling is meant to equilibrate the physical consistency constraints
-        D, cols = jacobi_scaling(al, [c for c in constraints if c is not regularity], names,
+        # scaled on the EQUALITY formulation -- the interface itself plus the X-line block: a B.n band has the same
+        # columns as the harmonics it bounds (twice, up to sign), and the regularity rows would dominate the column norms
+        D, cols = jacobi_scaling(al, [interface] + ([xline_constraint] if xline_constraint is not None else []), names,
                                  float(scfg.get("jacobi_step", 1e-2)), float(scfg.get("jacobi_cap", 100.0)))
         # smaller plasma steps: an L-BFGS step moves plasma and coil dofs together, and when its boundary part is a
         # shape VMEX cannot start from (INITIAL JACOBIAN CHANGED SIGN) the whole step, coil motion included, is rejected

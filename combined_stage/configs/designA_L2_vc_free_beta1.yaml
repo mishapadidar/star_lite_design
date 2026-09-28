@@ -1,0 +1,122 @@
+# designA x 2, beta 1 %, virtual casing, FREE X-line (2026-09-21). Replaces run 912, which never moved: every first
+#   coil step broke the TRACKED X-point's Newton solve (99 of 99 rejections "X-point field line did not solve"; designA
+#   sits at tr M 2.99, close to the 2.2 margin), then the tracked line jumped to another branch (tr M -1.5, -7.0). The
+#   free X-line (curve + length as dofs, made a field line by an equality block) cannot fail to solve; it is seeded with
+#   designA's own solved X-point (seeds/xpoint.designA_L2_free_seed.json), field line first as in the HSX runs.
+#   B.n target 2.5e-3 = the measured m <= 8 + VC floor of designA's 6 coils on this boundary (job 1066: 2.37e-3; the old
+#   3.6e-4 was 6.6x below it).
+#   Per-block tolerances (eta0 / ctol mappings): B.n at its MEASURED floor for m <= 8 + virtual casing, pressure balance
+#   and X-line 3e-4, boundary regularity 5e-3 (its natural scale; the single global 3e-4 in run 910 left that block's
+#   multiplier at zero and let the tip slide below the 0.15 floor). Virtual-casing start-up gate in the driver.
+design: /data/common/raffael.wendlinger/simflare/runs/combined_stage/seeds/designA_L2.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 12
+  ntor: 10
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 24
+  ntheta: 20
+  vc_digits: 3
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.115
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 8
+  ntor: 9
+  field_strength: pressure_balance
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0:
+    bnormal: 0.0025
+    pressure_balance: 0.0003
+    fieldline: 0.0003
+    boundary_regularity: 0.005
+  omega0: 0.01
+  ctol:
+    bnormal: 0.0025
+    pressure_balance: 0.0003
+    fieldline: 0.0003
+    boundary_regularity: 0.005
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 8.0
+  length_weight: 1000.0
+  curvature_threshold: 5.3
+  curvature_weight: 0.001
+  msc_threshold: 5.1
+  msc_weight: 0.01
+  coil_coil_threshold: 0.29
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.24
+  coil_plasma_weight: 10000.0
+  current_threshold: 120000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 10.0
+  plasma_factor: 1.0
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: free
+  free_order: 16
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: 1000.0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  distance_min: 0.06
+  distance_max: 0.28
+  distance_weight: 10000.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64

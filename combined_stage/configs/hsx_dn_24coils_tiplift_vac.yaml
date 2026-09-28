@@ -1,0 +1,124 @@
+# HSX-size QA double null, 24 coils, beta 1 % equilibrium, VACUUM coupling: lift the pinched phi = 0 tip BEFORE
+# virtual casing is switched on (2026-09-21).
+# Seed / coils / X-line = runs/combined_stage/dn_clean_24coils_L5_beta1 finals (job 823), whose tip sits at speed ratio
+# 0.107. On that boundary VMEX's virtual-casing field is corrupt (probe 914: |B_plasma| median 23 T, 23x the total
+# field; run 911 started at B.n 1.25e8 and was cancelled), the same pinched-tip mechanism that broke virtual casing on
+# the folded trial E boundary. This short stage uses the smooth boundary_regularity inequality to raise the tip above
+# 0.15 while B.n is held, so the result can seed a virtual-casing run.
+# Per-block tolerances (eta0 / ctol mappings, utils/augmented_lagrangian.py): one global eta0 = 3e-4 left run 910's
+# regularity block unable ever to meet its gate (a speed-ratio residual lives at ~1e-2), so its multiplier stayed at 0
+# and the tip slid back below the floor. Here each block gets a gate on its own scale:
+#   bnormal 1.2e-3 = this coil set's measured floor (job 871), toroidal_flux 1e-4, fieldline 3e-4 (X-line field-line
+#   equations), boundary_regularity 5e-3 (ratio within 0.005 of the 0.15 floor).
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 6
+  ntor: 6
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 32
+  ntheta: 32
+  vc_digits: 3
+  plasma_field: vacuum
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.37
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 8
+  ntor: 9
+  field_strength: toroidal_flux
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0:
+    bnormal: 1.2e-03
+    toroidal_flux: 1.0e-04
+    fieldline: 3.0e-04
+    boundary_regularity: 5.0e-03
+  omega0: 0.01
+  ctol:
+    bnormal: 1.2e-03
+    toroidal_flux: 1.0e-04
+    fieldline: 3.0e-04
+    boundary_regularity: 5.0e-03
+  gtol: 1.0e-06
+  outer_maxiter: 12
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 5.0
+  length_weight: 1000.0
+  curvature_threshold: 10.0
+  curvature_weight: 0.001
+  msc_threshold: 20.0
+  msc_weight: 0.01
+  coil_coil_threshold: 0.08
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.15
+  coil_plasma_weight: 10000.0
+  current_threshold: 333000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 100.0
+  plasma_factor: 0.1
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: free
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: 1000.0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  distance_min: 0.04
+  distance_max: 0.12
+  distance_weight: 100.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64

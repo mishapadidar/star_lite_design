@@ -49,6 +49,9 @@ consistency:              # equality constraints enforced by the augmented Lagra
                                 # the phi=0 boundary cross-section = PHIEDGE (exact gradients, vacuum);
                                 # pressure_balance: finite beta (|B_in|^2 gradient is gauge-sensitive, README)
   p_edge: 0.0
+  bnormal_band: null      # tau: treat the B.n harmonics as a BAND |h| <= tau (inequality rows) instead of h = 0.
+                          # Equalities keep pulling toward an unreachable zero after the target is met, at the
+                          # expense of quasi-symmetry; inside the band there is no force. null = equalities
 
 augmented_lagrangian:
   penalty: 10.0

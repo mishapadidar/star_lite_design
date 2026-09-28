@@ -3,7 +3,8 @@ import numpy as np
 from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
 from star_lite_design.utils.augmented_lagrangian import (
-    AugmentedLagrangian, EqualityConstraint, InequalityConstraint, solve_augmented_lagrangian)
+    AugmentedLagrangian, BandConstraint, EqualityConstraint, InequalityConstraint, SubsetConstraint,
+    solve_augmented_lagrangian)
 from star_lite_design.utils.finite_difference import taylor_test
 
 
@@ -153,6 +154,17 @@ class TestAugmentedLagrangian(unittest.TestCase):
         self.assertEqual(self._penalty_sequence(eta0=1e-3), [20.0, 40.0, 80.0, 160.0])
         self.assertEqual(self._penalty_sequence(eta0=None), [10.0, 20.0, 20.0, 40.0])
 
+    def test_per_block_tolerances(self):
+        """eta0 and ctol may differ per block: residuals with different natural scales need different gates."""
+        p = Point(np.full(4, 0.2))
+        al = AugmentedLagrangian(Distance(p, self.a), [LinearAndSphere(p, self.A[:1], self.b[:1], R=0.7)],
+                                 penalty=10.0, eta0={"lin": 1e-3, "sphere": 1e-1})
+        al.blocks()
+        self.assertEqual(al.tolerances["0:lin"], 1e-3)
+        self.assertEqual(al.tolerances["0:sphere"], 1e-1)
+        self.assertTrue(al.update(0.0, ctol={"lin": 1e9, "default": 1e9}, gtol=1.0)["converged"])
+        self.assertFalse(al.update(0.0, ctol={"lin": 1e9, "sphere": 0.0}, gtol=1.0)["converged"])
+
     def test_stall_safeguard_updates_multipliers_at_the_cap(self):
         """An unreachable feasibility target must not freeze the multipliers at zero.
 
@@ -229,6 +241,58 @@ class TestInequalityConstraint(unittest.TestCase):
             al.x = x
             return al.J(), al.dJ()
         self.assertLess(taylor_test(fun, al.x.copy(), order=6), 1e-9)
+
+
+class TestBandConstraint(unittest.TestCase):
+    """|A x - b| <= tau around min 1/2 |x - a|^2: on the edge with a positive multiplier when the unconstrained optimum
+    lies outside the band, untouched (x = a, multiplier 0) when it lies inside."""
+
+    def setUp(self):
+        rng = np.random.default_rng(1)
+        self.a = rng.standard_normal(4)
+        self.A = rng.standard_normal((1, 4))
+        self.b = rng.standard_normal(1)
+        self.r0 = float(self.A @ self.a - self.b)             # residual at the unconstrained optimum
+
+    def _solve(self, tau):
+        p = Point(np.zeros(4))
+        al = AugmentedLagrangian(Distance(p, self.a), [BandConstraint(LinearAndSphere(p, self.A, self.b), "lin", tau)],
+                                 penalty=10.0)
+        x, rec = solve_augmented_lagrangian(al, ctol=1e-9, gtol=1e-7, outer_maxiter=40)
+        return x, rec, al
+
+    def test_band_active_holds_the_edge(self):
+        tau = 0.5 * abs(self.r0)
+        x, rec, al = self._solve(tau)
+        self.assertTrue(rec["converged"])
+        self.assertAlmostEqual(abs(float(self.A @ x - self.b)), tau, places=6)
+        self.assertGreater(float(np.max(al.multipliers["0:lin_band"])), 0.0)
+
+    def test_band_slack_exerts_no_force(self):
+        x, rec, al = self._solve(2.0 * abs(self.r0))
+        self.assertTrue(rec["converged"])
+        np.testing.assert_allclose(x, self.a, atol=1e-7)
+        self.assertEqual(float(np.max(al.multipliers["0:lin_band"])), 0.0)
+
+    def test_subset_drops_the_banded_block(self):
+        class Recorder(EqualityConstraint):
+            """Two blocks; records which cotangent keys reach its vjp (a real interface skips absent keys)."""
+            def __init__(self, point):
+                self.point, self.seen = point, None
+                EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=[point])
+
+            def residuals(self):
+                return {"lin": np.array([1.0]), "sphere": np.array([2.0])}
+
+            def residuals_vjp_parts(self, ct):
+                self.seen = sorted(ct)
+                return Derivative({self.point: np.zeros(self.point.x.size)}), {}
+
+        rec = Recorder(Point(np.full(4, 0.2)))
+        sub = SubsetConstraint(rec, exclude=("lin",))
+        self.assertEqual(sorted(sub.residuals()), ["sphere"])
+        sub.residuals_vjp_parts({"sphere": np.array([1.0]), "lin": np.array([5.0])})
+        self.assertEqual(rec.seen, ["sphere"])                # the excluded block never reaches the wrapped constraint
 
 
 if __name__ == "__main__":

@@ -87,6 +87,46 @@ class InequalityConstraint(EqualityConstraint):
     """
 
 
+class BandConstraint(InequalityConstraint):
+    """``|r| <= tau`` for one block ``key`` of another constraint: rows ``tau - r >= 0`` and ``tau + r >= 0``.
+
+    An equality block ``r = 0`` is enforced like a spring anchored at zero: while ``r`` is not zero its multiplier keeps
+    growing, however good ``r`` already is. When zero is out of reach -- combined-stage B.n harmonics can only get down
+    to a coil set's floor -- the pull never stops and every other term pays for it (runs v2a / v2b: quasi-symmetry
+    f_QS 0.024 -> 0.116 and 0.022 -> 0.21 once B.n had met its target). As a band the block exerts no force at all
+    while ``|r| < tau`` and acts like a spring only at the edges, so ``tau`` states "good enough". Block name
+    ``"<key>_band"``; the vjp maps back onto the wrapped block, so a shared adjoint is still merged into one pullback.
+    """
+
+    def __init__(self, constraint, key, tau):
+        self.constraint, self.key, self.tau = constraint, str(key), float(tau)
+        InequalityConstraint.__init__(self, x0=np.asarray([]), depends_on=[constraint])
+
+    def residuals(self):
+        r = np.asarray(self.constraint.residuals()[self.key], dtype=float).ravel()
+        return {f"{self.key}_band": np.concatenate([self.tau - r, self.tau + r])}
+
+    def residuals_vjp_parts(self, cotangents):
+        v = np.asarray(cotangents[f"{self.key}_band"], dtype=float).ravel()
+        n = v.size // 2
+        return self.constraint.residuals_vjp_parts({self.key: v[n:] - v[:n]})   # d(tau - r) = -dr, d(tau + r) = +dr
+
+
+class SubsetConstraint(EqualityConstraint):
+    """The blocks of another constraint except ``exclude`` -- e.g. an interface's field-strength condition, kept as an
+    equality while its B.n block is handled by a :class:`BandConstraint`."""
+
+    def __init__(self, constraint, exclude):
+        self.constraint, self.exclude = constraint, set(exclude)
+        EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=[constraint])
+
+    def residuals(self):
+        return {k: v for k, v in self.constraint.residuals().items() if k not in self.exclude}
+
+    def residuals_vjp_parts(self, cotangents):
+        return self.constraint.residuals_vjp_parts({k: v for k, v in cotangents.items() if k not in self.exclude})
+
+
 class AugmentedLagrangian(Optimizable):
     """The augmented Lagrangian of ``objective`` subject to ``constraints``.
 
@@ -145,9 +185,26 @@ class AugmentedLagrangian(Optimizable):
         its scale, ``eta0 * rho0^0.1``: with the textbook value a block at rho 20 got eta 0.74, so an
         O(0.1) residual counted as met and its penalty grew only every other outer iteration.
         """
-        if self.eta0 is None:
+        eta0 = self._lookup(self.eta0, name)
+        if eta0 is None:
             return 1.0
-        return float(self.eta0) * self._rho_eff(self._initial_penalty(name)) ** 0.1
+        return eta0 * self._rho_eff(self._initial_penalty(name)) ** 0.1
+
+    @staticmethod
+    def _lookup(value, name):
+        """``value`` for block ``name``: a scalar (every block), or a mapping keyed by the full block name
+        (``"0:bnormal"``), the block key (``"bnormal"``) or ``"default"``. Blocks whose residuals have different natural
+        scales need different tolerances: one global eta0 = 3e-4 left run 910's boundary-regularity block (a speed-ratio
+        residual living at ~1e-2) unable ever to meet its gate, so its multiplier stayed at zero."""
+        if value is None:
+            return None
+        if np.isscalar(value):
+            return float(value)
+        value = dict(value)
+        for key in (name, name.split(":", 1)[-1], "default"):
+            if value.get(key) is not None:
+                return float(value[key])
+        return None
 
     def _is_inequality(self, i):
         return isinstance(self.constraints[i], InequalityConstraint)
@@ -169,8 +226,8 @@ class AugmentedLagrangian(Optimizable):
                     rho = self._initial_penalty(name)
                     self.multipliers[name] = np.zeros_like(r)
                     self.penalties[name] = rho
-                    self.tolerances[name] = (float(self.eta0) if self.eta0 is not None
-                                             else 1.0 / self._rho_eff(rho) ** 0.1)
+                    eta0 = self._lookup(self.eta0, name)
+                    self.tolerances[name] = eta0 if eta0 is not None else 1.0 / self._rho_eff(rho) ** 0.1
                 if self.multipliers[name].shape != r.shape:
                     raise ValueError(f"constraint block {name} changed size "
                                      f"{self.multipliers[name].shape} -> {r.shape}")
@@ -238,9 +295,12 @@ class AugmentedLagrangian(Optimizable):
         # Never tighten the schedules below the final tolerances (eta*, omega*):
         # past them the inner solver only chases round-off, and a block that sits
         # at its noise floor would trigger spurious penalty growth.
-        eta_floor = max(self.eta_min, float(ctol))
+        def eta_floor_of(name):                      # ctol may be per block, like eta0 (see _lookup)
+            c = self._lookup(ctol, name)
+            return max(self.eta_min, c if c is not None else 0.0)
         omega_floor = max(self.omega_min, float(gtol))
         for name, i, _, r in self.blocks():
+            eta_floor = eta_floor_of(name)
             nrm = float(np.max(np.abs(self._effective(name, i, r)))) if r.size else 0.0
             norms[name] = nrm
             rho = self.penalties[name]
@@ -272,7 +332,7 @@ class AugmentedLagrangian(Optimizable):
             self.omega = max(self.omega / rho_max, omega_floor)
         else:
             self.omega = max(1.0 / rho_max, omega_floor)
-        converged = (all(n <= ctol for n in norms.values()) and grad_norm <= gtol)
+        converged = (all(n <= (self._lookup(ctol, k) or 0.0) for k, n in norms.items()) and grad_norm <= gtol)
         record = dict(norms=norms, actions=actions, grad_norm=float(grad_norm),
                       penalties=dict(self.penalties), tolerances=dict(self.tolerances),
                       omega=self.omega, converged=bool(converged))
@@ -295,17 +355,20 @@ class AugmentedLagrangian(Optimizable):
 
 
 def solve_augmented_lagrangian(al, fun=None, outer_maxiter=20, inner_maxiter=500,
-                               ctol=1e-8, gtol=1e-8, method="L-BFGS-B", callback=None):
+                               ctol=1e-8, gtol=1e-8, method="L-BFGS-B", callback=None, x0=None):
     """Plain ALM driver: inner scipy solve to ``gtol=al.omega``, then :meth:`update`.
 
     ``fun(x) -> (L, dL)`` defaults to evaluating ``al`` itself; drivers with a
-    failure barrier (see ``combined_stage/``) pass their own.
+    failure barrier (see ``combined_stage/``) pass their own. A ``fun`` in other
+    variables than ``al.x`` (e.g. scaled ``u`` with ``al.x = x_seed + D * u``)
+    needs its starting point ``x0``; the default ``al.x`` is only right for the
+    default ``fun``.
     """
     if fun is None:
         def fun(x):
             al.x = x
             return al.J(), al.dJ()
-    x = al.x.copy()
+    x = al.x.copy() if x0 is None else np.asarray(x0, dtype=float).copy()
     record = None
     for k in range(outer_maxiter):
         options = {"maxiter": inner_maxiter}
