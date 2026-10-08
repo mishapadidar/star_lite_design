@@ -48,10 +48,26 @@ consistency:              # equality constraints enforced by the augmented Lagra
   field_strength: toroidal_flux  # pins the total poloidal coil current. toroidal_flux: coil flux through
                                 # the phi=0 boundary cross-section = PHIEDGE (exact gradients, vacuum);
                                 # pressure_balance: finite beta (|B_in|^2 gradient is gauge-sensitive, README)
+                                # net_poloidal_current: the coils' linked current (oint B_coil.dl/mu0) = the net
+                                # poloidal current 2 pi G/mu0 the equilibrium needs outside its boundary (Boozer G,
+                                # VMEX rbtor). Exact at any beta, converged at ns 16, gradient checked (job 2119)
   p_edge: 0.0
   bnormal_band: null      # tau: treat the B.n harmonics as a BAND |h| <= tau (inequality rows) instead of h = 0.
                           # Equalities keep pulling toward an unreachable zero after the target is met, at the
                           # expense of quasi-symmetry; inside the band there is no force. null = equalities
+
+bootstrap:                # self-consistent bootstrap current (Redl 2021 via vmex.core.bootstrap) as an AL equality block
+  enabled: false
+  helicity_n: null        # QS helicity for Redl's isomorphism (null = plasma_objective.helicity_n; 0 = QA)
+  surfaces: [0.1, 0.9, 8] # s grid of the <J.B> mismatch rows
+  pressure_from_profiles: true   # replace AM/PRES_SCALE by e ne (Te + Ti): VMEC and Redl must describe the same plasma
+  profiles:               # polynomials in s, lowest order first: ne [1/m^3], Te/Ti [eV], Zeff
+    ne: [2.0e+19]
+    Te: [1000.0, -1000.0]
+    Ti: [1000.0, -1000.0]
+    Zeff: [1.0]
+  # needs vmex.current_dofs (AC coefficients + CURTOR as design variables), NCURR = 1 and a nonzero seed AC shape
+  # (tools/make_bootstrap_seed.py writes a self-consistent seed namelist)
 
 augmented_lagrangian:
   penalty: 10.0
@@ -67,6 +83,10 @@ augmented_lagrangian:
 
 coils:                    # engineering penalties (thresholds as in array/boozer_all.py)
   fix_currents: false
+  fix_stellsym_parity: true  # pin the symmetry-breaking coefficients of coils that are their own stellarator image
+                          # (designA's phi = +-90 deg coils). B.n constraints see only odd harmonics, so without this
+                          # the coils drift off symmetry unseen (designA_L2 runs: 4-18 mm). Changes the dof set:
+                          # set false to --resume a run checkpointed before 2026-09-28
   length_threshold: 4.0
   length_weight: 1.0e+3
   curvature_threshold: 8.6705190086

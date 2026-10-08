@@ -1,3 +1,12 @@
+# ARCHIVED 2026-10-01 -- do not run as is. Two problems, both fixed since:
+#   * coil symmetry: designA's phi = +-90 deg coil is its own stellarator image, and its odd-parity coefficients were free.
+#     The B.n constraints see only stellarator-odd harmonics, so the coils drifted off symmetry unseen: the final coils of
+#     this config's run are 0.30 m off symmetry (utils/vmex_combined_stage.coil_stellsym_error) and its logged B.n is not
+#     the real mismatch. combined_stage_vmex.py now fixes those coefficients (coils.fix_stellsym_parity, default true).
+#   * solver settings: Jacobi scaling + rho0 1000 / growth 2 never moved designA x 2 (13 outer iterations of 1-step inner
+#     solves in run 912, then divergence to rms B.n/B 7.1 %, 25 /m curvature).
+# Superseded by configs/designA_L2_vc_beta1_stellsym.yaml (run designA_L2_vc_beta1_stellsym_v2: symmetric coils,
+# rms B.n/B 0.17 %, f_QS 0.018).
 # designA scaled x 2 (R 0.5 -> 1.0 m, a 0.075 -> 0.15 m, A 6.67, nfp 2, 6 coils), coil currents x 2 (same |B|), BETA 1 %,
 # double null TRACKED (designA's solved X-point field lines, scaled with the device), single stage VMEX + simsopt.
 # Seeds (tools/scale_device.py, runs/combined_stage/seeds/prep_designA_L2.sh):

@@ -24,8 +24,17 @@ RESUME=()
 if [ -f "$OUTDIR/state/checkpoint.npz" ] || [ -f "$OUTDIR/checkpoint.npz" ]; then RESUME=(--resume); fi
 SETS=()
 for s in ${SET:-}; do SETS+=(--set "$s"); done
-echo "host $(hostname)  start $(date)  config $CONFIG  seed $SEED  outdir $OUTDIR  ${RESUME[*]:-fresh}"
-"$PY" -u combined_stage_vmex.py --config "$CONFIG" --vmec-input "$SEED" --outdir "$OUTDIR" \
+# PIN_CORES=<cpu list> runs the whole process under taskset. Needed with virtual casing: on several cores JAX/XLA CPU
+# returns nondeterministic garbage from virtual_casing_jax (|B_plasma| up to 1e10 T at random points; identical inputs,
+# 5 of 7 calls; OMP/BLAS/Eigen threads, async dispatch and the legacy XLA runtime do not fix it -- only one core does;
+# jobs 2324-2326). Explains the irreproducible runs 911 / 1072.
+# BUT pinning to ONE core deadlocks VMEX (its implicit solve calls back into Python from inside an XLA executable; a
+# 1-thread pool cannot run the callback -- jobs 2328/2406, py-spy). 2 or 4 cores are deterministic (job 2418): for
+# virtual-casing runs request --cpus-per-task=4 and leave PIN_CORES unset (the SLURM cgroup already limits the cores).
+PIN=()
+if [ -n "${PIN_CORES:-}" ]; then PIN=(taskset -c "$PIN_CORES"); fi
+echo "host $(hostname)  start $(date)  config $CONFIG  seed $SEED  outdir $OUTDIR  ${RESUME[*]:-fresh}  ${PIN[*]:-unpinned}"
+${PIN[@]+"${PIN[@]}"} "$PY" -u combined_stage_vmex.py --config "$CONFIG" --vmec-input "$SEED" --outdir "$OUTDIR" \
   ${COILS:+--coils "$COILS"} ${XPOINT:+--xpoint "$XPOINT"} ${PLASMA_TARGET:+--plasma-target "$PLASMA_TARGET"} \
   ${SETS[@]+"${SETS[@]}"} ${RESUME[@]+"${RESUME[@]}"}
 echo "end $(date)"

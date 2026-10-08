@@ -1,3 +1,15 @@
+# designA_L2_vc_beta1 re-run with STELLARATOR-SYMMETRIC coils (2026-09-28).
+#   * coils.fix_stellsym_parity (default true since 2026-09-28): the phi = +-90 deg coil is its own stellarator image;
+#     its 50 odd-parity coefficients are now fixed. The B.n constraints see only stellarator-odd harmonics, and with those
+#     coefficients free the first run of this config (runs/combined_stage/designA_L2_vc_beta1) ended with coils 4.3 mm off symmetry.
+#   * consistency.mpol 8 / ntor 9 -> 6 / 7: fixing those coefficients leaves 158 dofs, fewer than the 161 + 1 equality
+#     rows of the old band (overdetermined; the smoke run 2300 stalled at 1 inner step). 97 + 1 rows now, still inside
+#     the 24 x 20 virtual-casing grid (2 m < 20, 2 |n| < 24).
+#   * solver settings of the working designA example (examples/combined_stage_designA_beta1.py, job 2154) instead of
+#     Jacobi scaling + rho0 1000: with those, every inner solve's first L-BFGS-B step overshot (L 0.26 -> 53), the
+#     driver fell back to the seed, and the penalty doubled -- 13 outer iterations without moving (run 912, and again
+#     job 2315 with this config), after which 912 broke loose to rms B.n/B 7.1 % and 25 /m curvature.
+# Everything else as configs/_archive/designA_L2_vc_beta1.yaml, whose notes follow.
 # designA scaled x 2 (R 1.0 m, a 0.15 m, A 6.67, nfp 2, 6 coils, currents x 2), beta 1 %, WITH VIRTUAL CASING,
 # tracked double null (designA's own periodic field lines). Replaces job 826, which failed at outer 7 (2026-09-17).
 # Every change below comes from diagnosing that failure and the resolution audit (README):
@@ -54,16 +66,16 @@ plasma_objective:
   beta_weight: null
 consistency:
   mode: fourier
-  mpol: 8
-  ntor: 9
+  mpol: 6                  # was 8 (see header)
+  ntor: 7                  # was 9
   field_strength: pressure_balance
   p_edge: 0.0
 augmented_lagrangian:
-  penalty: 1000.0
-  penalty_growth: 2.0
+  penalty: 10.0             # was 1000 (see header)
+  penalty_growth: 10.0      # was 2
   penalty_max: 1000000.0
-  eta0: 3.6e-04
-  omega0: 0.01
+  eta0: 1.0e-02             # was 3.6e-4: loose first, as in the example
+  omega0: null              # was 0.01 (null = 1/rho0)
   ctol: 3.6e-04
   gtol: 1.0e-06
   outer_maxiter: 25
@@ -88,12 +100,13 @@ coils:
   weight_max: 1000000000000.0
   escalation_max_factor: 10000.0
 scaling:
-  mode: jacobi
+  mode: fixed               # was jacobi (see header); fixed: D = plasma_step x ESS, coil_step, current_step x |I|
   jacobi_step: 0.01
   jacobi_cap: 10.0          # 826: the cap let coil dofs reach scale 0.133 while plasma dofs sat at 2.1e-4
   plasma_factor: 1.0        # 826: with 0.1 on top of that, the boundary never moved at all
-  plasma_step: 1.0
-  coil_step: 0.01
+  plasma_step: 0.1          # was 1.0
+  coil_step: 0.1            # was 0.01
+  current_step: 0.1         # relative to each seed current
 barrier_retreat: 0.5
 double_null:
   enabled: true

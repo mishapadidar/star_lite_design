@@ -50,7 +50,9 @@ import run_layout as layout   # coils/, xpoints/, inputs/, state/, wout/ subfold
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.vmex_combined_stage import (
     BoundaryRegularityConstraint, CoilPlasmaDistance, PlasmaCoilInterface, VmexPlasma, VmexQuasisymmetry,
-    VmexTermCost, WeightedSum, boundary_regularity)
+    VmexTermCost, WeightedSum, boundary_regularity, coil_stellsym_error, fix_self_symmetric_coil_parity,
+    BootstrapConsistency, bootstrap_mismatch_output, kinetic_pressure_coeffs, kinetic_profiles,
+    net_poloidal_current_output)
 
 
 def parse_args():
@@ -92,6 +94,34 @@ def build_plasma(cfg, seed_path):
         print(f"equilibrium resolution reduced to mpol={mp}, ntor={nt}")
     inp = replace(inp, ns_array=np.array([vcfg["ns"]]), ftol_array=np.array([vcfg["ftol"]]),
                   niter_array=np.array([vcfg["niter"]]))
+    bcfg = cfg.get("bootstrap") or {}
+    extra_outputs = {}
+    if cfg["consistency"].get("field_strength") == "net_poloidal_current":
+        extra_outputs["rbtor"] = net_poloidal_current_output()
+    if bcfg.get("enabled"):
+        prof = bcfg["profiles"]
+        profiles = kinetic_profiles(prof["ne"], prof["Te"], prof["Ti"], prof.get("Zeff", [1.0]))
+        if bcfg.get("pressure_from_profiles", True):
+            # the Redl current is computed from the kinetic profiles, the equilibrium from AM/PRES_SCALE: make them the
+            # same plasma (n_i = n_e), otherwise the constraint pairs a current with a pressure it was not driven by
+            am = np.zeros(max(21, len(np.atleast_1d(inp.am))))
+            coeffs = kinetic_pressure_coeffs(prof["ne"], prof["Te"], prof["Ti"])
+            am[:coeffs.size] = coeffs
+            print(f"bootstrap: equilibrium pressure replaced by e ne (Te + Ti): p(0) = {coeffs[0]:.4g} Pa "
+                  f"(seed {float(inp.pres_scale) * float(np.atleast_1d(inp.am)[0]):.4g} Pa)")
+            inp = replace(inp, am=am, pres_scale=1.0, pmass_type="power_series")
+        helicity_n = bcfg.get("helicity_n")
+        helicity_n = pcfg["helicity_n"] if helicity_n is None else helicity_n
+        smin, smax, nsurf = bcfg.get("surfaces", [0.1, 0.9, 8])
+        extra_outputs["bootstrap"] = bootstrap_mismatch_output(profiles, helicity_n,
+                                                               np.linspace(smin, smax, int(nsurf)))
+        if not vcfg.get("current_dofs"):
+            print("WARNING bootstrap: vmex.current_dofs is off -- no design variable can carry the bootstrap current")
+        if int(inp.ncurr) != 1:
+            raise SystemExit("bootstrap needs NCURR = 1 (prescribed current profile) in the seed namelist")
+        if not np.any(np.asarray(inp.ac, dtype=float)):
+            print("WARNING bootstrap: the seed AC profile is all zero, so VMEC's shape normalization is degenerate and "
+                  "the AC dofs have no gradient until CURTOR moves; seed with tools/make_bootstrap_seed.py")
     t0 = time.time()
     eq0 = opt.solve_equilibrium(inp)
     w0 = eq0.wout
@@ -118,7 +148,7 @@ def build_plasma(cfg, seed_path):
                         vc_digits=vcfg["vc_digits"], plasma_field=vcfg.get("plasma_field", "vacuum"),
                         current_dofs=vcfg["current_dofs"],
                         vary_major_radius=vcfg["vary_major_radius"], restart_from=eq0,
-                        **(vcfg.get("problem_kwargs") or {}))
+                        extra_outputs=extra_outputs, **(vcfg.get("problem_kwargs") or {}))
     return plasma, aspect_target
 
 
@@ -223,6 +253,15 @@ def build_coils(cfg, design_path, config_id, coils_path=None, seed_path=None):
             if opt_.local_dof_size > 0 and id(opt_) not in seen and "Curve" in type(opt_).__name__:
                 seen.add(id(opt_))
                 base_curves.append(opt_)
+    # The B.n constraints see only stellarator-odd harmonics, so a coil set that loses its symmetry is invisible to
+    # them: pin the symmetry-breaking coefficients of coils that are their own stellarator image (designA's phi = +-90
+    # deg coils; utils/vmex_combined_stage.fix_self_symmetric_coil_parity). Changes the dof set, so a run checkpointed
+    # without it resumes only with coils.fix_stellsym_parity: false.
+    if cfg["coils"].get("fix_stellsym_parity", True):
+        _, notes = fix_self_symmetric_coil_parity(base_curves)
+        for note in notes:
+            print(f"coil symmetry: {note}")
+    print(f"coil symmetry error at the start: {coil_stellsym_error(coils):.2e} m", flush=True)
     # Coil currents are ScaledCurrent chains (e.g. a sign flip -1 wrapped around the
     # normalized base current); bound each underlying Current by the threshold over
     # the largest |product of scales| among the coils that use it.
@@ -426,6 +465,15 @@ def main():
         print(f"B.n band: |harmonic| <= {float(band_tau):.2e} on {h0.size} harmonics ({2 * h0.size} inequality rows); "
               f"max |harmonic| now {np.max(np.abs(h0)):.2e} ({int(np.sum(np.abs(h0) > float(band_tau)))} outside)",
               flush=True)
+    # Bootstrap self-consistency (section `bootstrap`): the equilibrium's <J.B> must equal the Redl bootstrap current of
+    # the kinetic profiles. Appended LAST so earlier block names keep their indices for --resume.
+    bootstrap = None
+    if (cfg.get("bootstrap") or {}).get("enabled"):
+        bootstrap = BootstrapConsistency(plasma)
+        constraints.append(bootstrap)
+        r0 = bootstrap.residuals()["bootstrap"]
+        print(f"bootstrap consistency: {r0.size} Redl mismatch rows, max |row| now {np.max(np.abs(r0)):.3e}; "
+              f"CURTOR now {float(plasma.vmec_input().curtor):.4e} A", flush=True)
     initial_weights = {key: float(w.value) for key, w in weights.items()}   # config values, before resume/escalation
     objective = WeightedSum(terms)
     acfg = cfg["augmented_lagrangian"]
@@ -453,7 +501,8 @@ def main():
         # shrink every plasma step, and the scaling is meant to equilibrate the physical consistency constraints
         # scaled on the EQUALITY formulation -- the interface itself plus the X-line block: a B.n band has the same
         # columns as the harmonics it bounds (twice, up to sign), and the regularity rows would dominate the column norms
-        D, cols = jacobi_scaling(al, [interface] + ([xline_constraint] if xline_constraint is not None else []), names,
+        D, cols = jacobi_scaling(al, [interface] + ([xline_constraint] if xline_constraint is not None else [])
+                                 + ([bootstrap] if bootstrap is not None else []), names,
                                  float(scfg.get("jacobi_step", 1e-2)), float(scfg.get("jacobi_cap", 100.0)))
         # smaller plasma steps: an L-BFGS step moves plasma and coil dofs together, and when its boundary part is a
         # shape VMEX cannot start from (INITIAL JACOBIAN CHANGED SIGN) the whole step, coil motion included, is rejected
@@ -465,6 +514,11 @@ def main():
     else:
         D = np.full(x_seed.size, float(scfg["coil_step"]))
         D[plasma_mask] = scfg["plasma_step"] * np.asarray(plasma.problem.scales)[plasma.dofs_free_status]
+        if scfg.get("current_step") is not None:
+            # coil currents relative to their seed value: coil_step is a length (m), and on a normalized Current dof of
+            # ~0.1 it would allow 100 % current changes per unit step (the working designA example uses 0.1 x |I|)
+            current_mask = np.array([n.startswith("Current") for n in names])
+            D[current_mask] = float(scfg["current_step"]) * np.maximum(np.abs(x_seed[current_mask]), 1e-12)
     u = np.zeros_like(x_seed)
     k_start = 0
     ckpt = layout.find(args.outdir, "checkpoint.npz")
@@ -547,6 +601,15 @@ def main():
                     error = vmex_implicit._LAST_STATUS_ERROR.get(vmex_cfg)
                     reasons.append(f"VMEX solve rejected (status {plasma.evaluate()['status']}"
                                    + (f": {type(error).__name__}: {str(error)[:160]}" if error is not None else "") + ")")
+                elif plasma.plasma_field == "virtual_casing":
+                    # per-evaluation virtual-casing check: with many cores JAX/XLA CPU returned nondeterministic garbage
+                    # from virtual_casing_jax (|B_plasma| up to 1e10 T at random points; jobs 2324-2326, 2418: fine on
+                    # 2-4 cores, garbage with 12) -- a start-up gate alone cannot catch it, so reject such trials
+                    out_vc = plasma.outputs()
+                    vc_ratio = (np.linalg.norm(np.asarray(out_vc["B_plasma"], dtype=float).reshape(3, -1), axis=0)
+                                / np.sqrt(np.maximum(np.asarray(out_vc["Bin_mag2"], dtype=float).ravel(), 1e-300)))
+                    if not np.all(np.isfinite(vc_ratio)) or np.max(vc_ratio) > vc_max_point:
+                        reasons.append(f"virtual casing implausible (max |B_plasma|/|B_in| {np.max(vc_ratio):.3e})")
         except Exception as e:  # noqa: BLE001 -- any solver failure becomes a barrier
             reasons.append(f"evaluation raised {e!r}")
         progress["n"] += 1
@@ -585,12 +648,13 @@ def main():
         row = dict(outer=k, L=float(al.J()), f_QS=float(sum(costs.values())), terms=costs,
                    bnormal_inf=float(np.max(np.abs(res["bnormal"]))),
                    rms_Bn_over_B=interface.rms_bnormal_over_B(),
-                   field_strength=next((float(res[k][0]) for k in ("toroidal_flux", "pressure_balance")
+                   field_strength=next((float(res[k][0]) for k in ("toroidal_flux", "pressure_balance", "net_poloidal_current")
                                         if k in res), None),
                    coil_lengths=[float(v) for v in lengths], max_curvature=kappa,
                    coil_coil_penalty=float(J_cc.J()), coil_plasma_penalty=float(J_cp.J()),
                    vmex_forward=plasma.n_forward, vmex_backward=plasma.n_backward,
                    coil_violations=coil_violations(),
+                   coil_symmetry_error=coil_stellsym_error(coils),
                    boundary_min_speed_ratio=float(boundary_regularity(plasma, int(gcfg["nphi"]), int(gcfg["ntheta"]))[0]),
                    coil_weights={key: float(w.value) for key, w in weights.items()})
         if xpoint is not None:
@@ -600,17 +664,23 @@ def main():
             if xline_constraint is not None:
                 row["xline_residual_max"] = float(np.max(np.abs(xline_constraint.residuals()["fieldline"])))
 
+        if bootstrap is not None:
+            row.update(bootstrap_residual_max=float(np.max(np.abs(bootstrap.residuals()["bootstrap"]))),
+                       curtor=float(plasma.vmec_input().curtor))
         if record is not None:
             row.update(penalties=record["penalties"], actions=record["actions"],
                        grad_norm=record["grad_norm"], omega=record["omega"], converged=record["converged"])
         print(f"[outer {k}] L={row['L']:.6e} f_QS={row['f_QS']:.6e} |B.n modes|inf={row['bnormal_inf']:.3e} "
               f"rms(B.n/B)={row['rms_Bn_over_B']:.3e} field_strength={row['field_strength']} "
               f"max kappa={kappa:.2f} lengths={np.round(lengths, 3).tolist()} "
+              f"coil symmetry error={row['coil_symmetry_error']:.1e} m "
               f"rho={row.get('penalties')} VMEX fwd/bwd={plasma.n_forward}/{plasma.n_backward} "
               f"boundary speed ratio={row['boundary_min_speed_ratio']:.3g}"
               + (f" X-point trM={row['xpoint_trace']:+.3f} d=[{row['xpoint_distance_min']:.4f},{row['xpoint_distance_max']:.4f}]"
                  if xpoint is not None else "")
-              + (f" X-line residual={row['xline_residual_max']:.3e}" if "xline_residual_max" in row else ""), flush=True)
+              + (f" X-line residual={row['xline_residual_max']:.3e}" if "xline_residual_max" in row else "")
+              + (f" bootstrap mismatch={row['bootstrap_residual_max']:.3e} CURTOR={row['curtor']:.4e} A"
+                 if "bootstrap_residual_max" in row else ""), flush=True)
         with open(os.path.join(args.outdir, "history.yaml"), "a") as fh:
             yaml.safe_dump([row], fh, sort_keys=False)
         return row

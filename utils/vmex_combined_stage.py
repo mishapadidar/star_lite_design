@@ -50,7 +50,9 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from .augmented_lagrangian import EqualityConstraint, InequalityConstraint, merge_cotangents
 
 __all__ = ["VmexPlasma", "VmexQuasisymmetry", "PlasmaCoilInterface",
-           "CoilPlasmaDistance", "WeightedSum", "bnormal_fourier_modes"]
+           "CoilPlasmaDistance", "WeightedSum", "bnormal_fourier_modes", "coil_stellsym_error",
+           "fix_self_symmetric_coil_parity", "net_poloidal_current_output", "bootstrap_mismatch_output",
+           "kinetic_profiles", "kinetic_pressure_coeffs", "BootstrapConsistency"]
 
 MU0 = 4e-7 * np.pi
 
@@ -89,6 +91,9 @@ class VmexPlasma(Optimizable):
         current_dofs: number of current-profile dofs (``None``: fixed profile).
         vary_major_radius: also vary ``RBC(0,0)``.
         restart_from: converged seed equilibrium (solved if omitted).
+        extra_outputs: ``{name: fn(state, runtime) -> array}``, further equilibrium quantities evaluated in the same
+            jitted forward and pulled back through the same adjoint, e.g. :func:`net_poloidal_current_output`
+            (``"rbtor"``) or :func:`bootstrap_mismatch_output` (``"bootstrap"``).
         **problem_kwargs: forwarded to ``VmecProblem.from_tuples`` (e.g.
             ``adjoint_tol``, ``forward_ftol``, ``use_ess``).
 
@@ -109,7 +114,7 @@ class VmexPlasma(Optimizable):
 
     def __init__(self, inp, objective_terms, *, max_mode, nphi=16, ntheta=16, vc_digits=4,
                  plasma_field="virtual_casing", nsec=128, nfine=(96, 48), current_dofs=None,
-                 vary_major_radius=False, restart_from=None, **problem_kwargs):
+                 vary_major_radius=False, restart_from=None, extra_outputs=None, **problem_kwargs):
         from vmex import optimize as opt
         from vmex.core import virtual_casing as vc
 
@@ -144,6 +149,11 @@ class VmexPlasma(Optimizable):
         phi_fine = jnp.linspace(0.0, 2.0 * jnp.pi, int(nfine[0]), endpoint=False)
         theta_fine = jnp.linspace(0.0, 2.0 * jnp.pi, int(nfine[1]), endpoint=False)
         nfp_ = self.nfp
+        extra = dict(extra_outputs or {})
+        clash = set(extra) & set(self.OUTPUT_KEYS)
+        if clash:
+            raise ValueError(f"extra_outputs may not reuse the built-in output names {sorted(clash)}")
+        self.output_keys = self.OUTPUT_KEYS + tuple(extra)
 
         def graph(x):
             state, runtime, status = state_runtime_status(x)
@@ -182,6 +192,8 @@ class VmexPlasma(Optimizable):
                        xsec=jnp.stack([R, zero, Z]),
                        xsec_tangent=jnp.stack([-(sin_mt * m) @ rc, zero, (cos_mt * m) @ zs]),
                        boundary_points=boundary_points)
+            for name, fn in extra.items():
+                out[name] = jnp.asarray(fn(state, runtime))
             return out, (status, rows)
 
         self._graph = jax.jit(graph)
@@ -227,7 +239,7 @@ class VmexPlasma(Optimizable):
         if not cache["accepted"]:
             return Derivative({self: np.zeros(self.local_full_dof_size)})
         ct = {}
-        for key in self.OUTPUT_KEYS:
+        for key in self.output_keys:
             ref = cache["out"][key]
             ct[key] = jnp.asarray(np.broadcast_to(np.asarray(cotangents[key], dtype=float), ref.shape)
                                   if key in cotangents else np.zeros_like(ref))
@@ -358,6 +370,84 @@ def bnormal_fourier_modes(mpol, ntor, stellsym):
     return modes
 
 
+def net_poloidal_current_output():
+    """``VmexPlasma`` extra output ``"rbtor"``: the edge ``G = bvco(edge)`` [T m] of the live equilibrium state.
+
+    ``2 pi G / mu0`` is the net poloidal current outside the boundary -- the current the coils must link through the
+    torus hole (:class:`PlasmaCoilInterface` ``field_strength="net_poloidal_current"``). VMEC's ``rbtor``
+    extrapolation ``1.5 bvco(ns) - 0.5 bvco(ns-1)``; converged in ns already at ns = 16 (1.7e-6 vs ns = 101 on the
+    band-run final, job 2119), adjoint vs VMEX frozen-path FD 2.8e-5.
+    """
+    from vmex.core.fields import surface_currents
+    from vmex.core.statephysics import _field_chain
+
+    def rbtor(state, runtime):
+        fields = _field_chain(state, runtime)[3]
+        return surface_currents(bsubu=fields.bsubu, bsubv=fields.bsubv, trig=runtime.trig,
+                                s=jnp.asarray(runtime.setup.s_full), signgs=runtime.setup.signgs).rbtor
+    return rbtor
+
+
+def kinetic_profiles(ne, Te, Ti, Zeff=(1.0,)):
+    """``vmex.core.bootstrap.KineticProfiles`` from polynomial coefficients in ``s`` (lowest order first).
+
+    Units: ``ne`` [1/m^3], ``Te``/``Ti`` [eV], ``Zeff`` dimensionless (Redl's fit: hydrogenic main ions plus an
+    effective charge -- a pure argon plasma is outside what it was fitted to).
+    """
+    from vmex.core.bootstrap import KineticProfiles
+    return KineticProfiles(ne_coeffs=np.asarray(ne, dtype=float), Te_coeffs=np.asarray(Te, dtype=float),
+                           Ti_coeffs=np.asarray(Ti, dtype=float), Zeff_coeffs=np.asarray(Zeff, dtype=float))
+
+
+def kinetic_pressure_coeffs(ne, Te, Ti):
+    """Power-series coefficients (lowest order first) of ``p(s) = e ne (Te + Ti)`` [Pa], ``n_i = n_e``.
+
+    The bootstrap current is computed from the kinetic profiles while the equilibrium uses VMEC's pressure: they must
+    describe the same plasma, so with bootstrap on, the seed's ``AM``/``PRES_SCALE`` are replaced by this.
+    """
+    e = 1.602176634e-19
+    return e * np.polynomial.polynomial.polyadd(np.polynomial.polynomial.polymul(ne, Te),
+                                                np.polynomial.polynomial.polymul(ne, Ti))
+
+
+def bootstrap_mismatch_output(profiles, helicity_n, surfaces=None):
+    """``VmexPlasma`` extra output ``"bootstrap"``: VMEX's ``RedlBootstrapMismatch`` residual rows of the live state.
+
+    ``R_j = (<J.B>_vmec(s_j) - <J.B>_Redl(s_j)) / sqrt(sum_k (<J.B>_vmec + <J.B>_Redl)^2)`` on ``surfaces``: zero when
+    the equilibrium's parallel current is exactly the Redl (2021) bootstrap current of ``profiles``. Only the
+    bootstrap drive is modelled -- no ohmic or driven current -- and the equilibrium pressure must match the kinetic
+    pressure (:func:`kinetic_pressure_coeffs`). ``helicity_n`` is the quasisymmetry helicity (0 = QA) Redl's
+    tokamak-to-QS isomorphism uses.
+    """
+    from vmex.core.bootstrap import RedlBootstrapMismatch
+    mismatch = RedlBootstrapMismatch(profiles, int(helicity_n), surfaces)
+    return mismatch.residuals_state
+
+
+class BootstrapConsistency(EqualityConstraint):
+    """Bootstrap self-consistency as an augmented-Lagrangian equality block ``"bootstrap"``.
+
+    The residual rows are :class:`VmexPlasma`'s ``"bootstrap"`` output (:func:`bootstrap_mismatch_output`); the design
+    variables that can meet them are the current-profile dofs (``VmexPlasma(current_dofs=k)``: ``k`` AC coefficients +
+    CURTOR). Its gradient is one more cotangent on the shared VMEX adjoint.
+    """
+
+    def __init__(self, plasma):
+        if "bootstrap" not in getattr(plasma, "output_keys", ()):
+            raise ValueError("BootstrapConsistency needs VmexPlasma(..., extra_outputs={'bootstrap': "
+                             "bootstrap_mismatch_output(...)})")
+        self.plasma = plasma
+        EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=[plasma])
+
+    def residuals(self):
+        return {"bootstrap": np.asarray(self.plasma.outputs()["bootstrap"], dtype=float).ravel()}
+
+    def residuals_vjp_parts(self, cotangents):
+        if not self.plasma.accepted:
+            return Derivative({}), {}
+        return Derivative({}), {self.plasma: {"bootstrap": np.asarray(cotangents["bootstrap"], dtype=float)}}
+
+
 class PlasmaCoilInterface(EqualityConstraint):
     """Plasma/coil consistency residuals on the VMEX boundary.
 
@@ -378,15 +468,26 @@ class PlasmaCoilInterface(EqualityConstraint):
             with ``Phi_coil`` the coil flux ``oint A.dl`` through the ``phi = 0``
             boundary cross-section and ``|Phi_target| = |PHIEDGE|`` (vacuum; every
             gradient analytic); ``"pressure_balance"`` -- mean total-pressure jump
-            (finite beta; uses ``|B_in|^2`` at the boundary); ``None`` -- omit.
+            (finite beta; uses ``|B_in|^2`` at the boundary); ``"net_poloidal_current"`` --
+            ``(I_coil - 2 pi G/mu0) / |2 pi G_seed/mu0|``: the current the coils link through the torus hole,
+            ``I_coil = oint B_coil . dl / mu0`` around a fixed circle through the plasma, equals the net poloidal
+            current the equilibrium needs outside its boundary, ``G = bvco(edge)`` (Boozer G; VMEX ``rbtor``). Exact at
+            any beta (the plasma's own poloidal currents lie inside the boundary and drop out), linear in the coil
+            currents, and its plasma gradient is one scalar through the shared adjoint. Needs ``plasma`` built with
+            ``extra_outputs={"rbtor": net_poloidal_current_output()}``; ``None`` -- omit.
+        nloop: points on the circle for ``oint B_coil . dl`` (``net_poloidal_current``).
     """
 
     def __init__(self, plasma, field, *, mode="fourier", mpol=4, ntor=4, B_ref=None,
-                 p_edge=0.0, field_strength="toroidal_flux"):
+                 p_edge=0.0, field_strength="toroidal_flux", nloop=512):
         if mode not in ("fourier", "points"):
             raise ValueError("mode must be 'fourier' or 'points'")
-        if field_strength not in ("toroidal_flux", "pressure_balance", None):
-            raise ValueError("field_strength must be 'toroidal_flux', 'pressure_balance' or None")
+        if field_strength not in ("toroidal_flux", "pressure_balance", "net_poloidal_current", None):
+            raise ValueError("field_strength must be 'toroidal_flux', 'pressure_balance', 'net_poloidal_current' "
+                             "or None")
+        if field_strength == "net_poloidal_current" and "rbtor" not in getattr(plasma, "output_keys", ()):
+            raise ValueError("field_strength 'net_poloidal_current' needs VmexPlasma(..., extra_outputs="
+                             "{'rbtor': net_poloidal_current_output()})")
         self.plasma, self.field = plasma, field
         self.mode, self.p_edge, self.field_strength = mode, float(p_edge), field_strength
         nphi, ntheta, nfp = plasma.nphi, plasma.ntheta, plasma.nfp
@@ -416,8 +517,29 @@ class PlasmaCoilInterface(EqualityConstraint):
             phiedge = float(plasma.inp.phiedge)
             # the orientation of oint A.dl depends on the theta direction; match signs
             self.flux_seed, self.flux_target = flux0, float(np.sign(flux0)) * abs(phiedge)
+        elif field_strength == "net_poloidal_current":
+            # Fixed circle z = 0 at the seed boundary's R00, through the plasma: every modular coil links it once, so
+            # oint B_coil . dl / mu0 is the linked coil current whatever the coils' shape (it only changes if a coil
+            # crossed the circle). Do NOT sum coil currents instead: simsopt's stellarator-symmetric copies carry
+            # flipped signs, and the plain sum over a symmetric coil set is exactly 0 (band-run final: 0 vs 6.29 MA).
+            R0 = float(np.asarray(plasma.inp.rbc)[int(plasma.inp.ntor), 0])
+            t = np.linspace(0.0, 2.0 * np.pi, int(nloop), endpoint=False)
+            self.loop = np.ascontiguousarray(np.column_stack([R0 * np.cos(t), R0 * np.sin(t), 0.0 * t]))
+            self.loop_dl = np.ascontiguousarray(np.column_stack([-R0 * np.sin(t), R0 * np.cos(t), 0.0 * t])
+                                                * (2.0 * np.pi / int(nloop)))
+            I_coil0 = self._linked_current()
+            I_eq0 = 2.0 * np.pi * float(np.asarray(plasma.outputs()["rbtor"])) / MU0
+            # the sign relating I_coil and G depends on the loop / angle orientation: fix it at the seed
+            self.current_sign = float(np.sign(I_coil0 * I_eq0)) or 1.0
+            self.current_norm = abs(I_eq0)
+            self.current_seed = (I_coil0, I_eq0)
         self._cache = None
         EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=[plasma, field])
+
+    def _linked_current(self):
+        """``oint B_coil . dl / mu0`` around the fixed circle, A."""
+        self.field.set_points(self.loop)
+        return float(np.sum(self.field.B() * self.loop_dl) / MU0)
 
     def _coil_flux(self, out):
         xs, ts = _to_points(out["xsec"]), _to_points(out["xsec_tangent"])
@@ -460,6 +582,11 @@ class PlasmaCoilInterface(EqualityConstraint):
             flux, xs, ts, A, dA, wq = self._coil_flux(out)
             residuals["toroidal_flux"] = np.array([(flux - self.flux_target) / abs(self.flux_target)])
             cache.update(flux=flux, xs=xs, ts=ts, A=A, dA=dA, wq=wq)
+        elif self.field_strength == "net_poloidal_current":
+            I_coil = self._linked_current()
+            I_eq = 2.0 * np.pi * float(np.asarray(out["rbtor"])) / MU0
+            residuals["net_poloidal_current"] = np.array([(I_coil - self.current_sign * I_eq) / self.current_norm])
+            cache.update(I_coil=I_coil, I_eq=I_eq)
         self._cache = cache
         return self._cache
 
@@ -514,6 +641,11 @@ class PlasmaCoilInterface(EqualityConstraint):
             # simsopt dA_by_dX[..., j, k] = d A_k / d x_j
             plasma_ct["xsec"] = _to_jax_layout(v * np.einsum("pjk,pk->pj", c["dA"], c["ts"]))
             plasma_ct["xsec_tangent"] = _to_jax_layout(v * c["A"])
+        if "net_poloidal_current" in cotangents:
+            v = float(np.asarray(cotangents["net_poloidal_current"]).ravel()[0]) / self.current_norm
+            self.field.set_points(self.loop)
+            d_coils += self.field.B_vjp(np.ascontiguousarray(v * self.loop_dl / MU0))
+            plasma_ct["rbtor"] = np.asarray(-v * self.current_sign * 2.0 * np.pi / MU0)
         return d_coils, {self.plasma: plasma_ct}
 
 
@@ -634,6 +766,64 @@ class WeightedSum(Optimizable):
         for owner, ct in parts.items():
             derivative += owner.pullback(ct)
         return derivative
+
+
+def coil_stellsym_error(coils):
+    """Largest distance from the stellarator image ``(x, -y, -z)`` of a coil point to the coil set, m (0: symmetric).
+
+    :class:`PlasmaCoilInterface` constrains only the stellarator-odd B.n harmonics, so it cannot see the even B.n of a
+    coil set that lost its symmetry -- log this next to the B.n residuals.
+    """
+    g = np.array([c.curve.gamma() for c in coils])
+    points = g.reshape(-1, 3)
+    image = points * np.array([1.0, -1.0, -1.0])
+    worst = 0.0
+    for chunk in np.array_split(np.arange(image.shape[0]), max(1, image.shape[0] // 512)):
+        d = np.linalg.norm(image[chunk][:, None, :] - points[None, :, :], axis=-1)
+        worst = max(worst, float(np.max(np.min(d, axis=1))))
+    return worst
+
+
+# CurveXYZFourier coefficients that are odd under the stellarator symmetry (x, y, z)(t) -> (x, -y, -z)(-t): a curve that
+# is its own image, with t = 0 on the symmetry line, has x even and y, z odd in t, i.e. these coefficients are all zero
+_STELLSYM_ODD_PREFIXES = ("xs(", "yc(", "zc(")
+
+
+def fix_self_symmetric_coil_parity(base_curves, tol=1e-9):
+    """Fix the symmetry-breaking coefficients of base curves that are their own stellarator image.
+
+    A coil lying across a symmetry plane (designA's two coils at phi = +-90 deg) is its own stellarator image. Its free
+    ``CurveXYZFourier`` stays symmetric only while the coefficients named in ``_STELLSYM_ODD_PREFIXES`` stay zero, and
+    nothing else holds them there: with them free, the B.n constraints (odd harmonics only) let the optimizer break the
+    symmetry at no cost -- the final coils of designA_L2_beta1 / _vc_beta1 / _vc_free_beta1 are 18 / 4.3 / 9.3 mm off
+    symmetry, and the example run 2149 grew an even B.n of 1.9e-2 while its odd part fell to 9e-4.
+
+    Only curves whose own points map onto themselves under ``(x, -y, -z)`` (to ``tol`` m) are touched, so circular
+    coils from ``create_equally_spaced_curves`` (not on a symmetry plane, many coefficients zero but free) are left
+    alone. Returns ``(n_fixed, notes)``: the number of coefficients fixed and a list of human-readable notes.
+    """
+    n_fixed, notes = 0, []
+    for curve in base_curves:
+        if type(curve).__name__ != "CurveXYZFourier":
+            continue
+        g = curve.gamma()
+        image = g * np.array([1.0, -1.0, -1.0])
+        err = float(np.max(np.min(np.linalg.norm(image[:, None, :] - g[None, :, :], axis=-1), axis=1)))
+        if err > tol:
+            continue                                      # not its own image: its symmetry partner is another coil
+        odd = [(name, value) for name, value in zip(curve.local_full_dof_names, curve.local_full_x)
+               if name.startswith(_STELLSYM_ODD_PREFIXES)]
+        scale = float(np.max(np.abs(curve.local_full_x)))
+        if any(abs(value) > 1e-12 * scale for _, value in odd):
+            notes.append(f"{curve.name}: its own stellarator image, but not parametrized with t = 0 on the symmetry "
+                         "line (odd-parity coefficients nonzero); left free -- watch the coil symmetry error")
+            continue
+        newly = [name for name, _ in odd if curve.is_free(name)]
+        for name in newly:
+            curve.fix(name)
+        n_fixed += len(newly)
+        notes.append(f"{curve.name}: its own stellarator image; fixed {len(newly)} odd-parity coefficients")
+    return n_fixed, notes
 
 
 def _polyline_self_intersects(R, Z):

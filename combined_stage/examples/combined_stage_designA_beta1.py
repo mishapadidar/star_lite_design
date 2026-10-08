@@ -34,7 +34,7 @@ Differences to combined_stage_simple.py:
 
 Not included: designA's double null. The X-point field line is not tracked
 here, so nothing keeps it; combined_stage_vmex.py (double_null section)
-does that, see configs/designA_L2_vc_beta1.yaml for the production setup.
+does that, see configs/designA_L2_vc_beta1_stellsym.yaml for the production setup.
 
 Run on a compute node:
 
@@ -56,7 +56,8 @@ from simsopt.objectives import QuadraticPenalty
 from star_lite_design.utils.augmented_lagrangian import AugmentedLagrangian, solve_augmented_lagrangian
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.vmex_combined_stage import (CoilPlasmaDistance, PlasmaCoilInterface, VmexPlasma,
-                                                        VmexQuasisymmetry, WeightedSum)
+                                                        VmexQuasisymmetry, WeightedSum, coil_stellsym_error,
+                                                        fix_self_symmetric_coil_parity)
 
 STAR_LITE = Path(__file__).resolve().parents[2]
 
@@ -220,21 +221,10 @@ print(f"{len(coils)} coils from {len(base_curves)} base curves (order {base_curv
 # Nothing else enforces that, and the B·n constraints above cannot see the even B·n
 # a broken coil makes: with these dofs free, the coils drifted 7 mm off symmetry and
 # rms B·n/B grew 1.3 % -> 1.95 %, all of it stellarator-even (jobs 2147, 2149).
-for b in base_curves:
-    for name, value in zip(b.local_full_dof_names, b.local_full_x):
-        if value == 0.0:
-            b.fix(name)
+n_fixed, _ = fix_self_symmetric_coil_parity(base_curves)
 
 
-def coil_symmetry_error():
-    """Largest distance from the stellarator image (x, -y, -z) of a coil point to the coil set, m."""
-    g = np.array([c.curve.gamma() for c in coils])
-    mirror = g * np.array([1.0, -1.0, -1.0])
-    return max(float(np.min(np.linalg.norm(mirror[i][:, None, None] - g[None], axis=-1))) for i in range(len(g)))
-
-
-print(f"fixed {sum(b.local_full_dof_size - b.local_dof_size for b in base_curves)} odd-parity coil coefficients; "
-      f"coil symmetry error {coil_symmetry_error():.1e} m")
+print(f"fixed {n_fixed} odd-parity coil coefficients; coil symmetry error {coil_stellsym_error(coils):.1e} m")
 
 bs = BiotSavart(coils)      # for diagnostics / output
 curves_to_vtk(curves, out_dir / "curves_init")
@@ -352,7 +342,7 @@ w = plasma.outputs()["weights"]
 f = c["f"] * interface.B_ref / np.sqrt(plasma.outputs()["Bin_mag2"])
 f_image = np.roll(np.roll(f[::-1, ::-1], 1, axis=0), 1, axis=1)     # f(-phi, -theta) on the endpoint-free grid
 print(f"rms B·n/B: stellarator-odd {np.sqrt(np.sum(w * (0.5 * (f - f_image)) ** 2)):.2e}, "
-      f"even {np.sqrt(np.sum(w * (0.5 * (f + f_image)) ** 2)):.2e}; coil symmetry error {coil_symmetry_error():.1e} m")
+      f"even {np.sqrt(np.sum(w * (0.5 * (f + f_image)) ** 2)):.2e}; coil symmetry error {coil_stellsym_error(coils):.1e} m")
 
 print("""
 ################################################################################

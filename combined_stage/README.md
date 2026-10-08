@@ -465,7 +465,17 @@ settings + guard, vacuum) restarts from `dn_introduce` outer 1 (speed ratio 0.35
 
 ### designA x 2 at beta 1 % (2026-09-15)
 
-`configs/designA_L2_beta1.yaml` optimizes designA scaled uniformly by 2 (R 1.0 m, a 0.15 m, A 6.67, nfp 2, its 6 coils)
+> **Superseded (2026-10-01).** The three designA x 2 configs of this section moved to `configs/_archive/`; their runs are
+> invalid. designA's phi = +-90 deg coil is its own stellarator image, its odd-parity coefficients were free, and the
+> B.n constraints see only stellarator-odd harmonics, so the coils left symmetry unseen (final coils 0.15-0.34 m off;
+> `utils/vmex_combined_stage.coil_stellsym_error`). `combined_stage_vmex.py` now pins those coefficients
+> (`coils.fix_stellsym_parity`, default true) and logs `coil_symmetry_error` every outer iteration. Their Jacobi scaling +
+> rho0 1000 / growth 2 also never moved this device (run 912: 13 outer iterations of 1-step inner solves, then divergence).
+> Use `configs/designA_L2_vc_beta1_stellsym.yaml` (B.n band m <= 6, |n| <= 7; fixed scaling 0.1 / 0.1 / `current_step` 0.1;
+> rho0 10, growth 10): run `designA_L2_vc_beta1_stellsym_v2` reached rms B.n/B 0.17 % (seed 1.27 %), f_QS 0.018 (seed
+> 0.060), symmetric coils, double null kept. The notes below describe the original setup.
+
+`configs/_archive/designA_L2_beta1.yaml` optimizes designA scaled uniformly by 2 (R 1.0 m, a 0.15 m, A 6.67, nfp 2, its 6 coils)
 with the coil currents doubled (same |B|, 0.087 T on axis) at beta 1 %, keeping the double null as a tracked X-point
 (designA's solved periodic field line, scaled with the device). `tools/scale_device.py` scales the design archive (through
 `simflare/workflows/scaling/scale_design.py`, which now also scales the X-point lines, all configs' surfaces and coils,
