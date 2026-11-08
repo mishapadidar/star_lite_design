@@ -1,0 +1,133 @@
+# designA x 10 (R 5.0 m, a 0.75 m, A 6.67, nfp 2, designA's own 6 coils, B0 0.0874 T = designA's field; rescale the
+# currents to any B0 afterwards -- the field-line geometry does not depend on it), single-stage AL up to beta 2 %,
+# FREE X-line (flatness needs it), helical variable-radius vessel. 2026-10-21, user's limits:
+#   X-line distance to the boundary 0.1..1.0 m; coil length <= 35 m; max curvature 10.6 /m = designA's own (HTS tape,
+#   absolute, not scaled); coil-plasma >= 1.5 m; vessel between plasma and coils; X-line max |z - mean z| <= 0.30 m.
+# Everything else is the validated x 2 run (configs/designA_L2_vc_beta1_stellsym.yaml -> designA_L2_vc_beta1_stellsym_v2)
+# moved to x 10 so the optimizer sees the SAME problem: lengths x 5, and every unit-carrying weight / step by the power
+# of 5 its penalty carries (QuadraticPenalty length m^2 -> /25, LpCurveCurvature p 2 1/m -> x5, MSC 1/m^4 -> x625,
+# CurveCurveDistance m^4 -> /625, CoilPlasmaDistance / X-point distance m^2 -> /25, coil_step and plasma_step are
+# metres -> x5 (VMEX ESS scales are dimensionless)). B.n, G, field-line residual and f_QS are dimensionless.
+# 2026-10-27 beta scan: same device/limits/solver as designA_L10_beta2.yaml, beta rungs 0.5/1.0/1.5/2.0/2.5 %, EVERY
+# rung (vacuum included) at vmex.ns=51 (user: 51 surfaces for all VMEX runs), Mercier (s >= 0.1) on every beta rung,
+# 10 outers per rung (designA_L10_beta2 beta2_G plateaued from outer ~6 of 25 at ~1.5 h/outer, ns 16).
+# Stage 0 re-polishes designA_L10_beta2/00_refit_vac (ns 16) at ns 51: pass its finals as first-stage seeds.
+# Seeds: runs/combined_stage/seeds/{designA_L10.json, input.designA_L10, xpoint.designA_L10_free_seed.json}
+# (tools/scale_device.py, SCALED OK 1.8e-11; the X-line seed is designA's solved X-point, as for x 2).
+config: ../config.yaml
+common:
+- design=/data/common/raffael.wendlinger/simflare/runs/combined_stage/seeds/designA_L10.json
+- coil_seed.type=archive
+- coils.fix_stellsym_parity=true
+- vmex.mpol=12
+- vmex.ntor=10
+- vmex.nphi=24
+- vmex.ntheta=20
+- vmex.max_mode=2
+- vmex.ns=51
+- consistency.mode=fourier
+- consistency.mpol=6
+- consistency.ntor=7
+- plasma_objective.iota_weight=1000.0
+- plasma_objective.iota_escalate=true
+# coils (x 10 units; B0 0.0874 T: designA x 10 carries 411 kA max)
+- coils.length_threshold=35.0
+- coils.length_weight=40.0
+- coils.curvature_threshold=10.6
+- coils.curvature_weight=5.0e-3
+- coils.msc_threshold=0.204
+- coils.msc_weight=6.25
+- coils.coil_coil_threshold=1.45
+- coils.coil_coil_weight=1.6e+4
+- coils.coil_plasma_threshold=1.5
+- coils.coil_plasma_weight=400.0
+- coils.current_threshold=6.0e+5
+- coils.current_weight=1.0e+6
+- coils.escalation_max_factor=1.0e+4
+# solver: the x 2 run's settings, steps x 5
+- scaling.mode=fixed
+- scaling.plasma_factor=1.0
+- scaling.plasma_step=0.5
+- scaling.coil_step=0.5
+- scaling.current_step=0.1
+- augmented_lagrangian.penalty=10.0
+- augmented_lagrangian.penalty_growth=10.0
+- augmented_lagrangian.penalty_max=1.0e+6
+- 'augmented_lagrangian.eta0={default: 1.0e-2, boundary_regularity: 5.0e-3}'
+- 'augmented_lagrangian.ctol={default: 3.6e-4, fieldline: 3.0e-4, boundary_regularity: 5.0e-3}'
+- augmented_lagrangian.gtol=1.0e-6
+- augmented_lagrangian.inner_maxiter=100
+- boundary_guard.min_speed_ratio=0.05
+- boundary_regularity.enabled=true
+- boundary_regularity.min_speed_ratio=0.15
+# free X-line (designA's own X-point as seed)
+- double_null.enabled=true
+- double_null.mode=free
+- double_null.free_order=16
+- double_null.fieldline_penalty=1000.0
+- double_null.hyperbolicity_margin=0.2
+- double_null.hyperbolicity_weight=1.0e-3
+- double_null.distance_min=0.1
+- double_null.distance_max=1.0
+- double_null.distance_weight=400.0
+- double_null.flatness_threshold=0.30
+- double_null.flatness_weight=10.0
+- double_null.flatness_pull_weight=0.1
+# vessel: helical tube, centre line order 2, radius order 2; plasma + X-line >= 0.2 m inside, coils >= 0.3 m outside
+- vessel.enabled=true
+- vessel.family=helical
+- vessel.num_modes=2
+- vessel.radius_modes=2
+- vessel.radius=null
+- vessel.margin=0.2
+- vessel.margin_weight=10.0
+- vessel.coil_clearance=0.3
+- vessel.clearance_weight=10.0
+- vessel.xline_distance_weight=0.0
+stages:
+- name: refit_vac
+  set:
+  - vmex.plasma_field=vacuum
+  - consistency.field_strength=toroidal_flux
+  - plasma_objective.iota_floor=0.18
+  - augmented_lagrangian.outer_maxiter=5
+- name: beta0.5_G
+  beta_seed: 0.005
+  set:
+  - vmex.plasma_field=virtual_casing
+  - consistency.field_strength=net_poloidal_current
+  - plasma_objective.iota_floor=0.115
+  - 'plasma_objective.mercier={enabled: true, margin: 0.0, smoothing: 1.0e-3, weight: 1.0e-4, s_min: 0.1}'
+  - augmented_lagrangian.outer_maxiter=10
+- name: beta1_G
+  beta_seed: 0.010
+  set:
+  - vmex.plasma_field=virtual_casing
+  - consistency.field_strength=net_poloidal_current
+  - plasma_objective.iota_floor=0.115
+  - 'plasma_objective.mercier={enabled: true, margin: 0.0, smoothing: 1.0e-3, weight: 1.0e-4, s_min: 0.1}'
+  - augmented_lagrangian.outer_maxiter=10
+- name: beta1.5_G
+  beta_seed: 0.015
+  set:
+  - vmex.plasma_field=virtual_casing
+  - consistency.field_strength=net_poloidal_current
+  - plasma_objective.iota_floor=0.115
+  - 'plasma_objective.mercier={enabled: true, margin: 0.0, smoothing: 1.0e-3, weight: 1.0e-4, s_min: 0.1}'
+  - augmented_lagrangian.outer_maxiter=10
+- name: beta2_G
+  beta_seed: 0.020
+  set:
+  - vmex.plasma_field=virtual_casing
+  - consistency.field_strength=net_poloidal_current
+  - plasma_objective.iota_floor=0.115
+  - 'plasma_objective.mercier={enabled: true, margin: 0.0, smoothing: 1.0e-3, weight: 1.0e-4, s_min: 0.1}'
+  - augmented_lagrangian.outer_maxiter=10
+- name: beta2.5_G
+  beta_seed: 0.025
+  set:
+  - vmex.plasma_field=virtual_casing
+  - consistency.field_strength=net_poloidal_current
+  - plasma_objective.iota_floor=0.115
+  - 'plasma_objective.mercier={enabled: true, margin: 0.0, smoothing: 1.0e-3, weight: 1.0e-4, s_min: 0.1}'
+  - augmented_lagrangian.outer_maxiter=10

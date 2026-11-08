@@ -22,7 +22,18 @@ s.t.         B·n harmonics of (B_plasma(s) + B_coil(c)) / B_ref = 0   (bnormal)
              one field-strength condition:
                (∮A_coil·dl − Φ_target)/|Φ_target| = 0, |Φ_target| = PHIEDGE   (toroidal_flux, default)
                or ⟨|B_out|² − |B_in|² − 2μ0 p_edge⟩ / B_ref² = 0            (pressure_balance)
+               or (∮B_coil·dl/μ0 − 2πG/μ0) / |I_seed| = 0, G = Boozer G     (net_poloidal_current)
+(examples/combined_stage_simple.py only: no field-strength condition, pointwise pressure balance in the
+ objective instead, VMEX's finite-β form: + w · ½ Σ_i [√a_i (|B_out|² − |B_in|² − 2μ0 p_edge)_i / B_ref²]²)
+checked at the end of every run:
+             pointwise (|B_out|² − |B_in|² − 2μ0 p_edge)/|B_in|² and B·n on a finer grid   (final_check)
 ```
+
+**Field-strength condition and the final pressure-balance check:** see
+[docs/field_strength_condition.md](docs/field_strength_condition.md) for why B·n
+needs a scale condition, the derivation of the Boozer-G condition (exact at any β;
+use it with `virtual_casing` at finite β), the pointwise pressure-balance penalty
+implemented as in VMEX's own finite-β example, and the end-of-run check.
 
 * `s` — VMEX boundary Fourier modes up to `max_mode` (optionally the current profile);
   `c` — coil shapes and currents.
@@ -43,9 +54,11 @@ s.t.         B·n harmonics of (B_plasma(s) + B_coil(c)) / B_ref = 0   (bnormal)
   coils off. One scalar, independent of the B·n rows. `toroidal_flux` (default)
   requires the coil flux through the φ = 0 boundary cross-section, `∮A·dl`
   evaluated on the cross-section computed straight from the boundary Fourier
-  coefficients, to equal PHIEDGE: every gradient is analytic. `pressure_balance`
-  is the finite-beta alternative but needs `|B_in|²` at grid points on the boundary,
-  whose gradient is gauge-sensitive (see validation).
+  coefficients, to equal PHIEDGE: every gradient is analytic, but it is exact only
+  in vacuum (the coil flux misses the plasma's diamagnetic flux). `pressure_balance`
+  is a finite-beta alternative but needs `|B_in|²` at grid points on the boundary,
+  whose gradient is gauge-sensitive (see validation). `net_poloidal_current`
+  (Boozer G, VMEX `rbtor`) is exact at any beta and is the finite-beta choice.
 * **Plasma field model** (`vmex.plasma_field`): `vacuum` sets `B_plasma = 0`, the
   vacuum single-stage formulation, right for Star_Lite's β ≈ 3e-4 (where the
   virtual-casing plasma field is at the level of its own discretization error);

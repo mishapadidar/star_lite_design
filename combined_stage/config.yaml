@@ -21,6 +21,8 @@ vmex:
   ntor: null              # faster (mpol=ntor=8: ~3.4x per evaluation on designA) but drops higher harmonics
   current_dofs: null      # current-profile dofs (null = fixed profile)
   vary_major_radius: false
+  restart_wout: null      # wout to hot-restart the seed equilibrium from if its cold solve fails (run_ladder.py passes
+                          # the previous stage's final wout)
   nphi: 16                # virtual-casing grid per field period
   ntheta: 16
   vc_digits: 3
@@ -32,6 +34,8 @@ plasma_objective:         # f_QS = 0.5 |r|^2 of these VMEX terms
   qs_surfaces: [0.1, 0.9, 8]
   helicity_m: 1
   helicity_n: 0           # 0 = QA
+  symmetry: qs            # qs (QuasisymmetryRatioResidual, helicity above) | qi (vmex QIResidual on qs_surfaces)
+  qi: {}                  # QIResidual options (mboz, nboz, nphi, nalpha, n_levels, softness, *_weight)
   aspect_target: null     # null = hold the seed's aspect ratio
   aspect_weight: 1.0
   iota_floor: null        # one-sided floor on min|iota|
@@ -45,12 +49,16 @@ consistency:              # equality constraints enforced by the augmented Lagra
   mode: fourier           # fourier (B.n harmonics) | points
   mpol: 4                 # B.n harmonics m <= mpol, |n| <= ntor
   ntor: 4
-  field_strength: toroidal_flux  # pins the total poloidal coil current. toroidal_flux: coil flux through
-                                # the phi=0 boundary cross-section = PHIEDGE (exact gradients, vacuum);
-                                # pressure_balance: finite beta (|B_in|^2 gradient is gauge-sensitive, README)
+  field_strength: toroidal_flux  # pins the coil-current SCALE that B.n = 0 cannot see (docs/field_strength_condition.md).
+                                # toroidal_flux: coil flux through the phi=0 boundary cross-section = PHIEDGE (exact
+                                #   gradients; exact only in VACUUM -- at finite beta the diamagnetic flux is missing);
+                                # pressure_balance: mean of |B_out|^2 - |B_in|^2 - 2 mu0 p_edge over the boundary
+                                #   (finite beta; one scalar, carries the ~2 % virtual-casing gradient error, README);
                                 # net_poloidal_current: the coils' linked current (oint B_coil.dl/mu0) = the net
-                                # poloidal current 2 pi G/mu0 the equilibrium needs outside its boundary (Boozer G,
-                                # VMEX rbtor). Exact at any beta, converged at ns 16, gradient checked (job 2119)
+                                #   poloidal current 2 pi G/mu0 the equilibrium needs outside its boundary (Boozer G,
+                                #   VMEX rbtor). Exact at any beta, converged at ns 16, gradient checked (job 2119).
+                                #   USE THIS at finite beta (with vmex.plasma_field: virtual_casing).
+                                # null: no scale condition -- only with coils.fix_currents.
   p_edge: 0.0
   bnormal_band: null      # tau: treat the B.n harmonics as a BAND |h| <= tau (inequality rows) instead of h = 0.
                           # Equalities keep pulling toward an unreachable zero after the target is met, at the
@@ -69,10 +77,26 @@ bootstrap:                # self-consistent bootstrap current (Redl 2021 via vme
   # needs vmex.current_dofs (AC coefficients + CURTOR as design variables), NCURR = 1 and a nonzero seed AC shape
   # (tools/make_bootstrap_seed.py writes a self-consistent seed namelist)
 
+vessel:                   # array/boozer_all.py vessel inside the optimization (plasma + X-line inside, coils outside)
+  enabled: false
+  family: helical         # helical (boozer_all vessel_id 3/4) | pipe (5000 + nseg: welded straight pipes) | torus (2)
+  num_modes: 2            # helical centre-line Fourier order (also the pipe's seed curve)
+  radius_modes: 2         # helical radius R(t) order: 0 = constant radius (vessel_id 3), 2 = vessel_id 4
+  nseg: null              # pipe: number of legs, a multiple of nfp
+  radius: null            # null: seeded so the plasma and the X-line sit exactly `margin` inside
+  seed_file: null         # a previous stage's vessel_final.json (run_ladder.py)
+  margin: 0.1             # plasma boundary and X-line >= margin inside the vessel
+  margin_weight: 10.0
+  coil_clearance: 0.12    # coils >= coil_clearance outside the vessel (boozer_all: room for trims)
+  clearance_weight: 10.0
+  xline_distance_weight: 10.0      # boozer_all --distance: X-line at a constant gap to the vessel
+  xline_distance_threshold: 0.001  # |gap - mean gap| <= this
+
 augmented_lagrangian:
   penalty: 10.0
   penalty_growth: 10.0
   penalty_max: 1.0e+8
+  penalty_blocks: {}       # starting penalty by block key, e.g. {bnormal: 1.0e+5}; others start at penalty
   eta0: null              # first feasibility tolerance (null = 1/rho0^0.1, sized for O(1) constraints;
                           # our B.n harmonics start ~1e-5-1e-2, so set it explicitly, e.g. 1.0e-3)
   omega0: null            # first inner gradient tolerance (null = 1/rho0)
@@ -99,6 +123,8 @@ coils:                    # engineering penalties (thresholds as in array/boozer
   coil_plasma_weight: 1.0e+4
   current_threshold: 60000.0
   current_weight: 1.0e+6
+  hard: []                # limits held as augmented-Lagrangian rows instead of escalated weights (PenaltyConstraint):
+                          # any of length, curvature, coil_coil, coil_plasma, coil_xline
   escalate: true          # array/boozer_all.py practice: after each outer iteration multiply the weight of every
   escalation_factor: 10.0 # range violated by more than escalation_tol (relative) by escalation_factor
   escalation_tol: 1.0e-2  # (fixed weights lose to the growing augmented-Lagrangian terms: on the nfp=4
@@ -135,6 +161,21 @@ double_null:              # keep the (stellarator-symmetric) double-null X-point
   distance_weight: 1.0e+4
   newton_tol: 1.0e-13
   newton_maxiter: 40
+  # X-line flatness (array/boozer_all.py --Z, FieldLineMeanZ): max |z - mean z| along the (free) X-line <= threshold,
+  # escalated like the ranges, plus a fixed-weight pull on the whole deviation (threshold 0): user requirement
+  # 2026-10-18 for ALL one-stage VMEX runs -- within 10 mm, and the flatter the better. Free X-lines only.
+  flatness_weight: 10.0
+  flatness_threshold: 0.01
+  flatness_pull_weight: 10.0
+# End-of-run free-boundary check (reported in the log + <outdir>/final_check.yaml, never optimised): pointwise B.n and
+# total-pressure balance (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge)/|B_in|^2 with virtual casing on an independent grid per
+# field period, finer than the optimisation grid so an aliased optimum shows up. ~5 s and ~7 GB at 32x32; run on 2-4
+# cores like any virtual-casing run (sbatch/run_stage.sbatch). docs/field_strength_condition.md
+final_check:
+  enabled: true
+  nphi: 32
+  ntheta: 32
+  digits: 4
 # snapshot (coils, VMEX boundary, magnetic axis, X-point line -> <outdir>/snapshots/) every N L-BFGS-B iterations; 0 = off
 history_every: 5
 # reject trial boundaries (before the VMEX solve) that self-intersect or whose poloidal speed |dx/dtheta| drops below

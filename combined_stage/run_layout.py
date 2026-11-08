@@ -4,6 +4,7 @@
     <outdir>/state/     checkpoint.npz, al_state.yaml, scaling_D.npy, coil_weights*.yaml   (--resume state)
     <outdir>/coils/     coils_<tag>.json
     <outdir>/xpoints/   xpoint_<tag>.json
+    <outdir>/vessel/    vessel_<tag>.json   (vessel SDF, runs with a `vessel` section)
     <outdir>/inputs/    input.combined_stage_<tag>   (VMEX boundary namelists)
     <outdir>/wout/      wout_combined_stage_final.nc
     <outdir>/logs/      run.log, SLURM logs
@@ -31,6 +32,8 @@ def kind_of(name):
         return "coils"
     if name.startswith("xpoint_") and name.endswith(".json"):
         return "xpoints"
+    if name.startswith("vessel_") and name.endswith(".json"):
+        return "vessel"
     if name.startswith("input."):
         return "inputs"
     if name.startswith("wout_") and name.endswith(".nc"):

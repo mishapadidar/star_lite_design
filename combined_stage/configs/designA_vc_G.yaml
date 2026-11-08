@@ -1,0 +1,118 @@
+# designA AS IS (R 0.5 m, nfp 2, 6 coils, its native beta ~3e-4 seed), virtual casing, tracked double null --
+# Boozer-G field-strength condition + final pointwise pressure-balance check (2026-10-13).
+# Built from configs/designA_L2_vc_beta1_G.yaml (the x 2 variant) with every length scale halved back:
+#   coils: length 8 -> 4.0 m (designA 3.03 / 3.09), curvature 5.3 -> 10.6 /m (designA max 10.47), msc 5.1 -> 20.4,
+#     coil-coil 0.29 -> 0.145 m, coil-plasma 0.24 -> 0.12 m, current 120 -> 60 kA (Star_Lite limit; designA 27.7 / 41.1 kA)
+#   double_null distance 0.06..0.28 -> 0.03..0.14 m
+#   iota_floor 0.18 (designA's vacuum-like seed: iota axis / edge -0.225 / -0.192; the L2 floor 0.115 was set for beta 1 %)
+# Seed: runs/combined_stage/seeds/input.designA_opt_beta0p03_mpol11.fixed (MPOL 11 fix of the truncation bug).
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 12
+  ntor: 10
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 24
+  ntheta: 20
+  vc_digits: 3
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.18
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 6
+  ntor: 7
+  field_strength: net_poloidal_current
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 10.0
+  penalty_growth: 10.0
+  penalty_max: 1000000.0
+  eta0: 0.01
+  omega0: null
+  ctol: 0.00036
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 4.0
+  length_weight: 1000.0
+  curvature_threshold: 10.6
+  curvature_weight: 0.001
+  msc_threshold: 20.4
+  msc_weight: 0.01
+  coil_coil_threshold: 0.145
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.12
+  coil_plasma_weight: 10000.0
+  current_threshold: 60000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: fixed
+  jacobi_step: 0.01
+  jacobi_cap: 10.0
+  plasma_factor: 1.0
+  plasma_step: 0.1
+  coil_step: 0.1
+  current_step: 0.1
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: track
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: null
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 100.0
+  distance_min: 0.03
+  distance_max: 0.14
+  distance_weight: 10000.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64
+final_check:
+  enabled: true
+  nphi: 32
+  ntheta: 32
+  digits: 4

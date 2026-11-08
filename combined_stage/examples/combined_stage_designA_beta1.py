@@ -15,10 +15,30 @@ the boundary and designA's coils adapt TOGETHER to the finite-beta plasma:
                           coil-plasma to the MOVING boundary, |I| <= 60 kA)
 
     subject to  ((B_plasma(s) + B_coil(c))·n)_mn / B_ref = 0     m <= BN_MPOL, |n| <= BN_NTOR
-                < |B_out|^2 - |B_in|^2 - 2 mu0 p_edge > / B_ref^2 = 0
+                (I_coil(c) - 2 pi G(s) / mu0) / |I_seed| = 0
 
 in one augmented-Lagrangian solve with exact gradients (VMEX implicit adjoint
 through equilibrium + virtual casing, simsopt derivatives for the coils).
+
+The second constraint fixes the coil-current SCALE, which B·n cannot see
+(multiplying every current by the same factor keeps B·n = 0). It is the
+Boozer-G condition (field_strength="net_poloidal_current"):
+
+* G(s) = VMEX rbtor = B_phi covariant at the boundary, 2 pi G / mu0 = the
+  poloidal current the equilibrium needs OUTSIDE its boundary;
+* I_coil = oint B_coil·dl / mu0 around a fixed circle through the plasma =
+  the current the coils link through the torus hole (NOT the sum of the coil
+  currents: simsopt's stellarator-symmetric copies carry flipped signs, the
+  plain sum is 0).
+
+By Ampere's law on a toroidal loop lying on the boundary the two must agree,
+and the plasma's own poloidal (diamagnetic, Pfirsch-Schlueter) currents flow
+inside the boundary and drop out, so the condition is exact at any beta. The
+coil flux = PHIEDGE condition is not (it misses the diamagnetic flux), and the
+mean pressure-balance condition of combined_stage_simple.py is a grid average
+with the ~2 % virtual-casing gradient error. Derivation and comparison:
+../docs/field_strength_condition.md. The pointwise pressure balance is still
+CHECKED at the end (interface_check), not constrained.
 
 Differences to combined_stage_simple.py:
 
@@ -57,7 +77,8 @@ from star_lite_design.utils.augmented_lagrangian import AugmentedLagrangian, sol
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.vmex_combined_stage import (CoilPlasmaDistance, PlasmaCoilInterface, VmexPlasma,
                                                         VmexQuasisymmetry, WeightedSum, coil_stellsym_error,
-                                                        fix_self_symmetric_coil_parity)
+                                                        fix_self_symmetric_coil_parity, interface_check,
+                                                        net_poloidal_current_output)
 
 STAR_LITE = Path(__file__).resolve().parents[2]
 
@@ -180,8 +201,11 @@ objective_terms = [
     (vopt.aspect_ratio, aspect0, 1.0),
     (iota_floor, 0.0, IOTA_WEIGHT),
 ]
+# extra_outputs "rbtor": the edge Boozer G of the live equilibrium, returned by the SAME jitted VMEX forward, so the
+# G constraint's plasma gradient is one more scalar on the shared adjoint
 plasma = VmexPlasma(inp, objective_terms, max_mode=MAX_MODE, nphi=VC_NPHI, ntheta=VC_NTHETA,
-                    vc_digits=VC_DIGITS, plasma_field="virtual_casing", restart_from=eq0)
+                    vc_digits=VC_DIGITS, plasma_field="virtual_casing", restart_from=eq0,
+                    extra_outputs={"rbtor": net_poloidal_current_output()})
 f_qs = VmexQuasisymmetry(plasma)
 
 out0 = plasma.outputs()
@@ -235,8 +259,10 @@ print("""
 ################################################################################
 """)
 # The consistency constraints get their OWN BiotSavart: they move its evaluation points.
+# field_strength="net_poloidal_current": ONE equality, (I_coil - 2 pi G/mu0)/|I_seed| (see the docstring). Linear in
+# the coil currents; its sign convention (loop vs VMEX angle orientation) is fixed at the seed.
 interface = PlasmaCoilInterface(plasma, BiotSavart(coils), mode="fourier", mpol=BN_MPOL, ntor=BN_NTOR,
-                                field_strength="pressure_balance", p_edge=0.0)
+                                field_strength="net_poloidal_current", p_edge=0.0)
 Jls = [CurveLength(c) for c in base_curves]
 Jccdist = CurveCurveDistance(curves, CC_THRESHOLD)
 Jcsdist = CoilPlasmaDistance(plasma, curves, CS_THRESHOLD)
@@ -263,10 +289,12 @@ D[plasma_mask] = PLASMA_STEP * np.asarray(plasma.problem.scales)[plasma.dofs_fre
 D[current_mask] = CURRENT_STEP * np.abs(x_seed[current_mask])
 res0 = interface.residuals()
 print(f"dofs: {x_seed.size} = {plasma_mask.sum()} plasma + {(~plasma_mask & ~current_mask).sum()} coil shape + "
-      f"{current_mask.sum()} current; constraints: {res0['bnormal'].size} B·n harmonics + 1 pressure balance")
+      f"{current_mask.sum()} current; constraints: {res0['bnormal'].size} B·n harmonics + 1 net poloidal current (G)")
 print(f"seed: f_QS = {f_qs.J():.3e} ({', '.join(f'{k} {v:.2e}' for k, v in plasma.term_costs().items())}), "
       f"max |B·n harmonic| = {np.max(np.abs(res0['bnormal'])):.3e}, rms(B·n/B) = {interface.rms_bnormal_over_B():.3e}, "
-      f"pressure balance = {res0['pressure_balance'][0]:+.3e}")
+      f"G residual = {res0['net_poloidal_current'][0]:+.3e} (I_coil {interface.current_seed[0] / 1e6:.4f} MA vs "
+      f"2 pi G/mu0 {interface.current_seed[1] / 1e6:.4f} MA), "
+      f"pointwise pressure jump rms = {interface.pressure_balance_stats()['rms']:.3e} (not constrained)")
 print(f"seed penalties (all should be 0): length {sum(QuadraticPenalty(J, LENGTH_MAX, 'max').J() for J in Jls):.2e}, "
       f"curvature {Jcurv.J():.2e}, coil-coil {Jccdist.J():.2e}, coil-plasma {Jcsdist.J():.2e}, current {Jcurrent.J():.2e}")
 
@@ -321,7 +349,9 @@ def report(record):
     print(f"[outer {record['outer']}] {record['inner_nit']} inner it ({time.time() - t_start:.0f}s): "
           f"L = {record['L']:.4e}, f_QS = {f_qs.J():.4e}, min|iota| = {np.min(np.abs(iota_now)):.3f}, "
           f"max|B·n harmonic| = {np.max(np.abs(res['bnormal'])):.2e}, rms(B·n/B) = {interface.rms_bnormal_over_B():.2e}, "
-          f"pressure balance = {res['pressure_balance'][0]:+.2e}, lengths = {[round(float(J.J()), 3) for J in Jls]}, "
+          f"G residual = {res['net_poloidal_current'][0]:+.2e}, "
+          f"pressure jump rms = {interface.pressure_balance_stats()['rms']:.2e}, "
+          f"lengths = {[round(float(J.J()), 3) for J in Jls]}, "
           f"max kappa = {max(float(np.max(c.kappa())) for c in base_curves):.2f}, "
           f"coil-coil = {Jccdist.shortest_distance():.3f} m, coil-plasma = {Jcsdist.shortest_distance():.3f} m, "
           f"|I| max = {max(abs(c.current.get_value()) for c in coils) / 1e3:.1f} kA, rho = {record['penalties']}",
@@ -364,5 +394,14 @@ BdotN = np.sum(Bbs * s.unitnormal(), axis=2) / np.linalg.norm(Bbs, axis=2)
 s.to_vtk(out_dir / "surf_opt", extra_data={"B_coil_N": BdotN[:, :, None]})
 res = interface.residuals()
 print(f"final: f_QS = {f_qs.J():.4e}, rms((B_plasma + B_coil)·n / B) = {interface.rms_bnormal_over_B():.2e}, "
-      f"pressure balance = {res['pressure_balance'][0]:+.2e}; "
+      f"G residual = {res['net_poloidal_current'][0]:+.2e}; "
       f"VMEX forward/adjoint = {plasma.n_forward}/{plasma.n_backward}; outputs in {out_dir.resolve()}")
+
+# Final check, reported and NOT optimised: pointwise B·n and total-pressure
+# balance on an independent 32 x 32 virtual-casing grid. G fixes the field
+# scale exactly; this shows whether the local |B| on the boundary followed
+# (e ~ 2 d|B|/|B|, so 1e-3 is a 0.05 % field-strength mismatch).
+check = interface_check(plasma, BiotSavart(coils), nphi=32, ntheta=32, digits=4, p_edge=0.0)
+print(f"final check (32x32): rms(B·n/B) = {check['bnormal_rms']:.2e} (max {check['bnormal_max']:.2e}); "
+      f"pressure jump (|B_out|^2 - |B_in|^2)/|B_in|^2 mean {check['pressure_mean']:+.2e}, "
+      f"rms {check['pressure_rms']:.2e}, max {check['pressure_max']:.2e}")

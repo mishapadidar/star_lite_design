@@ -17,16 +17,39 @@ and the problem is
     min_{s, c}  f_QS(s) + LENGTH_WEIGHT * Σ max(CurveLength - L_max, 0)^2
                         + CC_WEIGHT * coil-coil distance penalty
                         + CS_WEIGHT * coil-plasma distance penalty (moving plasma)
+                        + PRESSURE_BALANCE_WEIGHT * 0.5 Σ_i [sqrt(a_i) (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge)_i / B_ref^2]^2
 
     subject to  ((B_plasma(s) + B_coil(c))·n)_mn / B_ref = 0     m <= BN_MPOL, |n| <= BN_NTOR
-                < |B_out|^2 - |B_in|^2 - 2 mu0 p_edge > / B_ref^2 = 0
 
 where s are the VMEX boundary modes, c the coil shapes and currents, f_QS
 the quasi-symmetry residual (plus an aspect-ratio term) of the equilibrium,
 (·)_mn the Fourier harmonics of the vacuum-side normal field on the
 boundary, B_out = B_plasma + B_coil the field just outside and B_in the
-VMEX field just inside. The second (pressure-balance) constraint fixes the
-field strength, which B·n alone cannot see.
+VMEX field just inside, i the boundary grid points and a_i their area
+weights (summing to 1). The last objective term is the ideal-MHD pressure
+balance at EVERY grid point, imposed exactly as VMEX's own finite-beta example
+(vmex/examples/optimization/single_stage_optimization_finite_beta.py) does: a
+weighted least-squares term (weight 1e2 there), not a constraint. It fixes the
+field strength, which B·n alone cannot see, and the local |B| pattern.
+
+Why a field-strength constraint at all: multiplying every coil current by the
+same factor leaves B·n = 0 untouched, so B·n alone leaves the coil-current
+SCALE free. At finite beta the scale is physics (beta = 2 mu0 <p> / B^2 with p
+in pascals), so exactly one more condition must tie the coils to the
+equilibrium's field strength. Here that is the pointwise pressure-balance
+penalty (PressureBalancePenalty, with field_strength=None on the interface):
+why a penalty and not an equality -- one row per grid point is more
+conditions than the boundary and coils can meet exactly, and an augmented-
+Lagrangian block would only grow its penalty. combined_stage_designA_beta1.py
+shows the alternative, the Boozer-G condition
+(field_strength="net_poloidal_current"): ONE exact equality at any beta with a
+clean gradient, while the pressure rows go through the virtual casing and
+inherit its gradient error (below). Comparison and derivation:
+../docs/field_strength_condition.md.
+
+At the end the pointwise B·n and pressure balance are re-checked on an
+independent, finer grid (interface_check), as VMEX's example does, so an
+optimum aliased to the optimisation grid is not accepted.
 
 Compared with stage_two_optimization_finite_beta.py:
 
@@ -65,8 +88,9 @@ from simsopt.geo import (CurveCurveDistance, CurveLength, SurfaceRZFourier, curv
                          create_equally_spaced_curves)
 from simsopt.objectives import QuadraticPenalty
 from star_lite_design.utils.augmented_lagrangian import AugmentedLagrangian, solve_augmented_lagrangian
-from star_lite_design.utils.vmex_combined_stage import (CoilPlasmaDistance, PlasmaCoilInterface, VmexPlasma,
-                                                        VmexQuasisymmetry, WeightedSum)
+from star_lite_design.utils.vmex_combined_stage import (CoilPlasmaDistance, PlasmaCoilInterface,
+                                                        PressureBalancePenalty, VmexPlasma, VmexQuasisymmetry,
+                                                        WeightedSum, interface_check)
 
 # Seed fixed-boundary VMEC namelist (from the VMEX sources next to star_lite_design in ext/):
 VMEX_DATA = Path(__file__).resolve().parents[3] / "vmex" / "examples" / "data"
@@ -96,9 +120,17 @@ R1 = 0.5
 # Number of Fourier modes describing each Cartesian component of each coil:
 order = 5
 
+# Independent virtual-casing grid for the final pointwise pressure-balance / B·n check (per field period):
+CHECK_NPHI = 32
+CHECK_NTHETA = 32
+
 # Constrained B·n harmonics on the plasma boundary (need 2*BN_MPOL < VC_NTHETA, 2*BN_NTOR < VC_NPHI):
 BN_MPOL = 5
 BN_NTOR = 5
+
+# Pointwise pressure balance (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge)/B_ref^2 at every
+# virtual-casing grid point, weight as in VMEX's finite-beta example:
+PRESSURE_BALANCE_WEIGHT = 1e2
 
 # Engineering penalties (active only when violated):
 LENGTH_MAX = 4.0         # m, per coil
@@ -192,8 +224,14 @@ print("""
 ################################################################################
 """)
 # The consistency constraints get their OWN BiotSavart: they move its evaluation points.
+# field_strength=None: the interface carries ONLY the B·n harmonics as constraints.
+# The coil-current scale B·n cannot see (all currents are free above) is fixed by
+# the pointwise pressure-balance penalty below instead; p_edge = 0 at a true edge.
 interface = PlasmaCoilInterface(plasma, BiotSavart(coils), mode="fourier", mpol=BN_MPOL, ntor=BN_NTOR,
-                                field_strength="pressure_balance", p_edge=0.0)
+                                field_strength=None, p_edge=0.0)
+# One row per grid point, sqrt(a_i) (|B_plasma + B_coil|^2 - |B_in|^2)_i / B_ref^2, as
+# VMEX's pressure_rows; it shares the interface's cache and the ONE VMEX adjoint.
+Jpb = PressureBalancePenalty(interface)
 Jls = [CurveLength(c) for c in base_curves]
 Jccdist = CurveCurveDistance(curves, CC_THRESHOLD)
 Jcsdist = CoilPlasmaDistance(plasma, curves, CS_THRESHOLD)
@@ -204,6 +242,7 @@ objective = WeightedSum([
     (LENGTH_WEIGHT, sum(QuadraticPenalty(J, LENGTH_MAX, "max") for J in Jls)),
     (CC_WEIGHT, Jccdist),
     (CS_WEIGHT, Jcsdist),
+    (PRESSURE_BALANCE_WEIGHT, Jpb),
 ])
 al = AugmentedLagrangian(objective, [interface], penalty=PENALTY0, eta0=ETA0)
 
@@ -214,9 +253,11 @@ D = np.full(x_seed.size, COIL_STEP)
 D[plasma_mask] = PLASMA_STEP * np.asarray(plasma.problem.scales)[plasma.dofs_free_status]
 res0 = interface.residuals()
 print(f"dofs: {x_seed.size} = {plasma_mask.sum()} plasma + {(~plasma_mask).sum()} coil; "
-      f"constraints: {res0['bnormal'].size} B·n harmonics + 1 pressure balance")
+      f"constraints: {res0['bnormal'].size} B·n harmonics; pressure balance: {interface.pressure_balance_rows().size} "
+      f"penalty rows")
 print(f"seed: f_QS = {f_qs.J():.3e}, max |B·n harmonic| = {np.max(np.abs(res0['bnormal'])):.3e}, "
-      f"rms(B·n/B) = {interface.rms_bnormal_over_B():.3e}, pressure balance = {res0['pressure_balance'][0]:+.3e}, "
+      f"rms(B·n/B) = {interface.rms_bnormal_over_B():.3e}, pressure-balance penalty = {Jpb.J():.3e} "
+      f"(jump rms {interface.pressure_balance_stats()['rms']:.3e}), "
       f"coil-plasma distance = {Jcsdist.shortest_distance():.3f} m")
 
 # Wrapper for scipy in the scaled variables u. A trial whose VMEX solve fails
@@ -271,7 +312,8 @@ def report(record):
     res = interface.residuals()
     print(f"[outer {record['outer']}] {record['inner_nit']} inner it ({time.time() - t_start:.0f}s): "
           f"L = {record['L']:.4e}, f_QS = {f_qs.J():.4e}, max|B·n harmonic| = {np.max(np.abs(res['bnormal'])):.2e}, "
-          f"rms(B·n/B) = {interface.rms_bnormal_over_B():.2e}, pressure balance = {res['pressure_balance'][0]:+.2e}, "
+          f"rms(B·n/B) = {interface.rms_bnormal_over_B():.2e}, pressure-balance penalty = {Jpb.J():.2e} "
+          f"(jump rms {interface.pressure_balance_stats()['rms']:.2e}), "
           f"lengths = {[round(float(J.J()), 3) for J in Jls]}, coil-plasma = {Jcsdist.shortest_distance():.3f} m, "
           f"rho = {record['penalties']}", flush=True)
 
@@ -303,5 +345,13 @@ BdotN = np.sum(Bbs * s.unitnormal(), axis=2) / np.linalg.norm(Bbs, axis=2)
 s.to_vtk(out_dir / "surf_opt", extra_data={"B_coil_N": BdotN[:, :, None]})
 res = interface.residuals()
 print(f"final: f_QS = {f_qs.J():.4e}, rms((B_plasma + B_coil)·n / B) = {interface.rms_bnormal_over_B():.2e}, "
-      f"pressure balance = {res['pressure_balance'][0]:+.2e}; "
+      f"pressure jump rms = {interface.pressure_balance_stats()['rms']:.2e}; "
       f"VMEX forward/adjoint = {plasma.n_forward}/{plasma.n_backward}; outputs in {out_dir.resolve()}")
+
+# Final check, reported and NOT optimised: pointwise B·n and total-pressure
+# balance on an independent, finer virtual-casing grid than the optimisation
+# grid the penalty saw (e ~ 2 d|B|/|B|).
+check = interface_check(plasma, BiotSavart(coils), nphi=CHECK_NPHI, ntheta=CHECK_NTHETA, digits=4, p_edge=0.0)
+print(f"final check ({CHECK_NPHI}x{CHECK_NTHETA}): rms(B·n/B) = {check['bnormal_rms']:.2e} "
+      f"(max {check['bnormal_max']:.2e}); pressure jump (|B_out|^2 - |B_in|^2)/|B_in|^2 mean "
+      f"{check['pressure_mean']:+.2e}, rms {check['pressure_rms']:.2e}, max {check['pressure_max']:.2e}")

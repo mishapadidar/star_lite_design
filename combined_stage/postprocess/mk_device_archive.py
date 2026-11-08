@@ -14,6 +14,17 @@ script builds the same objects on the run's coils:
   * sdf             -- None: these runs have no vacuum vessel, so every vessel metric is omitted
 
 usage: mk_device_archive.py <run dir> <tag: final | outerNNN> <device dir> [--surface-guess <archive json>[:index]]
+                            [--plasma-mgrid <coils_plasma.nc>] [--unsolved-surface]
+
+--unsolved-surface: store the VMEX boundary fit without solving it (iota = wout edge iota). For finite-beta checkpoints
+whose coils alone have no flux surface near the boundary (e.g. the best vessel_scan(2) devices at beta 1 %); the surface
+metrics in summary.txt then describe that fit in the coil field, not a flux surface.
+
+--plasma-mgrid (finite-beta checkpoints): solve every object in the coils + plasma field and store that field in the
+archive (utils/plasmafield.py: CoilsPlasmaField = BiotSavart + the mgrid's plasma group, gridded, ~7 MB of the JSON).
+The Boozer surfaces, axis and X-point then describe the finite-beta plasma; with the coils alone they describe the
+beta -> 0 one (hsx_scan_ext/c24_i0.25_A10_w3: axis 13 cm off, no coil-field surface within 2.35 cm of the boundary).
+The mgrid comes from workflows/flare_analysis/sbatch/fa_plasma_mgrid.sbatch (group 0 coils, group 1 plasma).
 
 --surface-guess starts the exact Boozer solves from an archived Boozer surface (Boozer angles, e.g. the design the run
 started from) instead of the VMEC-angle fit, shrinking the volume from the VMEX boundary's until a converged,
@@ -25,6 +36,7 @@ summary.txt, max_rel_error.txt, a copy of the VMEX namelist, curves_opt_final.vt
 ma_opt_final.vtu, xpoint_curves_opt_final.vtu. Run on a compute node.
 """
 import argparse
+import hashlib
 import os
 import shutil
 import sys
@@ -43,6 +55,7 @@ from star_lite_design.utils.lcfs import _self_intersects
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.periodicfieldline import PeriodicFieldLine
+from star_lite_design.utils.plasmafield import CoilsPlasmaField, GridPlasmaField
 from star_lite_design.utils.tangent_map import AxisIota, TangentMap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,6 +68,16 @@ BS_OPTIONS = {"verbose": False, "newton_tol": 1e-13, "newton_maxiter": 40}
 LS_OPTIONS = {"verbose": False, "bfgs_tol": 1e-10, "bfgs_maxiter": 1500, "newton_tol": 1e-11, "newton_maxiter": 40}
 MAX_OFFSET = 0.2            # a solved Boozer surface must stay within this fraction of the minor radius of the boundary
 MU0 = 4e-7 * np.pi
+
+
+PLASMA = None               # GridPlasmaField with --plasma-mgrid
+
+
+def coil_field(coils):
+    """The field every object is solved in: BiotSavart(coils), or coils + plasma with --plasma-mgrid.  A new object per
+    call like BiotSavart(coils) before (the axis, X-point and surface each keep their own evaluation points); they all
+    share the one GridPlasmaField, which the archive therefore stores once."""
+    return CoilsPlasmaField(coils, PLASMA) if PLASMA is not None else BiotSavart(coils)
 
 
 def history_row(run, tag):
@@ -74,7 +97,7 @@ def solve_fieldline(coils, points, nfp, stellsym):
     qp = np.linspace(0, 1 / nfp, 2 * FL_ORDER + 1, endpoint=False)
     curve = CurveXYZFourierSymmetries(qp, FL_ORDER, nfp, stellsym, ntor=1)
     curve.least_squares_fit(points)
-    line = PeriodicFieldLine(BiotSavart(coils), curve, options=dict(FL_OPTIONS))
+    line = PeriodicFieldLine(coil_field(coils), curve, options=dict(FL_OPTIONS))
     try:
         res = line.run_code(CurveLength(curve).J())
         return line if res["success"] else None
@@ -101,7 +124,7 @@ def magnetic_axis(coils, namelist, nfp):
                 print(f"magnetic axis solved (guess refinement {it})")
                 return axis
         # refine the guess: centroid of one field line's crossings of the quadrature planes
-        _, hits = compute_fieldlines(BiotSavart(coils), [R[0]], [Z[0]], tmax=60 * 2 * np.pi * R.mean(), tol=1e-9,
+        _, hits = compute_fieldlines(coil_field(coils), [R[0]], [Z[0]], tmax=60 * 2 * np.pi * R.mean(), tol=1e-9,
                                      phis=list(2 * np.pi * qp))
         h = np.asarray(hits[0])
         h = h[h[:, 1] >= 0]
@@ -138,7 +161,7 @@ def boozer_surface(coils, namelist, nfp, iota_axis, axis, guess=None):
     G_abs = MU0 * sum(abs(c.current.get_value()) for c in coils)
     V0 = Volume(surf).J()
     # sign guesses from the field itself: iota from the on-axis return map, G from the toroidal field direction
-    f = BiotSavart(coils)
+    f = coil_field(coils)
     p0 = axis.curve.gamma()[:1]
     f.set_points(p0)
     B_phi = float(f.B()[0] @ np.array([-p0[0, 1], p0[0, 0], 0.0]))
@@ -156,7 +179,7 @@ def boozer_surface(coils, namelist, nfp, iota_axis, axis, guess=None):
     def attempt(start, frac, iota, G, constraint_weight=None, enforce_tol=True):
         surf.x = start
         options = dict(LS_OPTIONS if constraint_weight else BS_OPTIONS)
-        bs = BoozerSurface(BiotSavart(coils), surf, Volume(surf), frac * V0, constraint_weight=constraint_weight,
+        bs = BoozerSurface(coil_field(coils), surf, Volume(surf), frac * V0, constraint_weight=constraint_weight,
                            options=options)
         try:
             res = bs.run_code(iota, G)
@@ -229,6 +252,33 @@ def boozer_surface(coils, namelist, nfp, iota_axis, axis, guess=None):
     raise SystemExit("no Boozer surface converged near the VMEX boundary")
 
 
+def unsolved_surface(coils, namelist, nfp, iota_axis, axis, wout):
+    """The VMEX boundary fit itself, NOT a flux surface of the coil field (--unsolved-surface). For finite-beta
+    checkpoints whose coils alone have no flux surface anywhere near the boundary: the archive then still carries the
+    coils, axis and X-point (enough for the coils + plasma mgrid and the FLARE runs, which launch at SP_REFERENCE), and
+    its surface is the equilibrium's LCFS. iota = the wout's edge iota, G = mu0 * sum |I| with the field's sign."""
+    import netCDF4
+    qp_phi = np.linspace(0, 1 / nfp, 2 * NTOR + 1, endpoint=False)
+    qp_theta = np.linspace(0, 1, 2 * MPOL + 1, endpoint=False)
+    surf = SurfaceXYZTensorFourier(mpol=MPOL, ntor=NTOR, nfp=nfp, stellsym=True,
+                                   quadpoints_phi=qp_phi, quadpoints_theta=qp_theta)
+    surf.least_squares_fit(SurfaceRZFourier.from_vmec_input(namelist, quadpoints_phi=qp_phi,
+                                                            quadpoints_theta=qp_theta).gamma())
+    f = coil_field(coils)
+    p0 = axis.curve.gamma()[:1]
+    f.set_points(p0)
+    s_G = np.sign(float(f.B()[0] @ np.array([-p0[0, 1], p0[0, 0], 0.0]))) or 1.0
+    with netCDF4.Dataset(wout) as w:
+        iota_edge = abs(float(w["iotaf"][:][-1]))
+    bs = BoozerSurface(coil_field(coils), surf, Volume(surf), Volume(surf).J(), options=dict(BS_OPTIONS))
+    bs.res = dict(iota=(np.sign(iota_axis) or 1.0) * iota_edge, G=s_G * MU0 * sum(abs(c.current.get_value()) for c in coils),
+                  success=False)
+    tol = MAX_OFFSET * SurfaceRZFourier.from_vmec_input(namelist).minor_radius()
+    print(f"Boozer surface NOT solved (--unsolved-surface): the VMEX boundary fit, iota {bs.res['iota']:+.5f} "
+          f"(wout edge), G {bs.res['G']:+.5f}")
+    return bs, 1.0, 0.0, tol
+
+
 def write_summary(path, metrics):
     with open(path, "w") as f:
         f.write(f"# {'metric':<30s} {'value':>16s} {'threshold':>16s} {'rel_error':>16s}\n")
@@ -247,7 +297,11 @@ def main():
     ap.add_argument("tag")
     ap.add_argument("device_dir")
     ap.add_argument("--surface-guess", default=None, help="archive json[:index] holding a Boozer surface guess")
+    ap.add_argument("--plasma-mgrid", default=None, help="coils + plasma mgrid: solve and store in that field")
+    ap.add_argument("--unsolved-surface", action="store_true",
+                    help="store the VMEX boundary fit unsolved instead of a Boozer surface of the field")
     args = ap.parse_args()
+    global PLASMA
     run, tag, dev = os.path.abspath(args.run), args.tag, os.path.abspath(args.device_dir)
     guess = None
     if args.surface_guess:
@@ -260,23 +314,50 @@ def main():
     namelist = layout.find(run, f"input.combined_stage_{tag}")
     nfp = SurfaceRZFourier.from_vmec_input(namelist).nfp
     coils = load(layout.find(run, f"coils_{tag}.json"))
+    if args.plasma_mgrid:
+        wout = layout.find(run, f"wout_combined_stage_{tag}.nc")
+        PLASMA = GridPlasmaField.from_mgrid(args.plasma_mgrid, 1, meta=dict(
+            run=run, tag=tag, wout=wout if os.path.exists(wout) else None,
+            wout_md5=hashlib.md5(open(wout, "rb").read()).hexdigest() if os.path.exists(wout) else None))
+        print(f"coils + plasma field: plasma group of {args.plasma_mgrid}")
     null = "DN" if os.path.exists(layout.find(run, f"xpoint_{tag}.json")) else "none"
     name = f"run={os.path.relpath(run, os.path.dirname(os.path.dirname(run))).replace(os.sep, '__')}_nfp={nfp}_null={null}_tag={tag}"
     device_id = zlib.crc32(name.encode())
     t0 = time.time()
 
     axis = magnetic_axis(coils, namelist, nfp)
-    iota_axis = float(AxisIota(TangentMap(axis, BiotSavart(coils), 0.0, mtype="identity")).J())
+    try:
+        iota_axis = float(AxisIota(TangentMap(axis, coil_field(coils), 0.0, mtype="identity")).J())
+        if not np.isfinite(iota_axis) or iota_axis == 0.0:
+            raise ValueError(f"tangent-map iota {iota_axis}")
+    except Exception as e:  # noqa: BLE001
+        if PLASMA is None:
+            raise
+        # inside the plasma the gridded field is B_VMEX - B_coils of an ns ~ 16 equilibrium: B itself is fine for
+        # tracing and Boozer residuals, but its gradient is too rough for the on-axis tangent map (hsx_ext c24:
+        # div B ~ 7 % of |grad B| on the axis) -- take the equilibrium's own axis iota (a guess + a summary number)
+        import netCDF4
+        with netCDF4.Dataset(PLASMA.meta["wout"]) as w:
+            iota_axis = float(w["iotaf"][:][0])
+        print(f"  tangent-map axis iota failed in the coils + plasma field ({e!r}); using the VMEX axis iota")
     print(f"on-axis iota {iota_axis:+.5f}")
     xp = x_point(coils, layout.find(run, f"xpoint_{tag}.json"), nfp)
-    bs, vol_frac, offset, offset_limit = boozer_surface(coils, namelist, nfp, iota_axis, axis, guess)
+    if args.unsolved_surface:
+        bs, vol_frac, offset, offset_limit = unsolved_surface(coils, namelist, nfp, iota_axis, axis,
+                                                              layout.find(run, f"wout_combined_stage_{tag}.nc"))
+    else:
+        bs, vol_frac, offset, offset_limit = boozer_surface(coils, namelist, nfp, iota_axis, axis, guess)
     print(f"objects built in {time.time() - t0:.0f}s")
 
     xpoints = [xp] if xp is not None else []
     save([[bs], [[float(bs.res["iota"]), float(bs.res["G"])]], [axis], xpoints, None],
          os.path.join(dev, f"design_opt_final_{device_id}.json"))
     shutil.copy(namelist, os.path.join(dev, os.path.basename(namelist)))
-    yaml.safe_dump(dict(device_name=name, device_id=device_id, run=run, tag=tag, nfp=nfp, null=null),
+    yaml.safe_dump(dict(device_name=name, device_id=device_id, run=run, tag=tag, nfp=nfp, null=null,
+                        field="coils + plasma" if PLASMA is not None else "coils",
+                        surface="VMEX boundary fit, unsolved" if args.unsolved_surface else "Boozer surface of the field",
+                        plasma_mgrid=os.path.abspath(args.plasma_mgrid) if args.plasma_mgrid else None,
+                        wout_md5=PLASMA.meta.get("wout_md5") if PLASMA is not None else None),
                    open(os.path.join(dev, "device_info.yaml"), "w"), sort_keys=False)
     curves = [c.curve for c in coils]
     curves_to_vtk(curves, os.path.join(dev, "curves_opt_final"))
@@ -298,10 +379,10 @@ def main():
 
     above = lambda thr: (lambda v: max(v / thr - 1.0, 0.0))   # noqa: E731
     below = lambda thr: (lambda v: max(1.0 - v / thr, 0.0))   # noqa: E731
-    add("nonQS_percent", lambda: 100.0 * NonQuasiSymmetricRatio(bs, BiotSavart(coils)).J() ** 0.5)
+    add("nonQS_percent", lambda: 100.0 * NonQuasiSymmetricRatio(bs, coil_field(coils)).J() ** 0.5)
 
     def mirror():
-        f = BiotSavart(coils)
+        f = coil_field(coils)
         f.set_points(bs.surface.gamma().reshape(-1, 3))
         B = f.AbsB()
         return np.max(B) / np.min(B)
@@ -325,17 +406,30 @@ def main():
         above(kc["msc_threshold"]))
     add("curvature", lambda: max(np.max(c.kappa()) for c in curves), kc["curvature_threshold"],
         above(kc["curvature_threshold"]))
-    add("modB", lambda: ModBOnFieldLine(axis, BiotSavart(coils)).J())
-    add("modB_axis_ripple", lambda: ModBRippleOnFieldLine(axis, BiotSavart(coils), 1e-3).max_deviation())
+    add("modB", lambda: ModBOnFieldLine(axis, coil_field(coils)).J())
+    add("modB_axis_ripple", lambda: ModBRippleOnFieldLine(axis, coil_field(coils), 1e-3).max_deviation())
     add("well", lambda: MagneticWell(axis, bs, 0.0).well().max())
     if xp is not None:
         add("fieldline_meanz", lambda: FieldLineMeanZ(xp, 1e-3).max_distance())
-        M = np.asarray(TangentMap(xp, BiotSavart(coils), 0.1, mtype="jordan").matrix)
+        M = np.asarray(TangentMap(xp, coil_field(coils), 0.1, mtype="jordan").matrix)
         m["monodromy"] = (float(np.abs(M - np.eye(2)).max()), None, None)
         for a in range(2):
             for b in range(2):
                 m[f"monodromy_M{a}{b}_idx0"] = (float(M[a, b]), None, None)
         m["greene_residue_idx0"] = ((2.0 - float(np.trace(M))) / 4.0, None, None)
+    if PLASMA is not None:
+        # inside the plasma the gridded field is B_VMEX - B_coils of an ns ~ 16 equilibrium, and MagneticWell's toroidal
+        # flux comes from the coils' vector potential alone: the well and the on-axis |B| ripple of the coils + plasma
+        # objects are not meaningful (hsx_ext c24: well -75, ripple 3e-2) -- report the equilibrium's own instead
+        import netCDF4
+        with netCDF4.Dataset(PLASMA.meta["wout"]) as w:
+            vp = np.asarray(w["vp"][:])
+            m["well"] = (100.0 * (vp[1] - vp[-1]) / vp[1], None, None)
+            xm, xn, bmnc = np.asarray(w["xm_nyq"][:]), np.asarray(w["xn_nyq"][:]), np.asarray(w["bmnc"][:])
+        phi = np.linspace(0.0, 2 * np.pi / nfp, 256, endpoint=False)
+        modB_axis = (bmnc[1, xm == 0][None, :] * np.cos(-np.outer(phi, xn[xm == 0]))).sum(axis=1)   # first half-grid surface
+        m["modB_axis_ripple"] = (float(np.max(np.abs(modB_axis / modB_axis.mean() - 1.0))), None, None)
+        print(f"  well {m['well'][0]:.2f} and axis ripple {m['modB_axis_ripple'][0]:.2e} from the VMEX equilibrium")
     # combined-stage quantities at this checkpoint (history.yaml of the run)
     m["optimization_surface_volume_fraction"] = (vol_frac, None, None)
     m["optimization_surface_offset_m"] = (offset, offset_limit, max(offset / offset_limit - 1.0, 0.0))

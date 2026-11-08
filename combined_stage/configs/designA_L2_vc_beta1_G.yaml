@@ -1,0 +1,118 @@
+# designA scaled x 2 (R 1.0 m, a 0.15 m, same aspect ratio 6.67, nfp 2, 6 coils), beta 1 %, virtual casing,
+# tracked double null -- with the BOOZER-G field-strength condition (2026-10-13).
+# Identical to configs/designA_L2_vc_beta1_stellsym.yaml (run designA_L2_vc_beta1_stellsym_v2, job 2322) except:
+#   consistency.field_strength pressure_balance -> net_poloidal_current: oint B_coil.dl/mu0 = 2 pi G/mu0 (G = VMEX rbtor),
+#     exact at any beta; the mean pressure balance it replaces is a grid average with the ~2 % virtual-casing gradient
+#     error (docs/field_strength_condition.md).
+#   final_check: pointwise B.n + total-pressure balance on an independent 32 x 32 grid at the end (final_check.yaml).
+# Seed: runs/combined_stage/seeds/input.designA_L2_beta1 (designA x 2, PRES_SCALE calibrated to beta 1 %).
+design: /data/common/raffael.wendlinger/simflare/runs/combined_stage/seeds/designA_L2.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 12
+  ntor: 10
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 24
+  ntheta: 20
+  vc_digits: 3
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.115
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 6
+  ntor: 7
+  field_strength: net_poloidal_current
+  p_edge: 0.0
+augmented_lagrangian:
+  penalty: 10.0
+  penalty_growth: 10.0
+  penalty_max: 1000000.0
+  eta0: 0.01
+  omega0: null
+  ctol: 0.00036
+  gtol: 1.0e-06
+  outer_maxiter: 25
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 8.0
+  length_weight: 1000.0
+  curvature_threshold: 5.3
+  curvature_weight: 0.001
+  msc_threshold: 5.1
+  msc_weight: 0.01
+  coil_coil_threshold: 0.29
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.24
+  coil_plasma_weight: 10000.0
+  current_threshold: 120000.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: fixed
+  jacobi_step: 0.01
+  jacobi_cap: 10.0
+  plasma_factor: 1.0
+  plasma_step: 0.1
+  coil_step: 0.1
+  current_step: 0.1
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: track
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: null
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 100.0
+  distance_min: 0.06
+  distance_max: 0.28
+  distance_weight: 10000.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64
+final_check:
+  enabled: true
+  nphi: 32
+  ntheta: 32
+  digits: 4

@@ -1,0 +1,146 @@
+# HSX-class DN, 32 coils + the array/boozer_all.py objective set (Andrew's star_lite_browser campaign), 2026-10-17.
+# Continuation of dn_32coils_vc_eqG32_cont outer 17 (all constraints met, f_QS 2.04e-2, Mercier-unstable everywhere,
+# well depth W = 1 %). Mapping of boozer_all.py's 19 terms onto the combined stage:
+#   nonQS -> f_QS; iotas -> iota_floor 0.37 (= his config 3 target); modB on axis -> net_poloidal_current (G);
+#   major radius -> fixed (vary_major_radius false); length/curvature/msc/coil-coil/current -> coils section;
+#   NEW here: magnetic well (plasma_objective.magnetic_well: V'' <= 0 everywhere = his well=0, plus depth W >= floor,
+#   because W = 1 % already satisfies V'' <= 0), |B| ripple on the axis (axis_ripple, his MODB_RIPPLE 1e-3 / 1e2),
+#   ArclengthVariation (coils.arclength_weight 1e-3; his 100 reshaped the coils here: run *_arclen100, B.n 0.19 -> 2.1 % in one outer iteration), X-line flatness (double_null.flatness_*, his --Z): ON since 2026-10-18 (user: required, <= 10 mm escalated + pull), resumed from the running checkpoint.
+#   NOT mappable: Boozer residual (no Boozer surface), the four vessel terms (no vessel), monodromy (DN unpolished:
+#   mono 0; the X-line's hyperbolicity margin stays).
+# + Mercier (not in boozer_all, vacuum there): DMerc[2:-1] >= 0, weight escalated from 1e-5.
+augmented_lagrangian:
+  ctol:
+    bnormal: 0.001
+    boundary_regularity: 0.005
+    fieldline: 0.0003
+    net_poloidal_current: 1.0e-05
+  eta0:
+    bnormal: 0.001
+    boundary_regularity: 0.005
+    fieldline: 0.0003
+    net_poloidal_current: 0.0001
+  gtol: 1.0e-06
+  inner_maxiter: 100
+  omega0: 0.01
+  outer_maxiter: 25
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+barrier_retreat: 0.5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64
+coil_seed:
+  R1: null
+  minor_radius_factor: 2.5
+  ncoils: 4
+  order: 6
+  type: archive
+coils:
+  arclength_weight: 0.001
+  coil_coil_threshold: 0.08
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.15
+  coil_plasma_weight: 10000.0
+  current_threshold: 250000.0
+  current_weight: 1000000.0
+  curvature_threshold: 10.0
+  curvature_weight: 0.001
+  escalate: true
+  escalation_factor: 10.0
+  escalation_max_factor: 10000.0
+  escalation_tol: 0.01
+  fix_currents: false
+  length_threshold: 5.0
+  length_weight: 1000.0
+  msc_threshold: 20.0
+  msc_weight: 0.01
+  weight_max: 1000000000000.0
+config_id: 0
+consistency:
+  bnormal_band: null
+  field_strength: net_poloidal_current
+  mode: fourier
+  mpol: 8
+  ntor: 9
+  p_edge: 0.0
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+double_null:
+  distance_max: 0.12
+  distance_min: 0.04
+  distance_weight: 100.0
+  enabled: true
+  fieldline_penalty: 1000.0
+  flatness_threshold: 0.01
+  flatness_weight: 10.0
+  flatness_pull_weight: 10.0
+  free_offset: 0.06
+  free_order: 10
+  free_prefit_maxiter: 0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  mode: free
+  newton_maxiter: 40
+  newton_tol: 1.0e-13
+final_check:
+  digits: 4
+  enabled: true
+  nphi: 32
+  ntheta: 32
+history_every: 5
+plasma_objective:
+  aspect_target: null
+  aspect_weight: 1.0
+  axis_ripple:
+    enabled: true
+    threshold: 0.001
+    weight: 100.0
+  beta_target: null
+  beta_weight: null
+  helicity_m: 1
+  helicity_n: 0
+  iota_escalate: true
+  iota_floor: 0.37
+  iota_weight: 1000.0
+  magnetic_well:
+    enabled: true
+    floor: 0.03
+    weight: 10.0
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  mercier:
+    enabled: true
+    margin: 0.0
+    smoothing: 0.001
+    weight: 1.0e-05
+scaling:
+  coil_step: 0.01
+  jacobi_cap: 100.0
+  jacobi_step: 0.01
+  mode: jacobi
+  plasma_factor: 0.1
+  plasma_step: 1.0
+vmec_input: null
+vmex:
+  current_dofs: null
+  ftol: 1.0e-11
+  max_mode: 2
+  mpol: 6
+  niter: 20000
+  nphi: 32
+  ns: 16
+  ntheta: 32
+  ntor: 6
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+  vary_major_radius: false
+  vc_digits: 3

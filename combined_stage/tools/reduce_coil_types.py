@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Seed coils with fewer coil types (base coils per half period) from a run's stellarator-symmetric coils.
 
-usage: reduce_coil_types.py <coils json> <n_new> <out json> [--vmec-input <namelist>] [--xpoint <xpoint json>]
+usage: reduce_coil_types.py <coils json> <n_new> <out json> [--plane-coil] [--vmec-input <namelist>] [--xpoint <xpoint json>]
 
 The old base coils (the curves owning dofs) sit at centroid angles phi_i in (0, pi/nfp). New coil j goes to
 phi_j = (j + 1/2) pi / (nfp n_new). Its points are the pointwise blend (1 - w) R(phi_j - phi_a) gamma_a(t) +
@@ -11,6 +11,12 @@ parametrization origin (true for coils grown from create_equally_spaced_curves; 
 the same blend of the old currents times n_old / n_new, so the total poloidal current, hence the toroidal field, is
 unchanged. Prints lengths, curvature, coil-coil distance and, with --vmec-input, rms B.n/B on that boundary and the
 coil-plasma distance, and, with --xpoint, the X-line's field-line residual, for the old and the new coil set.
+
+--plane-coil adds one coil per field period ON the phi = 0 symmetry plane, its own stellarator image, so it is copied
+only by the nfp rotations: nfp (2 n_new + 1) coils in all (nfp 4: n_new 1 -> 12 coils, n_new 0 -> 4), equally spaced,
+the generic coils at phi_j = j 2 pi / (nfp (2 n_new + 1)), j = 1..n_new. The plane coil is the old coil nearest phi = 0
+rotated onto it and symmetrized, ((x, y, z)(t) + (x, -y, -z)(-t)) / 2 with t = 0 moved onto the symmetry line, and its
+odd-parity coefficients (xs, yc, zc) set to exactly zero, so the driver's fix_self_symmetric_coil_parity pins them.
 """
 import argparse
 
@@ -61,11 +67,46 @@ def report(label, coils, nml=None, xpoint=None):
     print(msg, flush=True)
 
 
+def plane_coil(curve, phi_old, n_shift=4096):
+    """Old coil ``curve`` (centroid at ``phi_old``) rotated onto phi = 0 and made its own image under (x, -y, -z),
+    parametrized with t = 0 on the symmetry line (outboard crossing), as a CurveXYZFourier of the same order."""
+    order, q = curve.order, curve.quadpoints
+    rot = rot_z(-phi_old)
+    work = CurveXYZFourier(q, order)
+    work.local_full_x = curve.local_full_x
+
+    def at(t):                                   # rotated old coil at parameters t
+        c = CurveXYZFourier(np.mod(t, 1.0), order)
+        c.x = work.x
+        return c.gamma() @ rot.T
+
+    S = np.array([1.0, -1.0, -1.0])
+    g = at(q)
+    # the image of the curve, traversed backwards, is the curve itself shifted: S g(s - t) ~ g(t); fixed points t* = s/2
+    shifts = np.linspace(0, 1, n_shift, endpoint=False)
+    err = [np.mean(np.linalg.norm(at(sh - q) * S - g, axis=1)) for sh in shifts]
+    s0 = shifts[int(np.argmin(err))]
+    cands = [s0 / 2, s0 / 2 + 0.5]
+    t0 = max(cands, key=lambda t: at(np.array([t]))[0, 0])          # outboard fixed point (larger x)
+    h = 0.5 * (at(q + t0) + at(t0 - q) * S)
+    new = CurveXYZFourier(q, order)
+    new.least_squares_fit(h)
+    x = new.x.copy()
+    for i, name in enumerate(new.local_full_dof_names):
+        if name.startswith(("xs(", "yc(", "zc(")):
+            x[i] = 0.0
+    new.x = x
+    print(f"plane coil from the coil at {np.degrees(phi_old):.2f} deg: symmetry mismatch before {min(err) * 1e3:.2f} mm "
+          f"(mean), fit residual {np.max(np.linalg.norm(new.gamma() - h, axis=1)) * 1e3:.3f} mm")
+    return new
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("coils")
     ap.add_argument("n_new", type=int)
     ap.add_argument("out")
+    ap.add_argument("--plane-coil", action="store_true", help="add a coil on the phi = 0 symmetry plane per period")
     ap.add_argument("--vmec-input", default=None)
     ap.add_argument("--xpoint", default=None)
     args = ap.parse_args()
@@ -80,8 +121,10 @@ def main():
               f"({g0[0]:.3f}, {g0[1]:+.3f}, {g0[2]:+.3f})")
     angles = np.array([b[2] for b in old])
     new_curves, new_currents = [], []
+    n_total_old = len(coils)
+    n_total_new = nfp * (2 * args.n_new + (1 if args.plane_coil else 0))
     for j in range(args.n_new):
-        phi = (j + 0.5) * half / args.n_new
+        phi = ((j + 1) * 2 * half / (2 * args.n_new + 1)) if args.plane_coil else ((j + 0.5) * half / args.n_new)
         if not angles[0] <= phi <= angles[-1]:
             raise SystemExit(f"target angle {np.degrees(phi):.2f} deg lies outside the old coils' span "
                              f"[{np.degrees(angles[0]):.2f}, {np.degrees(angles[-1]):.2f}] deg (needs symmetry images)")
@@ -92,13 +135,18 @@ def main():
         pts = (1 - w) * ca.gamma() @ rot_z(phi - pa).T + w * cb.gamma() @ rot_z(phi - pb).T
         curve = CurveXYZFourier(ca.quadpoints, ca.order)
         curve.least_squares_fit(pts)
-        I = ((1 - w) * Ia + w * Ib) * len(old) / args.n_new
+        I = ((1 - w) * Ia + w * Ib) * n_total_old / n_total_new
         print(f"new coil {j}: phi {np.degrees(phi):.2f} deg = {1 - w:.3f} x coil at {np.degrees(pa):.2f} + {w:.3f} x coil at "
               f"{np.degrees(pb):.2f}; current {I / 1e3:.1f} kA; fit residual "
               f"{np.max(np.linalg.norm(curve.gamma() - pts, axis=1)) * 1e3:.3f} mm")
         new_curves.append(curve)
         new_currents.append(Current(1.0) * I)
-    new = coils_via_symmetries(new_curves, new_currents, nfp, True)
+    new = coils_via_symmetries(new_curves, new_currents, nfp, True) if new_curves else []
+    if args.plane_coil:
+        c0, I0, p0 = old[0]                     # the old coil nearest phi = 0
+        I = I0 * n_total_old / n_total_new
+        print(f"plane coil: current {I / 1e3:.1f} kA")
+        new = new + coils_via_symmetries([plane_coil(c0, p0)], [Current(1.0) * I], nfp, False)
     report("old", coils, args.vmec_input, args.xpoint)
     report("new", new, args.vmec_input, args.xpoint)
     save(new, args.out)

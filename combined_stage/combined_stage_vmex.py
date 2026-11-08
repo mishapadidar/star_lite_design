@@ -45,15 +45,75 @@ from star_lite_design.utils.vmex_double_null import (FreeXLine, FreeXLineHyperbo
                                                      fieldline_snapshot, fit_xline_to_field, free_xline_from_plasma)
 from simsopt.objectives import QuadraticPenalty, Weight
 
-from star_lite_design.utils.augmented_lagrangian import AugmentedLagrangian, BandConstraint, SubsetConstraint
+from star_lite_design.utils.augmented_lagrangian import (AugmentedLagrangian, BandConstraint, EqualityConstraint,
+                                                         PenaltyConstraint, SubsetConstraint)
 import run_layout as layout   # coils/, xpoints/, inputs/, state/, wout/ subfolders (reads old flat runs too)
 from star_lite_design.utils.current_bound import CurrentBound
 from star_lite_design.utils.vmex_combined_stage import (
-    BoundaryRegularityConstraint, CoilPlasmaDistance, PlasmaCoilInterface, VmexPlasma, VmexQuasisymmetry,
+    BoundaryRegularityConstraint, ClosestApproachConstraint, CoilPlasmaDistance, CoilXLineDistance, PlasmaCoilInterface, PlasmaVesselDistance, VmexPlasma,
+    VmexQuasisymmetry,
     VmexTermCost, WeightedSum, boundary_regularity, coil_stellsym_error, fix_self_symmetric_coil_parity,
     BootstrapConsistency, bootstrap_mismatch_output, kinetic_pressure_coeffs, kinetic_profiles,
-    net_poloidal_current_output)
+    interface_check, net_poloidal_current_output, _to_points)
+from simsopt.geo import ArclengthVariation, CurveXYZFourierSymmetries
+from star_lite_design.utils.helicalvessel import HelicalVesselSDF
+from star_lite_design.utils.helicalcylindervessel import HelicalCylinderVesselSDF
+from star_lite_design.utils.pillpipevessel import TorusSDF, VesselDistance
+from simsopt._core import Optimizable
+from simsopt._core.derivative import derivative_dec
 
+# plasma_objective sections that become VMEX terms with their own escalated weight: (term/function name, config key)
+ESCALATED_PLASMA_TERMS = (("magnetic_well_floor", "magnetic_well"), ("axis_ripple", "axis_ripple"), ("mercier", "mercier"))
+
+
+class XLineFlatness(Optimizable):
+    """array/boozer_all.py's FieldLineMeanZ on a :class:`FreeXLine`: ``mean(max(|z - mean z| - threshold, 0)^2)``."""
+
+    def __init__(self, xline, threshold):
+        import jax
+        from star_lite_design.utils.displacement import mean_z_pure
+        self.xline = xline
+        self.f = jax.jit(lambda g: mean_z_pure(g, threshold))
+        self.g = jax.jit(jax.grad(self.f))
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[xline])
+
+    def max_deviation(self):
+        z = self.xline.curve.gamma()[:, 2]
+        return float(np.max(np.abs(z - z.mean())))
+
+    def J(self):
+        return float(self.f(self.xline.curve.gamma()))
+
+    @derivative_dec
+    def dJ(self):
+        return self.xline.gamma_vjp(np.asarray(self.g(self.xline.curve.gamma())))
+
+
+
+class XLineFlatnessConstraint(EqualityConstraint):
+    """X-line flatness as augmented-Lagrangian rows, one per X-line point: ``max(|z_i - mean z| - threshold, 0) / threshold``.
+
+    The escalated ``XLineFlatness`` (mean of the squared excess, the same averaging that diluted the clearances) left
+    HSX-class X-lines 24-50 mm from flat in vessel scan 2 (user requirement: <= 10 mm, ALL one-stage runs); here the
+    inf-norm tolerance bounds the worst point. Upper null only; the lower one is its stellarator image.
+    """
+
+    def __init__(self, xline, threshold):
+        self.xline, self.threshold = xline, float(threshold)
+        EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=[xline])
+
+    def residuals(self):
+        z = self.xline.curve.gamma()[:, 2]
+        return {"hard_xline_flatness": np.maximum(np.abs(z - z.mean()) - self.threshold, 0.0) / self.threshold}
+
+    def residuals_vjp_parts(self, cotangents):
+        v = np.asarray(cotangents["hard_xline_flatness"], dtype=float).ravel()
+        gamma = self.xline.curve.gamma()
+        dev = gamma[:, 2] - gamma[:, 2].mean()
+        w = np.where(np.abs(dev) > self.threshold, v * np.sign(dev), 0.0) / self.threshold   # d row_i / d z_i
+        G = np.zeros_like(gamma)
+        G[:, 2] = w - w.mean()                         # through z_i - mean z
+        return self.xline.gamma_vjp(G), {}
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -123,14 +183,31 @@ def build_plasma(cfg, seed_path):
             print("WARNING bootstrap: the seed AC profile is all zero, so VMEC's shape normalization is degenerate and "
                   "the AC dofs have no gradient until CURTOR moves; seed with tools/make_bootstrap_seed.py")
     t0 = time.time()
-    eq0 = opt.solve_equilibrium(inp)
+    try:
+        eq0 = opt.solve_equilibrium(inp)
+    except Exception as e:  # noqa: BLE001
+        # a ladder stage's seed is the previous stage's final boundary, which the optimizer reached by warm starts:
+        # strongly shaped ones (W7-X size, pinched X-line boundaries) raise INITIAL JACOBIAN CHANGED SIGN cold even
+        # with a re-guessed axis, multigrid or a smaller DELT (2026-10-19). VMEX's hot restart from the previous
+        # stage's wout solves them in seconds.
+        restart = vcfg.get("restart_wout") or _stage_wout_beside(seed_path)
+        if not restart or not os.path.exists(restart):
+            raise
+        print(f"seed cold solve failed ({type(e).__name__}: {e}); hot restart from {restart}", flush=True)
+        eq0 = opt.solve_equilibrium(inp, restart_from=restart)
     w0 = eq0.wout
     print(f"seed equilibrium: {time.time() - t0:.1f}s  aspect={float(w0.aspect):.4f}  "
           f"beta={float(w0.betatotal):.3e}  iota(axis,edge)=({float(w0.iotaf[0]):+.4f},{float(w0.iotaf[-1]):+.4f})")
 
     smin, smax, ns = pcfg["qs_surfaces"]
-    qs = opt.QuasisymmetryRatioResidual(np.linspace(smin, smax, int(ns)),
-                                        helicity_m=pcfg["helicity_m"], helicity_n=pcfg["helicity_n"])
+    if pcfg.get("symmetry", "qs") == "qi":
+        # W7-X class: VMEX's traceable smooth quasi-isodynamic surrogate (Boozer |B| spectrum + level-set Goodman
+        # construction) on the same surfaces, in place of quasi-symmetry; term name "qi"
+        from vmex.core.omnigenity import QIResidual
+        qs = QIResidual(np.linspace(smin, smax, int(ns)), **(pcfg.get("qi") or {}))
+    else:
+        qs = opt.QuasisymmetryRatioResidual(np.linspace(smin, smax, int(ns)),
+                                            helicity_m=pcfg["helicity_m"], helicity_n=pcfg["helicity_n"])
     terms = [(qs, 0.0, 1.0)]
     aspect_target = pcfg["aspect_target"] if pcfg["aspect_target"] is not None else float(w0.aspect)
     terms.append((opt.aspect_ratio, aspect_target, pcfg["aspect_weight"]))
@@ -144,12 +221,97 @@ def build_plasma(cfg, seed_path):
     if pcfg["beta_target"] is not None:
         bw = pcfg["beta_weight"] if pcfg["beta_weight"] is not None else 1.0 / pcfg["beta_target"]
         terms.append((opt.volume_average_beta, pcfg["beta_target"], bw))
+    # array/boozer_all.py counterparts (Andrew's star_lite_browser campaign); each is a unit-weight VMEX term whose
+    # weight is applied and escalated outside VMEX like iota_floor (ESCALATED_PLASMA_TERMS, main()). The term name is
+    # the function name.
+    wcfg = pcfg.get("magnetic_well") or {}
+    if wcfg.get("enabled"):
+        # boozer_all: MagneticWell, d2V/dpsi2 <= threshold along psi (vacuum, Boozer surfaces). Here, on the finite-beta
+        # equilibrium: V'(s) must fall everywhere (V'' <= 0, Andrew's threshold 0) AND the well depth
+        # W = (V'(0) - V'(1)) / V'(0) (simsopt's Vmec.vacuum_well proxy) must reach `floor`.
+        from vmex.core.optimize import _field_chain
+        wfloor = float(wcfg.get("floor", 0.0))
+
+        def magnetic_well_floor(state, runtime):
+            vp = jnp.abs(jnp.asarray(_field_chain(state, runtime)[4].vp))[1:]
+            v0 = 1.5 * vp[0] - 0.5 * vp[1]
+            v1 = 1.5 * vp[-1] - 0.5 * vp[-2]
+            depth = jnp.maximum(wfloor - (v0 - v1) / v0, 0.0)
+            slope = jnp.maximum(jnp.diff(vp) / v0 * vp.size, 0.0)
+            return jnp.concatenate([depth[None], slope])
+        terms.append((magnetic_well_floor, 0.0, 1.0))
+    rcfg_ = pcfg.get("axis_ripple") or {}
+    if rcfg_.get("enabled"):
+        # boozer_all: ModBRippleOnFieldLine, |B| within +-threshold of its mean along the magnetic axis. The axis
+        # |B|(phi) is the theta average on the two innermost half-mesh surfaces, extrapolated linearly in s to s = 0.
+        # NOT opt.mirror_ratio near the axis: that is the full-surface modulation, whose poloidal 1/R part (~2 % on
+        # the first half-mesh surface) no coil shape can remove (dn_32coils_vc_G_andrew_badripple stalled on it).
+        rthr = float(rcfg_.get("threshold", 1e-3))
+        from vmex.core.optimize import _field_chain
+
+        def axis_ripple(state, runtime):
+            fields = _field_chain(state, runtime)[3]
+            bsq = jnp.asarray(fields.total_pressure) - jnp.asarray(fields.pressure)[:, None, None]
+            bmag = jnp.sqrt(jnp.maximum(2.0 * bsq[1:3], jnp.finfo(bsq.dtype).tiny))
+            w = jnp.ones(bmag.shape[1]).at[jnp.array([0, -1])].set(0.5)   # stellsym grid: theta in [0, pi] incl.
+            bt = jnp.einsum("jtz,t->jz", bmag, w) / jnp.sum(w)
+            r = 1.5 * bt[0] - 0.5 * bt[1]
+            r = r / jnp.mean(r)
+            return jnp.concatenate([jnp.maximum(r - (1.0 + rthr), 0.0),
+                                    jnp.maximum((1.0 - rthr) - r, 0.0)]) / jnp.sqrt(r.size)
+        terms.append((axis_ripple, 0.0, 1.0))
+    mcfg = pcfg.get("mercier") or {}
+    if mcfg.get("enabled"):
+        # not in boozer_all (vacuum): Mercier at finite beta, DMerc[2:-1] >= margin (smooth one-sided residual)
+        from vmex.core.stability import d_merc_state, mercier_stability_residual
+        mmargin, msmooth = float(mcfg.get("margin", 0.0)), float(mcfg.get("smoothing", 1e-3))
+        # s_min (None = VMEX's DMerc[2:-1]): at ns >= 31 the near-axis DMerc diverges with resolution (c24: min over
+        # [2:-1] -45 / -96 / -160 / -757 at ns 31 / 41 / 51 / 101) while s >= 0.1 converges, so a higher-resolution
+        # polish penalises s >= s_min only (runs/vmex/c24_ns_test, 2026-10-26)
+        ms_min = mcfg.get("s_min")
+        if int(cfg["vmex"]["ns"]) < 51:
+            print(f"WARNING: Mercier term on a ns = {cfg['vmex']['ns']} equilibrium -- DMerc is not converged below "
+                  f"ns ~ 51 (its verdict was wrong for 107 of 646 beta rungs at ns = 16); set vmex.ns >= 51", flush=True)
+
+        # normalize: phi_edge (2026-11-07) -- penalise DMerc * PHIEDGE^2 instead of raw DMerc. VMEC's DMerc carries
+        # 1/Phi^2 (DShear = (d iota / d Phi)^2 / 4 ...), so the raw residual of one and the same instability is ~400x
+        # smaller on a W7-X-size device (PHIEDGE 2.4-3.7 Wb) than on designA x 10 (0.15 Wb): with weight 1e-4 and the
+        # 100x escalation cap the term never acted in vessel_scan3 (violation flat over 25 outers, 30/31 beta-2 %
+        # finals unstable at ns 51, runs/vmex/mercier_survey_scan3). DMerc * PHIEDGE^2 is invariant under scaling size
+        # and field, so margin / smoothing / weight mean the same in every class. PHIEDGE is a fixed input here.
+        mnorm = mcfg.get("normalize")
+        if mnorm not in (None, False, "phi_edge"):
+            raise SystemExit(f"plasma_objective.mercier.normalize: {mnorm!r} (choose phi_edge or leave unset)")
+        mscale = float(inp.phiedge) ** 2 if mnorm == "phi_edge" else 1.0
+        if mnorm:
+            print(f"Mercier term: DMerc x PHIEDGE^2 = DMerc x {mscale:.4e} (margin {mmargin:g}, smoothing {msmooth:g} in "
+                  f"those units)", flush=True)
+
+        def mercier(state, runtime):
+            if ms_min is None and not mnorm:
+                return mercier_stability_residual(state, runtime, margin=mmargin, smoothing=msmooth)
+            dm = d_merc_state(state, runtime) * mscale
+            if ms_min is None:
+                return msmooth * jnp.logaddexp(0.0, (mmargin - dm[2:-1]) / msmooth)
+            k0 = max(2, int(np.ceil(float(ms_min) * (dm.shape[0] - 1))))     # static under jit
+            return msmooth * jnp.logaddexp(0.0, (mmargin - dm[k0:-1]) / msmooth)     # smooth max(., 0)
+        terms.append((mercier, 0.0, 1.0))
     plasma = VmexPlasma(inp, terms, max_mode=vcfg["max_mode"], nphi=vcfg["nphi"], ntheta=vcfg["ntheta"],
                         vc_digits=vcfg["vc_digits"], plasma_field=vcfg.get("plasma_field", "vacuum"),
                         current_dofs=vcfg["current_dofs"],
                         vary_major_radius=vcfg["vary_major_radius"], restart_from=eq0,
                         extra_outputs=extra_outputs, **(vcfg.get("problem_kwargs") or {}))
     return plasma, aspect_target
+
+
+def _stage_wout_beside(seed_path):
+    """``<stage>/wout/wout_combined_stage_final.nc`` for a seed ``<stage>/inputs/input.combined_stage_final`` (a ladder
+    stage's seed is the previous stage's final), else None. Lets ladders started before vmex.restart_wout existed use
+    the hot-restart fallback too."""
+    if os.path.basename(seed_path) != "input.combined_stage_final":
+        return None
+    wout = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(seed_path))), "wout", "wout_combined_stage_final.nc")
+    return wout if os.path.exists(wout) else None
 
 
 def walk_plasma_to(plasma, cfg, target_path):
@@ -401,7 +563,10 @@ def main():
                for key in ("length", "curvature", "msc", "coil_coil", "coil_plasma", "current")}
     pcfg = cfg["plasma_objective"]
     iota_escalate = bool(pcfg.get("iota_escalate")) and pcfg["iota_floor"] is not None
-    terms = [(1.0, VmexQuasisymmetry(plasma, exclude=("iota_floor",) if iota_escalate else ())),
+    # VMEX terms weighted (and escalated) outside f_QS: (term name, plasma_objective key)
+    extra_plasma = [(name, key) for name, key in ESCALATED_PLASMA_TERMS if (pcfg.get(key) or {}).get("enabled")]
+    excluded = (("iota_floor",) if iota_escalate else ()) + tuple(name for name, _ in extra_plasma)
+    terms = [(1.0, VmexQuasisymmetry(plasma, exclude=excluded)),
              (weights["length"], J_length), (weights["curvature"], J_curv),
              (weights["msc"], J_msc), (weights["coil_coil"], J_cc),
              (weights["coil_plasma"], J_cp)]
@@ -416,7 +581,24 @@ def main():
         weights["iota_floor"] = Weight(pcfg["iota_weight"])
         J_iota = VmexTermCost(plasma, "iota_floor")
         terms.append((weights["iota_floor"], J_iota))
-    J_hyp = J_xdist = xline_constraint = None
+    J_extra_plasma = {}
+    for name, key in extra_plasma:
+        weights[name] = Weight(pcfg[key]["weight"])
+        J_extra_plasma[name] = VmexTermCost(plasma, name)
+        terms.append((weights[name], J_extra_plasma[name]))
+        print(f"plasma term {name} ({key}): weight {pcfg[key]['weight']:.3g}, unit-weight cost now "
+              f"{J_extra_plasma[name].J():.4e}", flush=True)
+    if float(kcfg.get("arclength_weight", 0.0)) > 0.0:
+        # boozer_all: ArclengthVariation (uniform quadrature-point spacing along each coil), fixed weight
+        weights["arclength"] = Weight(kcfg["arclength_weight"])
+        terms.append((weights["arclength"], sum(ArclengthVariation(c) for c in base_curves)))
+    # B.n is blind to scaling every coil current by the same factor: with free currents a field-strength condition is
+    # required (pointwise pressure balance as a penalty lives only in examples/combined_stage_simple.py;
+    # docs/field_strength_condition.md)
+    if ccfg["field_strength"] is None and not kcfg["fix_currents"]:
+        raise SystemExit("consistency.field_strength is null with free coil currents: nothing fixes the coil-current "
+                         "scale (B.n is blind to it); use net_poloidal_current at finite beta")
+    J_hyp = J_xdist = xline_constraint = J_coil_xline = J_flat = None
     # consistency.bnormal_band = tau: the B.n harmonics become a BAND |h| <= tau (two inequality rows each) instead of
     # equalities h = 0. As equalities their multipliers keep pulling toward an unreachable zero after the target is met,
     # and quasi-symmetry pays (v2a / v2b: f_QS 0.024 -> 0.116 and 0.022 -> 0.21 once B.n had met its target); inside the
@@ -437,11 +619,114 @@ def main():
         weights["hyperbolicity"] = Weight(dn_cfg["hyperbolicity_weight"])
         weights["xpoint_distance"] = Weight(dn_cfg["distance_weight"])
         terms += [(weights["hyperbolicity"], J_hyp), (weights["xpoint_distance"], J_xdist)]
+        if float(dn_cfg.get("flatness_weight", 0.0)) > 0.0 and tracked:
+            print("X-line flatness needs a free X-line (double_null.mode: free); not applied", flush=True)
+        elif float(dn_cfg.get("flatness_weight", 0.0)) > 0.0:
+            # boozer_all --Z: FieldLineMeanZ, max |z - mean z| along the X-line <= flatness_threshold, escalated like the
+            # ranges (user, 2026-10-18: a flat X-line is a design requirement, 10 mm, the flatter the better), plus a
+            # fixed-weight pull on the whole deviation (threshold 0) that keeps flattening once inside the band
+            weights["xline_flatness"] = Weight(dn_cfg["flatness_weight"])
+            J_flat = XLineFlatness(xpoint, float(dn_cfg.get("flatness_threshold", 1e-2)))
+            terms.append((weights["xline_flatness"], J_flat))
+            if float(dn_cfg.get("flatness_pull_weight", 0.0)) > 0.0:
+                weights["xline_flatness_pull"] = Weight(dn_cfg["flatness_pull_weight"])
+                terms.append((weights["xline_flatness_pull"], XLineFlatness(xpoint, 0.0)))
+            print(f"X-line flatness: max |z - mean z| = {J_flat.max_deviation():.4f} m "
+                  f"(threshold {dn_cfg.get('flatness_threshold', 1e-2)}, pull weight "
+                  f"{dn_cfg.get('flatness_pull_weight', 0.0)})", flush=True)
+        if dn_cfg.get("coil_distance_min") is not None:
+            # conformal-vessel room: coils >= margin + clearance from the X-lines (and, via coils.coil_plasma_threshold,
+            # from the plasma); the vessel is then an offset of plasma + X-lines, built after the optimization
+            weights["coil_xline"] = Weight(dn_cfg["coil_distance_weight"])
+            J_coil_xline = CoilXLineDistance(curves, xpoint, float(dn_cfg["coil_distance_min"]))
+            terms.append((weights["coil_xline"], J_coil_xline))
+            print(f"coil-X-line distance now {J_coil_xline.shortest_distance():.4f} m (>= {dn_cfg['coil_distance_min']})",
+                  flush=True)
         dists = J_xdist.distances()
+        if dists is None:
+            # XpointPlasmaDistance has no geometry: the X-line did not solve, or VMEX rejected the start equilibrium
+            error = vmex_implicit._LAST_STATUS_ERROR.get(vmex_cfg)
+            raise SystemExit("double null: no X-line/boundary distance at the start ("
+                             + ("X-line field line not solved" if tracked and not ensure_fieldline_solved(xpoint)
+                                else f"VMEX start equilibrium rejected, status {plasma.evaluate()['status']}"
+                                + (f": {type(error).__name__}: {str(error)[:160]}" if error is not None else "")) + ")")
         print(f"double null ({dn_mode}): X-point tr(M) = {J_hyp.trace():+.4f}; distance to boundary "
               f"{dists.min():.4f} .. {dists.max():.4f} m (range {dn_cfg['distance_min']} .. {dn_cfg['distance_max']})"
               + (f"; field-line residual max {np.max(np.abs(xline_constraint.residuals()['fieldline'])):.3e}"
                  if xline_constraint is not None else ""))
+    # ---- vessel (array/boozer_all.py, vessel_id 4, on_vessel 0, --distance 1): a helical tube whose centre line and
+    # radius R(t) are dofs; the plasma boundary and the X-line stay >= margin inside it, the coils >= coil_clearance
+    # outside it, and the X-line keeps a constant gap to it (|d - mean d| <= xline_distance_threshold). The margin
+    # and clearance escalate like the ranges; the tube's shape limits (kappa R < 1, |dR/ds| < 1, R > 0, uniform
+    # arclength) ride inside every vessel penalty and in the margin violation, as in boozer_all.
+    vscfg = cfg.get("vessel") or {}
+    sdf = J_vmargin = J_vxline = J_vclear = J_vxdist = None
+    if vscfg.get("enabled"):
+        # families (array/boozer_all.py vessel_id): helical (3: radius_modes 0, 4: radius R(t)), pipe (5000 + nseg: a
+        # closed loop of nseg straight pipes mitred at the joints, node positions + radius free), torus (2)
+        family = vscfg.get("family", "helical")
+        if family not in ("helical", "pipe", "torus"):
+            raise SystemExit(f"vessel family {family!r} not implemented (helical, pipe, torus)")
+        # centre line seeded on the VMEX magnetic axis: R = sum raxis_cc cos(n nfp phi), Z = -sum zaxis_cs sin(...)
+        # is CurveXYZFourierSymmetries(ntor=1) with xc = raxis_cc, ys = 0, zs = -zaxis_cs, truncated to num_modes
+        wout = plasma.equilibrium().wout
+        nv = int(vscfg.get("num_modes", 2))
+        rax, zax = np.asarray(wout.raxis_cc, float), np.asarray(wout.zaxis_cs, float)
+        xc = [float(rax[m]) if m < rax.size else 0.0 for m in range(nv + 1)]
+        zs = [-float(zax[m]) if m < zax.size else 0.0 for m in range(1, nv + 1)]
+        mr = int(vscfg.get("radius_modes", 2))
+
+        def tube(radius):
+            if family == "torus":
+                return TorusSDF(float(radius), float(rax[0]))
+            if family == "pipe":
+                # nseg legs, a multiple of nfp; stellsym: an odd count per period puts node 0 on the phi = 0 plane
+                nseg, nfp_v = int(vscfg["nseg"]), int(plasma.nfp)
+                if nseg % nfp_v:
+                    raise SystemExit(f"vessel.nseg {nseg} must be a multiple of nfp {nfp_v}")
+                q = nseg // nfp_v
+                axis = CurveXYZFourierSymmetries(64, nv, nfp_v, True, ntor=1)
+                axis.set_dofs(np.concatenate([xc, [0.0] * nv, zs]))
+                return HelicalCylinderVesselSDF(num_nodes=(q + 1) // 2 if q % 2 else q // 2, rr=float(radius),
+                                                curve=axis, stellsym=True, boundary_node=bool(q % 2))
+            return HelicalVesselSDF(xc, [0.0] * nv, zs, [float(radius)] + [0.0] * mr, int(plasma.nfp), ntor=1,
+                                    stellsym=True)
+        radius_dof = dict(helical="rc(0)", pipe="rr", torus="r")[family]
+        rr = vscfg.get("radius")
+        if vscfg.get("seed_file"):
+            # continue a previous stage's vessel (run_ladder.py passes its vessel_final.json)
+            sdf = load(vscfg["seed_file"])
+            rr = float(sdf.local_full_x[sdf.local_full_dof_names.index(radius_dof)])
+        elif rr is None:
+            # start with the margin met: radius = deepest plasma/X-line point from the centre line + margin
+            probe = tube(1.0)
+            pts = [np.asarray(_to_points(plasma.evaluate()["out"]["gamma"])).reshape(-1, 3)]
+            if xpoint is not None:
+                pts.append(xpoint.curve.gamma())
+            reach = max(float(np.max(probe.pure(p, probe.local_full_x, 1.0))) + 1.0 for p in pts)
+            rr = reach + float(vscfg["margin"])
+        if sdf is None:
+            sdf = tube(rr)
+        weights["vessel_margin"] = Weight(vscfg["margin_weight"])
+        weights["coil_clearance"] = Weight(vscfg["clearance_weight"])
+        J_vmargin = PlasmaVesselDistance(plasma, sdf, float(vscfg["margin"]))
+        J_vclear = VesselDistance(sdf, list(base_curves), np.ones(len(base_curves)), float(vscfg["coil_clearance"]))
+        terms += [(weights["vessel_margin"], J_vmargin), (weights["coil_clearance"], J_vclear)]
+        if xpoint is not None:
+            J_vxline = VesselDistance(sdf, [xpoint.curve], np.array([-1.0]), float(vscfg["margin"]))
+            terms.append((weights["vessel_margin"], J_vxline))
+            if float(vscfg.get("xline_distance_weight", 0.0)) > 0.0:
+                weights["xline_vessel_distance"] = Weight(vscfg["xline_distance_weight"])
+                J_vxdist = VesselDistance(sdf, [xpoint.curve], np.array([-1.0]),
+                                          float(vscfg.get("xline_distance_threshold", 1e-3)), metric="distance")
+                terms.append((weights["xline_vessel_distance"], J_vxdist))
+        shape_desc = dict(helical=f"helical tube, centre line order {nv}, radius order {mr}",
+                          pipe=f"welded pipe, {vscfg.get('nseg')} legs", torus="torus")[family]
+        print(f"vessel: {shape_desc}, radius {rr:.4f} m, {len(sdf.local_full_x)} dofs; plasma depth "
+              f"{J_vmargin.shortest_distance():.4f} m (margin {vscfg['margin']}), X-line depth "
+              f"{J_vxline.shortest_distance()[0] if J_vxline is not None else float('nan'):.4f} m, coil clearance "
+              f"{J_vclear.shortest_distance()[0]:.4f} m (>= {vscfg['coil_clearance']})", flush=True)
+
     # Smooth boundary regularity as an augmented-Lagrangian INEQUALITY, the counterpart of the hard guard below: the
     # guard only rejects (816/817/823 then stalled with 0 inner iterations once the phi = 0 tip reached it), while this
     # block has a gradient, so the optimizer slides along the limit and its multiplier learns the force the B.n and
@@ -474,6 +759,60 @@ def main():
         r0 = bootstrap.residuals()["bootstrap"]
         print(f"bootstrap consistency: {r0.size} Redl mismatch rows, max |row| now {np.max(np.abs(r0)):.3e}; "
               f"CURTOR now {float(plasma.vmec_input().curtor):.4e} A", flush=True)
+    # Hard engineering limits (coils.hard): the listed hinge penalties leave the escalated weighted sum and become
+    # augmented-Lagrangian rows sqrt(J) / limit = 0 (PenaltyConstraint), one per coil for length and curvature. Escalation
+    # capped at 1e4x froze the solve (v2), at 100x it let curvature run to 2-7x and the coils into the plasma's clearance
+    # (v3). Appended LAST so earlier block names keep their indices for --resume.
+    hard = [str(key) for key in (kcfg.get("hard") or [])]
+    if hard:
+        available = dict(length=([QuadraticPenalty(CurveLength(c), kcfg["length_threshold"], "max") for c in base_curves],
+                                 float(kcfg["length_threshold"]) / np.sqrt(2.0), J_length),
+                         curvature=([LpCurveCurvature(c, 2, kcfg["curvature_threshold"]) for c in base_curves],
+                                    float(kcfg["curvature_threshold"]), J_curv),
+                         coil_coil=([J_cc], float(kcfg["coil_coil_threshold"]), J_cc),
+                         coil_plasma=([J_cp], float(kcfg["coil_plasma_threshold"]), J_cp))
+        if J_coil_xline is not None:
+            available["coil_xline"] = ([J_coil_xline], float(dn_cfg["coil_distance_min"]), J_coil_xline)
+        if sdf is not None:      # plasma and X-line >= margin inside the vessel, coils >= coil_clearance outside it
+            available["vessel_margin"] = ([J_vmargin] + ([J_vxline] if J_vxline is not None else []),
+                                          float(vscfg["margin"]), J_vmargin)
+            available["vessel_clearance"] = ([J_vclear], float(vscfg["coil_clearance"]), J_vclear)
+            if J_vxline is not None:
+                terms = [(w, t) for w, t in terms if t is not J_vxline or "vessel_margin" not in hard]
+        if J_flat is not None:
+            available["xline_flatness"] = ([J_flat], float(dn_cfg.get("flatness_threshold", 1e-2)), J_flat)
+        if J_hyp is not None:
+            # |tr M| >= 2 + margin (one scalar: sqrt(J) / (2 + margin) is the relative shortfall); vessel scan 3: with
+            # flatness hard and hyperbolicity soft, every HSX-class X-line went elliptic (|tr M| 1.7-1.95)
+            available["hyperbolicity"] = ([J_hyp], 2.0 + float(dn_cfg["hyperbolicity_margin"]), J_hyp)
+            available["xpoint_distance"] = ([J_xdist], float(dn_cfg["distance_min"]), J_xdist)
+        if "mercier" in J_extra_plasma:
+            # Mercier as an AL row (2026-11-07): sqrt(J) / (hard_scale / sqrt 2) = |softplus rows| / hard_scale, i.e.
+            # the root-sum-square instability over s >= s_min in units of hard_scale (pair with normalize: phi_edge
+            # so the unit is class-independent). As an escalated term it stalled at the 100x cap (vessel_scan3).
+            mscale_hard = float((pcfg.get("mercier") or {}).get("hard_scale", 1.0))
+            available["mercier"] = ([J_extra_plasma["mercier"]], mscale_hard / np.sqrt(2.0), J_extra_plasma["mercier"])
+        optional = ("coil_xline", "vessel_margin", "vessel_clearance", "xline_flatness", "hyperbolicity",
+                    "xpoint_distance", "mercier")   # absent without an X-line / a vessel / flatness / Mercier
+        unknown = [key for key in hard if key not in available and key not in optional]
+        if unknown:
+            raise SystemExit(f"coils.hard: {unknown} not available here (choose from {sorted(available)})")
+        dropped = {id(available[key][2]) for key in hard if key in available}
+        terms = [(w, t) for w, t in terms if id(t) not in dropped]
+        for key in (key for key in hard if key in available):
+            rows, scale, _ = available[key]
+            if key == "xline_flatness":
+                block = XLineFlatnessConstraint(xpoint, scale)
+            elif key in ("coil_plasma", "coil_xline"):
+                # one row per coil point to its nearest target point: the averaged penalty diluted a 30 % closest-
+                # approach violation to a 2 % row (ClosestApproachConstraint)
+                block = ClosestApproachConstraint(f"hard_{key}", rows[0])
+            else:
+                block = PenaltyConstraint(f"hard_{key}", rows, scale)
+            constraints.append(block)
+            r_now = block.residuals()[f"hard_{key}"]
+            print(f"hard limit {key}: {r_now.size} augmented-Lagrangian row(s), max relative violation now "
+                  f"{np.max(r_now):.3e}", flush=True)
     initial_weights = {key: float(w.value) for key, w in weights.items()}   # config values, before resume/escalation
     objective = WeightedSum(terms)
     acfg = cfg["augmented_lagrangian"]
@@ -482,6 +821,14 @@ def main():
         # its own starting penalty: an O(0.1) field-line residual at rho(B.n) would throw the coils around
         penalty = {f"{i}:{key}": float(acfg["penalty"]) for i, c in enumerate(constraints) for key in c.residuals()}
         penalty[f"{len(constraints) - 1}:fieldline"] = float(dn_cfg["fieldline_penalty"])
+    if acfg.get("penalty_blocks"):
+        # starting penalties by block key (bnormal, bnormal_band, ...): a B.n block starting at the global rho stayed at
+        # 2 % through 40 outer iterations of dn_converge while the escalated engineering weights grew past it
+        if np.isscalar(penalty):
+            penalty = {f"{i}:{key}": float(penalty) for i, c in enumerate(constraints) for key in c.residuals()}
+        for name in penalty:
+            if acfg["penalty_blocks"].get(name.split(":", 1)[1]) is not None:
+                penalty[name] = float(acfg["penalty_blocks"][name.split(":", 1)[1]])
     al = AugmentedLagrangian(objective, constraints, penalty=penalty,
                              penalty_growth=acfg["penalty_growth"], penalty_max=acfg["penalty_max"],
                              eta0=acfg.get("eta0"), omega0=acfg.get("omega0"))
@@ -519,6 +866,10 @@ def main():
             # ~0.1 it would allow 100 % current changes per unit step (the working designA example uses 0.1 x |I|)
             current_mask = np.array([n.startswith("Current") for n in names])
             D[current_mask] = float(scfg["current_step"]) * np.maximum(np.abs(x_seed[current_mask]), 1e-12)
+    if sdf is not None:
+        # the vessel enters no constraint block, so its Jacobi column is zero and would get the cap: give it the
+        # coil step (metres) instead
+        D[np.array([n.startswith(sdf.name + ":") for n in names])] = float(scfg["coil_step"])
     u = np.zeros_like(x_seed)
     k_start = 0
     ckpt = layout.find(args.outdir, "checkpoint.npz")
@@ -534,7 +885,8 @@ def main():
         weights_file = layout.find(args.outdir, "coil_weights.yaml")
         if os.path.exists(weights_file):                  # keep escalated engineering weights
             for key, value in yaml.safe_load(open(weights_file)).items():
-                weights[key].value = float(value)
+                if key in weights:                        # a term added since the checkpoint keeps its config weight
+                    weights[key].value = float(value)
         print(f"resumed from {ckpt}")
         if tracked:                                    # a free X-line is part of the checkpoint dofs
             saved = layout.matches(args.outdir, "xpoint_outer*.json")
@@ -593,7 +945,9 @@ def main():
             else:
                 J, g = al.J(), al.dJ() * D
                 if not np.isfinite(J) or not np.all(np.isfinite(g)):
-                    reasons.append("non-finite value/gradient")
+                    bad = ~np.isfinite(g)
+                    reasons.append(f"non-finite value/gradient (L {J:.3e}; non-finite gradient entries: "
+                                   f"{int(bad[plasma_mask].sum())} plasma, {int(bad[~plasma_mask].sum())} coil/X-line)")
                 if not plasma.accepted:
                     # status 1 = failed solve (typed VmecError, e.g. a Jacobian sign change), 2 = iteration
                     # budget exhausted above max_fsq_ratio (vmex/core/implicit.py); log WHY the trial failed
@@ -648,6 +1002,9 @@ def main():
         row = dict(outer=k, L=float(al.J()), f_QS=float(sum(costs.values())), terms=costs,
                    bnormal_inf=float(np.max(np.abs(res["bnormal"]))),
                    rms_Bn_over_B=interface.rms_bnormal_over_B(),
+                   # pointwise (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge)/|B_in|^2 on the optimisation grid: a diagnostic,
+                   # never a constraint here (docs/field_strength_condition.md)
+                   pressure_jump=interface.pressure_balance_stats(),
                    field_strength=next((float(res[k][0]) for k in ("toroidal_flux", "pressure_balance", "net_poloidal_current")
                                         if k in res), None),
                    coil_lengths=[float(v) for v in lengths], max_curvature=kappa,
@@ -661,9 +1018,20 @@ def main():
             dists = J_xdist.distances()
             row.update(xpoint_trace=J_hyp.trace(), xpoint_distance_min=float(dists.min()),
                        xpoint_distance_max=float(dists.max()), xpoint_penalty=float(J_xdist.J()))
+            if J_flat is not None:
+                row["xline_z_deviation"] = J_flat.max_deviation()
+            if J_coil_xline is not None:
+                row["coil_xline_distance"] = J_coil_xline.shortest_distance()
             if xline_constraint is not None:
                 row["xline_residual_max"] = float(np.max(np.abs(xline_constraint.residuals()["fieldline"])))
 
+        if sdf is not None:
+            row.update(vessel_plasma_depth=float(J_vmargin.shortest_distance()),
+                       vessel_xline_depth=float(J_vxline.shortest_distance()[0]) if J_vxline is not None else None,
+                       vessel_coil_clearance=float(J_vclear.shortest_distance()[0]),
+                       vessel_xline_gap_spread=float(J_vxdist.longest_distance()[0]) if J_vxdist is not None else None,
+                       vessel_shape_violation=float(vessel_shape_violation()),
+                       vessel_dofs=dict(zip(sdf.local_full_dof_names, map(float, sdf.local_full_x))))
         if bootstrap is not None:
             row.update(bootstrap_residual_max=float(np.max(np.abs(bootstrap.residuals()["bootstrap"]))),
                        curtor=float(plasma.vmec_input().curtor))
@@ -672,6 +1040,8 @@ def main():
                        grad_norm=record["grad_norm"], omega=record["omega"], converged=record["converged"])
         print(f"[outer {k}] L={row['L']:.6e} f_QS={row['f_QS']:.6e} |B.n modes|inf={row['bnormal_inf']:.3e} "
               f"rms(B.n/B)={row['rms_Bn_over_B']:.3e} field_strength={row['field_strength']} "
+              + "".join(f"{n}={costs[n]:.3e} " for n in costs if n in dict(extra_plasma)) +
+              f"pressure jump rms={row['pressure_jump']['rms']:.2e} "
               f"max kappa={kappa:.2f} lengths={np.round(lengths, 3).tolist()} "
               f"coil symmetry error={row['coil_symmetry_error']:.1e} m "
               f"rho={row.get('penalties')} VMEX fwd/bwd={plasma.n_forward}/{plasma.n_backward} "
@@ -679,6 +1049,14 @@ def main():
               + (f" X-point trM={row['xpoint_trace']:+.3f} d=[{row['xpoint_distance_min']:.4f},{row['xpoint_distance_max']:.4f}]"
                  if xpoint is not None else "")
               + (f" X-line residual={row['xline_residual_max']:.3e}" if "xline_residual_max" in row else "")
+              + (f" coil-X-line={row['coil_xline_distance']:.4f}" if "coil_xline_distance" in row else "")
+              + (f" X-line dz={row['xline_z_deviation']:.4f}" if "xline_z_deviation" in row else "")
+              + f" coil-plasma={J_cp.shortest_distance():.4f}"
+              + (f" vessel: plasma depth={row['vessel_plasma_depth']:.4f} X-line depth={row['vessel_xline_depth']:.4f}"
+                 f" coil clearance={row['vessel_coil_clearance']:.4f} X-line gap spread="
+                 f"{row['vessel_xline_gap_spread'] if row['vessel_xline_gap_spread'] is not None else float('nan'):.4f}"
+                 f" shape={row['vessel_shape_violation']:.2e} radius={next((float(v) for n_, v in zip(sdf.local_full_dof_names, sdf.local_full_x) if n_ in ('rc(0)', 'rr', 'r')), float('nan')):.4f}"
+                 if sdf is not None else "")
               + (f" bootstrap mismatch={row['bootstrap_residual_max']:.3e} CURTOR={row['curtor']:.4e} A"
                  if "bootstrap_residual_max" in row else ""), flush=True)
         with open(os.path.join(args.outdir, "history.yaml"), "a") as fh:
@@ -694,6 +1072,8 @@ def main():
             save({"curve": xpoint.curve, "length": float(xpoint.res["length"])},
                  layout.path(args.outdir, f"xpoint_{tag}.json", create=True))
         plasma.vmec_input().to_indata(layout.path(args.outdir, f"input.combined_stage_{tag}", create=True))
+        if sdf is not None:
+            save(sdf, layout.path(args.outdir, f"vessel_{tag}.json", create=True))
         yaml.safe_dump({key: float(w.value) for key, w in weights.items()},
                        open(layout.path(args.outdir, "coil_weights.yaml", create=True), "w"))
 
@@ -711,6 +1091,11 @@ def main():
                                for current, scale in base_currents) / thr("current") - 1.0
         if J_iota is not None:                           # unit-weight VMEX row = floor - min|iota|
             v["iota_floor"] = float(np.sqrt(2.0 * J_iota.J())) / float(pcfg["iota_floor"])
+        for name, key in extra_plasma:                  # rms of the unit-weight rows over a natural scale
+            scale = dict(magnetic_well=max(float(pcfg[key].get("floor", 0.0)), 1e-2),
+                         axis_ripple=float(pcfg[key].get("threshold", 1e-3)),
+                         mercier=float(pcfg[key].get("hard_scale", 1.0)))[key]
+            v[name] = float(np.sqrt(2.0 * J_extra_plasma[name].J())) / scale
         if xpoint is not None:                           # double-null ranges escalate the same way
             margin = 2.0 + float(dn_cfg["hyperbolicity_margin"])
             v["hyperbolicity"] = 1.0 - abs(J_hyp.trace()) / margin
@@ -718,7 +1103,29 @@ def main():
             if dists is not None:
                 v["xpoint_distance"] = max(1.0 - dists.min() / float(dn_cfg["distance_min"]),
                                            dists.max() / float(dn_cfg["distance_max"]) - 1.0)
+            if J_flat is not None:
+                v["xline_flatness"] = J_flat.max_deviation() / float(dn_cfg.get("flatness_threshold", 1e-2)) - 1.0
+            if J_coil_xline is not None:
+                v["coil_xline"] = 1.0 - J_coil_xline.shortest_distance() / float(dn_cfg["coil_distance_min"])
+        if sdf is not None:                              # boozer_all's margin / clearance / X-line-gap errors
+            depth = min([J_vmargin.shortest_distance()] + ([J_vxline.shortest_distance()[0]] if J_vxline else []))
+            margin = float(vscfg["margin"])
+            v["vessel_margin"] = max((margin - depth) / margin, vessel_shape_violation())
+            v["coil_clearance"] = 1.0 - J_vclear.shortest_distance()[0] / float(vscfg["coil_clearance"])
+            if J_vxdist is not None:
+                thr_d = float(vscfg.get("xline_distance_threshold", 1e-3))
+                v["xline_vessel_distance"] = J_vxdist.longest_distance()[0] / thr_d - 1.0
         return {key: float(max(val, 0.0)) for key, val in v.items()}
+
+    def vessel_shape_violation():
+        """boozer_all's vessel validity: helical tube kappa R < 1, |dR/ds| < 1, R > 0, arclength variation; welded
+        pipe geometric_violation (radius, leg length, turn cap, mitre interference); a torus has none."""
+        if isinstance(sdf, HelicalCylinderVesselSDF):
+            return float(sdf.geometric_violation())
+        if isinstance(sdf, TorusSDF):
+            return 0.0
+        return max(max(sdf.max_kappa_radius() - 1.0, 0.0), max(sdf.max_dr_ds() - 1.0, 0.0),
+                   max(-sdf.min_radius(), 0.0), float(sdf.arclength_variation()))
 
     def escalate_coil_weights():
         """array/boozer_all.py practice: fixed penalty weights cannot hold a range once the augmented
@@ -729,6 +1136,8 @@ def main():
         actions = {}
         max_factor = float(kcfg.get("escalation_max_factor", np.inf))
         for key, viol in coil_violations().items():
+            if key in hard or (key == "coil_clearance" and "vessel_clearance" in hard):   # held by an AL block
+                continue
             cap = min(float(kcfg["weight_max"]), max_factor * initial_weights[key])
             if viol > float(kcfg["escalation_tol"]) and weights[key].value < cap:
                 weights[key] *= float(kcfg["escalation_factor"])
@@ -828,6 +1237,10 @@ def main():
     for k in range(k_start, acfg["outer_maxiter"]):
         good.clear()
         best.clear()
+        # this outer's accepted starting point with its VMEX and X-line state: the last fallback when even the inner
+        # solve's best point no longer evaluates (dn_introduce, 5 HSX devices 2026-10-20: non-finite on re-evaluation)
+        start = dict(u=u.copy(), solve=vmex_implicit._LAST_SOLVE.get(vmex_cfg), hot=vmex_implicit._HOT_CACHE.get(vmex_cfg),
+                     xsnap=fieldline_snapshot(xpoint) if tracked else None)
         t0 = time.time()
         inner_it["n"] = 0
         res = minimize(fun, u, jac=True, method="L-BFGS-B", callback=history_callback,
@@ -855,7 +1268,14 @@ def main():
             u = best_point["u"]
             good.clear()
             restore_vmex(best_point)
-            _, g = fun(u)
+            try:
+                _, g = fun(u)
+            except RuntimeError as e:
+                print(f"  best point no longer evaluates ({e}); continuing from this outer's starting point", flush=True)
+                u = start["u"]
+                good.clear()
+                restore_vmex(start)
+                _, g = fun(u)
         record = al.update(float(np.max(np.abs(g))), ctol=acfg["ctol"], gtol=acfg["gtol"])
         escalated = escalate_coil_weights()
         if escalated:
@@ -880,6 +1300,28 @@ def main():
         print(f"wrote {wout_path}")
     except Exception as e:  # noqa: BLE001
         print(f"could not write final wout: {e!r}")
+
+    # ---- final free-boundary consistency check (reported, not optimised) ----------------------
+    # The constraints only hold B.n harmonics and ONE field-strength scalar on the optimisation grid. Re-evaluate the
+    # pointwise interface conditions -- B.n and total-pressure balance |B_out|^2 = |B_in|^2 + 2 mu0 p_edge -- with
+    # virtual casing on an independent, finer grid (as VMEX's single_stage_optimization_finite_beta.py does). Why
+    # pressure balance is a check here and not a constraint: docs/field_strength_condition.md.
+    fcfg = cfg.get("final_check") or {}
+    if fcfg.get("enabled", True) and plasma.accepted:
+        t0 = time.time()
+        try:
+            check = interface_check(plasma, BiotSavart(coils), nphi=int(fcfg.get("nphi", 32)),
+                                    ntheta=int(fcfg.get("ntheta", 32)), digits=int(fcfg.get("digits", 4)),
+                                    p_edge=float(ccfg["p_edge"]))
+            check["optimisation_grid"] = interface.pressure_balance_stats()
+            check["field_strength"] = {k: float(v[0]) for k, v in interface.residuals().items() if k != "bnormal"}
+            yaml.safe_dump(check, open(os.path.join(args.outdir, "final_check.yaml"), "w"), sort_keys=False)
+            print(f"final check ({check['nphi']}x{check['ntheta']}, {time.time() - t0:.0f}s): "
+                  f"rms(B.n/B)={check['bnormal_rms']:.2e} max={check['bnormal_max']:.2e}; "
+                  f"pressure jump (|B_out|^2-|B_in|^2-2mu0 p)/|B_in|^2 mean={check['pressure_mean']:+.2e} "
+                  f"rms={check['pressure_rms']:.2e} max={check['pressure_max']:.2e} -> final_check.yaml", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"final check failed: {e!r}")
 
 
 if __name__ == "__main__":

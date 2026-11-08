@@ -1,0 +1,101 @@
+# HSX-size QA nfp = 4 from circular coils, rebuilt WITH ROOM FOR A VESSEL (2026-10-18), single stage throughout.
+# Why: the 32-coil device of hsx_nfp4_circular_vacuum + dn_free settled with its coils 14.6 cm from the plasma and
+# 9.7 cm from the X-lines, so boozer_all's vessel (margin 0.10 + coil clearance 0.12 beyond the X-lines) could not fit
+# (run dn_32coils_vc_G_andrew_vessel: vessel weights capped, coils still 1.4 cm inside the tube, f_QS 4.6x worse).
+# Changes against hsx_nfp4_circular_vacuum.yaml / hsx_nfp4_dn_free.yaml / hsx_dn_24coils_vc_G_band3e-3.yaml:
+#   - CONFORMAL VESSEL ROOM (user, 2026-10-18), not a vessel shape: the vessel is to follow the plasma and its X-lines
+#     at a margin (0.10 m) with the coils a clearance (0.12 m) beyond it, so the coils keep >= 0.22 m from the plasma
+#     (coils.coil_plasma_threshold) and from both X-lines (double_null.coil_distance_min, CoilXLineDistance); the vessel
+#     itself is built afterwards as that offset surface. Seed circles 3.5 a = 0.525 m (was 2.5 a: 0.375 m gap at start);
+#   - coil length / current limits per coil count, set by the launcher (--set), see below;
+#   - X-line flatness from dn_converge on: config.yaml default (|z - mean z| <= 10 mm escalated + pull, user 2026-10-18);
+#   - magnetic well (depth W = (V'(0) - V'(1))/V'(0) >= 3 % and V'' <= 0) from stage 2 on;
+#   - last stage at beta 1 % (virtual casing, net poloidal current G, B.n band 3e-3: the recipe whose 24-coil device
+#     passed the free-boundary field-line check).
+# Launch (one per coil count; NB = base coils per half period: 32 coils -> 4, 24 -> 3, 16 -> 2):
+#   cd star_lite_design/combined_stage
+#   LADDER=ladders/hsx_nfp4_far.yaml SEED=.../runs/combined_stage/seeds/input.qa_nfp4_R1p2_A8 \
+#     OUTDIR=.../runs/combined_stage/hsx_far_<N>coils \
+#     SETS="coil_seed.ncoils=NB coils.length_threshold=L coils.current_threshold=I" sbatch sbatch/ladder.sbatch
+#   with (N, L, I) = (32, 5.5, 250000.0), (24, 6.0, 333334.0), (16, 7.0, 500000.0) (write floats: YAML reads 250e3 as a
+#   string): the seed circle is 3.3 m long, and the
+#   current needed for B0 = 1 T scales as 1/N (187.5 / 250 / 375 kA), the limit keeps the 4/3 headroom of the 32-coil runs.
+config: ../config.yaml
+common:
+  - coil_seed.type=circular
+  - coil_seed.order=6
+  - coil_seed.minor_radius_factor=3.5
+  - scaling.mode=jacobi
+  - vmex.mpol=6
+  - vmex.ntor=6
+  - vmex.nphi=32
+  - vmex.ntheta=32
+  - plasma_objective.aspect_target=8.0
+  - coils.curvature_threshold=10.0
+  - coils.msc_threshold=20.0
+  - coils.coil_coil_threshold=0.08
+  - coils.coil_plasma_threshold=0.22
+  - augmented_lagrangian.penalty=1000.0
+  - augmented_lagrangian.eta0=1.0e-3
+  - augmented_lagrangian.omega0=1.0e-2
+  - augmented_lagrangian.penalty_growth=2.0
+  - augmented_lagrangian.penalty_max=1.0e+6
+  - augmented_lagrangian.inner_maxiter=100
+  - boundary_guard.min_speed_ratio=0.05
+stages:
+  # ---- vacuum, no double null (hsx_nfp4_circular_vacuum.yaml) ----
+  - name: m1_iota0.15
+    set: [double_null.enabled=false, vmex.plasma_field=vacuum, consistency.field_strength=toroidal_flux,
+          consistency.mpol=6, consistency.ntor=9, vmex.max_mode=1, plasma_objective.iota_floor=0.15,
+          plasma_objective.iota_weight=10.0, augmented_lagrangian.outer_maxiter=6, augmented_lagrangian.ctol=1.0e-4]
+  - name: m2_iota0.25
+    set: [double_null.enabled=false, vmex.plasma_field=vacuum, consistency.field_strength=toroidal_flux,
+          consistency.mpol=6, consistency.ntor=9, vmex.max_mode=2, plasma_objective.iota_floor=0.25,
+          plasma_objective.iota_weight=10.0, augmented_lagrangian.outer_maxiter=10, augmented_lagrangian.ctol=1.0e-4]
+  - name: m3_iota0.35_well
+    set: [double_null.enabled=false, vmex.plasma_field=vacuum, consistency.field_strength=toroidal_flux,
+          consistency.mpol=6, consistency.ntor=9, vmex.max_mode=3, plasma_objective.iota_floor=0.35,
+          plasma_objective.iota_weight=10.0, "plasma_objective.magnetic_well={enabled: true, floor: 0.03, weight: 10.0}",
+          augmented_lagrangian.outer_maxiter=10, augmented_lagrangian.ctol=1.0e-4]
+  - name: m3_iota0.42_well
+    set: [double_null.enabled=false, vmex.plasma_field=vacuum, consistency.field_strength=toroidal_flux,
+          consistency.mpol=6, consistency.ntor=9, vmex.max_mode=3, plasma_objective.iota_floor=0.42,
+          plasma_objective.iota_weight=10.0, "plasma_objective.magnetic_well={enabled: true, floor: 0.03, weight: 10.0}",
+          augmented_lagrangian.outer_maxiter=9]
+  # ---- vacuum double null (hsx_nfp4_dn_free.yaml: field line first, then converge at max_mode 2, plasma steps x0.1) ----
+  - name: dn_introduce
+    set: [vmex.plasma_field=vacuum, consistency.field_strength=toroidal_flux, consistency.mpol=6, consistency.ntor=9,
+          vmex.max_mode=3, plasma_objective.iota_floor=0.37, plasma_objective.iota_weight=1000.0,
+          plasma_objective.iota_escalate=true,
+          "plasma_objective.magnetic_well={enabled: true, floor: 0.03, weight: 10.0}",
+          double_null.enabled=true, double_null.mode=free, double_null.free_order=10, double_null.free_offset=0.06,
+          double_null.hyperbolicity_margin=0.2, double_null.hyperbolicity_weight=1.0e-3, double_null.distance_min=0.04,
+          double_null.distance_max=0.12, double_null.distance_weight=1.0e+2, double_null.coil_distance_min=0.22,
+          double_null.coil_distance_weight=1.0e+4, double_null.fieldline_penalty=1000.0,
+          double_null.free_prefit_maxiter=0, double_null.flatness_weight=0.0, augmented_lagrangian.outer_maxiter=7, augmented_lagrangian.ctol=1.0e-4]
+  - name: dn_converge
+    set: [vmex.plasma_field=vacuum, consistency.field_strength=toroidal_flux, consistency.mpol=6, consistency.ntor=9,
+          vmex.max_mode=2, scaling.plasma_factor=0.1, plasma_objective.iota_floor=0.37,
+          plasma_objective.iota_weight=1000.0, plasma_objective.iota_escalate=true,
+          "plasma_objective.magnetic_well={enabled: true, floor: 0.03, weight: 10.0}",
+          double_null.enabled=true, double_null.mode=free, double_null.free_order=10,
+          double_null.hyperbolicity_margin=0.2, double_null.hyperbolicity_weight=1.0e-3, double_null.distance_min=0.04,
+          double_null.distance_max=0.12, double_null.distance_weight=1.0e+2, double_null.coil_distance_min=0.22,
+          double_null.coil_distance_weight=1.0e+4, double_null.fieldline_penalty=1000.0,
+          augmented_lagrangian.outer_maxiter=25, augmented_lagrangian.ctol=1.0e-5]
+  # ---- beta 1 %: virtual casing, G, B.n band 3e-3 (hsx_dn_24coils_vc_G_band3e-3.yaml) ----
+  - name: beta1_G_band
+    beta_seed: 0.01
+    set: [vmex.plasma_field=virtual_casing, consistency.field_strength=net_poloidal_current, consistency.mpol=8,
+          consistency.ntor=9, consistency.bnormal_band=3.0e-3, vmex.max_mode=2, scaling.plasma_factor=0.1,
+          plasma_objective.aspect_target=null, plasma_objective.iota_floor=0.37, plasma_objective.iota_weight=1000.0,
+          plasma_objective.iota_escalate=true,
+          "plasma_objective.magnetic_well={enabled: true, floor: 0.03, weight: 10.0}",
+          double_null.enabled=true, double_null.mode=free, double_null.free_order=10,
+          double_null.hyperbolicity_margin=0.2, double_null.hyperbolicity_weight=1.0e-3, double_null.distance_min=0.04,
+          double_null.distance_max=0.12, double_null.distance_weight=1.0e+2, double_null.coil_distance_min=0.22,
+          double_null.coil_distance_weight=1.0e+4, double_null.fieldline_penalty=1000.0,
+          "augmented_lagrangian.eta0={bnormal_band: 1.0e-4, net_poloidal_current: 1.0e-4, fieldline: 3.0e-4, boundary_regularity: 5.0e-3}",
+          "augmented_lagrangian.ctol={bnormal_band: 1.0e-4, net_poloidal_current: 1.0e-5, fieldline: 3.0e-4, boundary_regularity: 5.0e-3}",
+          boundary_regularity.enabled=true, boundary_regularity.min_speed_ratio=0.15,
+          augmented_lagrangian.outer_maxiter=25]

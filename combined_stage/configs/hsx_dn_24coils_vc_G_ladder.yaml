@@ -1,0 +1,122 @@
+# HSX-class DN, 24 coils: intermediate stage of the coil-count ladder 32 -> 24 -> 16 -> 12 (2026-10-15). The direct 32 -> 12
+# reduction (run dn_12coils_vc_G) started 10x off in B.n and lost QS (f_QS 2e-2 -> 1.2); here each stage is seeded from the previous
+# stage's final coils/boundary/X-line (tools/reduce_coil_types.py) and runs 10 outer iterations. Same HSX coil limits; current
+# limit scaled by 32/24 (333334 A). Final 12-coil stage: hsx_dn_12coils_vc_G.yaml.
+design: /data/common/raffael.wendlinger/simflare/ext/star_lite_design/convert/designA_after_scaled.json
+config_id: 0
+vmec_input: null
+coil_seed:
+  type: archive
+  ncoils: 4
+  order: 6
+  R1: null
+  minor_radius_factor: 2.5
+vmex:
+  ns: 16
+  ftol: 1.0e-11
+  niter: 20000
+  max_mode: 2
+  mpol: 6
+  ntor: 6
+  current_dofs: null
+  vary_major_radius: false
+  nphi: 32
+  ntheta: 32
+  vc_digits: 3
+  plasma_field: virtual_casing
+  problem_kwargs: {}
+plasma_objective:
+  qs_surfaces:
+  - 0.1
+  - 0.9
+  - 8
+  helicity_m: 1
+  helicity_n: 0
+  aspect_target: null
+  aspect_weight: 1.0
+  iota_floor: 0.37
+  iota_weight: 1000.0
+  iota_escalate: true
+  beta_target: null
+  beta_weight: null
+consistency:
+  mode: fourier
+  mpol: 8
+  ntor: 9
+  field_strength: net_poloidal_current
+  p_edge: 0.0
+  bnormal_band: null
+augmented_lagrangian:
+  penalty: 1000.0
+  penalty_growth: 2.0
+  penalty_max: 1000000.0
+  eta0:
+    bnormal: 0.001
+    net_poloidal_current: 0.0001
+    fieldline: 0.0003
+    boundary_regularity: 0.005
+  omega0: 0.01
+  ctol:
+    bnormal: 0.001
+    net_poloidal_current: 1.0e-05
+    fieldline: 0.0003
+    boundary_regularity: 0.005
+  gtol: 1.0e-06
+  outer_maxiter: 10
+  inner_maxiter: 100
+coils:
+  fix_currents: false
+  length_threshold: 5.0
+  length_weight: 1000.0
+  curvature_threshold: 10.0
+  curvature_weight: 0.001
+  msc_threshold: 20.0
+  msc_weight: 0.01
+  coil_coil_threshold: 0.08
+  coil_coil_weight: 10000000.0
+  coil_plasma_threshold: 0.15
+  coil_plasma_weight: 10000.0
+  current_threshold: 333334.0
+  current_weight: 1000000.0
+  escalate: true
+  escalation_factor: 10.0
+  escalation_tol: 0.01
+  weight_max: 1000000000000.0
+  escalation_max_factor: 10000.0
+scaling:
+  mode: jacobi
+  jacobi_step: 0.01
+  jacobi_cap: 100.0
+  plasma_factor: 0.1
+  plasma_step: 1.0
+  coil_step: 0.01
+barrier_retreat: 0.5
+double_null:
+  enabled: true
+  mode: free
+  free_order: 10
+  free_offset: 0.06
+  free_prefit_maxiter: 0
+  fieldline_penalty: 1000.0
+  hyperbolicity_margin: 0.2
+  hyperbolicity_weight: 0.001
+  distance_min: 0.04
+  distance_max: 0.12
+  distance_weight: 100.0
+  newton_tol: 1.0e-13
+  newton_maxiter: 40
+history_every: 5
+boundary_guard:
+  min_speed_ratio: 0.05
+  nphi: 8
+  ntheta: 512
+boundary_regularity:
+  enabled: true
+  min_speed_ratio: 0.15
+  nphi: 8
+  ntheta: 64
+final_check:
+  enabled: true
+  nphi: 32
+  ntheta: 32
+  digits: 4

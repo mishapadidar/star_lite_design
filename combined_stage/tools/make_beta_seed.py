@@ -3,9 +3,11 @@
 equals the target at a combined-stage config's resolution (vmex.mpol/ntor/ns/ftol/niter). Net toroidal current stays
 as in the input (NCURR = 1, CURTOR = 0 for the HSX-size seeds: no bootstrap current).
 
-usage: make_beta_seed.py <config yaml> <namelist in> <namelist out> <beta target, e.g. 0.01>
+usage: make_beta_seed.py <config yaml> <namelist in> <namelist out> <beta target, e.g. 0.01> [restart wout]
+With a restart wout (the previous stage's final), solves that VMEX rejects cold are hot-restarted from it.
 Prints each calibration solve and "SEED READY <out>" once |beta/target - 1| < 2e-3 (a cold VMEX solve of <out>).
 """
+import os
 import re
 import sys
 import time
@@ -18,6 +20,11 @@ import yaml
 def main():
     cfg = yaml.safe_load(open(sys.argv[1]))
     src, dst, beta_target = sys.argv[2], sys.argv[3], float(sys.argv[4])
+    restart = sys.argv[5] if len(sys.argv) > 5 else None
+    if restart is None and os.path.basename(src) == "input.combined_stage_final":
+        # older ladders do not pass the wout: the previous stage's final sits in <stage>/wout/ beside <stage>/inputs/
+        guess = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(src))), "wout", "wout_combined_stage_final.nc")
+        restart = guess if os.path.exists(guess) else None
     import vmex as vj
     from vmex import optimize as opt
     v = cfg["vmex"]
@@ -40,7 +47,13 @@ def main():
         inp = replace(inp, ns_array=np.array([v["ns"]]), ftol_array=np.array([v["ftol"]]),
                       niter_array=np.array([v["niter"]]))
         t0 = time.time()
-        w = opt.solve_equilibrium(inp).wout
+        try:
+            w = opt.solve_equilibrium(inp).wout
+        except Exception as e:  # noqa: BLE001
+            if not restart:
+                raise
+            print(f"cold solve failed ({type(e).__name__}); hot restart from {restart}", flush=True)
+            w = opt.solve_equilibrium(inp, restart_from=restart).wout
         return w, time.time() - t0
 
     scale = 2.0 * beta_target / (2.0 * 4e-7 * np.pi)      # <p> = scale / 2 for p = scale (1 - s), B0 ~ 1 T
