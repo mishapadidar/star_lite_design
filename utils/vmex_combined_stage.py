@@ -28,8 +28,22 @@ Objects
     see (the harmonic toroidal field set by the total poloidal coil current;
     without it a vacuum problem is solved by switching the coils off):
     ``toroidal_flux`` -- the coil flux through the boundary cross-section at
-    ``phi = 0`` equals PHIEDGE (exact gradients) -- or ``pressure_balance`` --
-    ``<|B_out|^2 - |B_in|^2 - 2 mu0 p_edge> / B_ref^2`` (finite beta).
+    ``phi = 0`` equals PHIEDGE (exact gradients, exact only in vacuum) --,
+    ``pressure_balance`` -- ``<|B_out|^2 - |B_in|^2 - 2 mu0 p_edge> / B_ref^2``
+    (finite beta, one area-weighted mean) -- or ``net_poloidal_current`` -- the
+    current the coils link through the torus hole equals ``2 pi G / mu0``,
+    ``G`` the Boozer ``G`` (VMEX ``rbtor``) at the boundary (exact at any beta;
+    the recommended choice at finite beta). Why, and how they compare:
+    ``combined_stage/docs/field_strength_condition.md``.
+:class:`PressureBalancePenalty`
+    Pointwise total-pressure balance ``(|B_out|^2 - |B_in|^2 - 2 mu0 p_edge) / B_ref^2``
+    at every boundary grid point, as a weighted least-squares OBJECTIVE term --
+    the form VMEX's ``single_stage_optimization_finite_beta.py`` uses. Fixes the
+    field scale (use with ``field_strength=None``) and the local |B| pattern.
+:func:`interface_check`
+    End-of-run diagnostic on an independent (finer) virtual-casing grid: the
+    pointwise pressure-balance jump and ``B.n`` that the constraints above only
+    see through harmonics / one scalar. Not a constraint, nothing is differentiated.
 :class:`CoilPlasmaDistance`
     One-sided quadratic penalty keeping the coils ``minimum_distance`` away from
     the (moving) plasma boundary.
@@ -52,7 +66,7 @@ from .augmented_lagrangian import EqualityConstraint, InequalityConstraint, merg
 __all__ = ["VmexPlasma", "VmexQuasisymmetry", "PlasmaCoilInterface",
            "CoilPlasmaDistance", "WeightedSum", "bnormal_fourier_modes", "coil_stellsym_error",
            "fix_self_symmetric_coil_parity", "net_poloidal_current_output", "bootstrap_mismatch_output",
-           "kinetic_profiles", "kinetic_pressure_coeffs", "BootstrapConsistency"]
+           "kinetic_profiles", "kinetic_pressure_coeffs", "BootstrapConsistency", "interface_check", "PressureBalancePenalty"]
 
 MU0 = 4e-7 * np.pi
 
@@ -476,6 +490,17 @@ class PlasmaCoilInterface(EqualityConstraint):
             currents, and its plasma gradient is one scalar through the shared adjoint. Needs ``plasma`` built with
             ``extra_outputs={"rbtor": net_poloidal_current_output()}``; ``None`` -- omit.
         nloop: points on the circle for ``oint B_coil . dl`` (``net_poloidal_current``).
+
+    Which ``field_strength``: ``B.n = 0`` is blind to multiplying every coil current by the same factor, so exactly
+    one of these fixes the scale. In vacuum ``toroidal_flux`` and ``net_poloidal_current`` are equivalent. At finite
+    beta the plasma's diamagnetic currents change the toroidal flux inside the boundary, so ``toroidal_flux`` (coil
+    flux only) is biased; ``pressure_balance`` is valid but is one mean over grid points and carries the virtual-casing
+    gradient error; ``net_poloidal_current`` is exact (Ampere's law on a toroidal loop on the boundary links the coils
+    and none of the plasma's poloidal current). ``field_strength=None`` + :class:`PressureBalancePenalty` is VMEX's
+    finite-beta formulation: pressure balance at every grid point as a weighted objective term, which fixes the scale
+    too. Whichever is used, check the pointwise pressure balance at the end (:meth:`pressure_balance_stats`,
+    :func:`interface_check`). Full discussion:
+    ``combined_stage/docs/field_strength_condition.md``.
     """
 
     def __init__(self, plasma, field, *, mode="fourier", mpol=4, ntor=4, B_ref=None,
@@ -599,6 +624,31 @@ class PlasmaCoilInterface(EqualityConstraint):
         Bin = np.sqrt(self.plasma.outputs()["Bin_mag2"])
         return float(np.sqrt(np.sum(c["w"] * (c["f"] * self.B_ref / Bin) ** 2)))
 
+    def pressure_balance_rows(self):
+        """Pointwise pressure-balance rows ``sqrt(w) (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge) / B_ref^2``, flattened.
+
+        One row per virtual-casing grid point, area weights ``w`` summing to 1, so ``0.5 |rows|^2`` is half the
+        area-weighted mean square of the normalised jump -- VMEX's ``pressure_rows`` in
+        ``examples/optimization/single_stage_optimization_finite_beta.py``, except that ``B_ref`` is the frozen seed
+        value (VMEX recomputes ``sqrt(<|B|^2>)`` at every iterate; the two differ only by the field-scale change the
+        rows themselves control). Pullback key: ``"pressure_balance_points"`` in :meth:`residuals_vjp_parts`.
+        """
+        c = self._compute()
+        return (np.sqrt(c["w"]) * c["jump"]).ravel() / self.B_ref ** 2
+
+    def pressure_balance_stats(self):
+        """Pointwise total-pressure jump on the optimisation grid (a diagnostic, any ``field_strength``).
+
+        ``e = (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge) / |B_in|^2`` at every grid point, ``B_out = B_plasma + B_coil``
+        (``B_plasma = 0`` for ``plasma_field="vacuum"``); ``e ~ 2 d|B|/|B|``, so ``1e-3`` is a 0.05 % field-strength
+        mismatch. ``mean`` is what ``field_strength="pressure_balance"`` constrains (normalised by ``B_ref^2``
+        there); ``rms`` / ``max`` are what it does not see. Use :func:`interface_check` for an independent grid.
+        """
+        c = self._compute()
+        e = c["jump"] / self.plasma.outputs()["Bin_mag2"]
+        w = c["w"]
+        return dict(mean=float(np.sum(w * e)), rms=float(np.sqrt(np.sum(w * e ** 2))), max=float(np.max(np.abs(e))))
+
     def residuals_vjp_parts(self, cotangents):
         c = self._compute()
         if not c["accepted"]:
@@ -621,6 +671,10 @@ class PlasmaCoilInterface(EqualityConstraint):
             v = float(np.asarray(cotangents["pressure_balance"]).ravel()[0])
             h = v * w / self.B_ref ** 2
             d_weights += v * c["jump"] / self.B_ref ** 2
+        if "pressure_balance_points" in cotangents:      # rows_i = sqrt(w_i) jump_i / B_ref^2 (pressure_balance_rows)
+            v = np.asarray(cotangents["pressure_balance_points"], dtype=float).reshape(nphi, ntheta)
+            h = h + v * np.sqrt(w) / self.B_ref ** 2
+            d_weights += v * c["jump"] * 0.5 / (np.sqrt(w) * self.B_ref ** 2)
         v_B = g_Bn[..., None] * c["normal"] + 2.0 * h[..., None] * c["B_out"]   # d/d B_coil
         self.field.set_points(c["points"])
         d_coils = self.field.B_vjp(np.ascontiguousarray(v_B.reshape(-1, 3)))
@@ -647,6 +701,93 @@ class PlasmaCoilInterface(EqualityConstraint):
             d_coils += self.field.B_vjp(np.ascontiguousarray(v * self.loop_dl / MU0))
             plasma_ct["rbtor"] = np.asarray(-v * self.current_sign * 2.0 * np.pi / MU0)
         return d_coils, {self.plasma: plasma_ct}
+
+
+class PressureBalancePenalty(Optimizable):
+    """``J = 0.5 |rows|^2`` of :meth:`PlasmaCoilInterface.pressure_balance_rows` -- pointwise pressure balance.
+
+    The ideal-MHD jump condition at the plasma-vacuum interface, ``p_edge + |B_in|^2/2 mu0 = |B_plasma + B_coil|^2/2
+    mu0``, at EVERY boundary grid point, as VMEX's finite-beta single-stage example imposes it: a weighted least-squares
+    term of the objective (put it in a :class:`WeightedSum` with its weight; VMEX uses 1e2 next to 1e3 for B.n), not an
+    augmented-Lagrangian equality -- one row per grid point is more conditions than the coils and boundary can meet
+    exactly, and an equality block would only grow its penalty without bound.
+
+    Scaling the coil currents changes ``|B_out|``, so this term also fixes the field scale that ``B.n`` cannot see:
+    build the interface with ``field_strength=None`` (or keep ``net_poloidal_current`` to hold the scale exactly and
+    let this term shape the local ``|B|``). Needs ``plasma_field="virtual_casing"`` at finite beta. Its plasma
+    gradient goes through the virtual casing and carries the ~2 % virtual-casing gradient error (README, Validation
+    status); the coil gradient is exact. Shares the interface's cache and the ONE VMEX adjoint (``dJ_parts``).
+
+    Used only by ``combined_stage/examples/combined_stage_simple.py`` (the reference implementation of VMEX's
+    formulation); the driver does not offer it -- production runs fix the scale with ``net_poloidal_current`` and
+    report the pointwise balance through :func:`interface_check`.
+    """
+
+    def __init__(self, interface):
+        self.interface = interface
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[interface])
+
+    def J(self):
+        if not self.interface.plasma.accepted:
+            return 0.0
+        rows = self.interface.pressure_balance_rows()
+        return 0.5 * float(rows @ rows)
+
+    def dJ_parts(self):
+        if not self.interface.plasma.accepted:
+            return Derivative({}), {}
+        return self.interface.residuals_vjp_parts({"pressure_balance_points": self.interface.pressure_balance_rows()})
+
+    @derivative_dec
+    def dJ(self):
+        derivative, parts = self.dJ_parts()
+        for owner, ct in parts.items():
+            derivative += owner.pullback(ct)
+        return derivative
+
+
+def interface_check(plasma, field, *, nphi=32, ntheta=32, digits=4, p_edge=0.0):
+    """Free-boundary consistency of the CURRENT equilibrium and coils on an independent grid (end-of-run check).
+
+    The optimisation only constrains low-order ``B.n`` harmonics and ONE field-strength scalar on the virtual-casing
+    grid it was run with. This recomputes, on a separate ``nphi x ntheta`` grid per field period (default finer, as in
+    VMEX's ``examples/optimization/single_stage_optimization_finite_beta.py``, so an optimum aliased to the
+    optimisation grid is not accepted), the two pointwise ideal-MHD interface conditions
+
+        ``(B_plasma + B_coil) . n = 0``   and   ``|B_plasma + B_coil|^2 = |B_in|^2 + 2 mu0 p_edge``,
+
+    with ``B_plasma`` always from virtual casing (also for a ``plasma_field="vacuum"`` run, which is then tested
+    against the plasma field it ignored). Nothing here is differentiated: whether pressure balance was imposed
+    (:class:`PressureBalancePenalty`, pointwise on the optimisation grid) or only the scale was fixed
+    (``net_poloidal_current``), this confirms the local |B| pattern on a grid the optimiser never saw. Run on 2-4 cores (``--cpus-per-task=4``, PIN_CORES unset): virtual_casing_jax returned
+    nondeterministic garbage on many cores, and one core deadlocks VMEX (``sbatch/run_stage.sbatch``).
+
+    Args:
+        plasma: :class:`VmexPlasma` at the point to check (its accepted equilibrium is reused, no re-solve).
+        field: simsopt ``BiotSavart`` of the coils (its evaluation points are reset).
+        nphi, ntheta, digits: virtual-casing grid per field period and accuracy.
+        p_edge: pressure at the boundary [Pa].
+
+    Returns:
+        dict with ``bnormal_rms`` / ``bnormal_max`` (``B_out . n / |B_in|``) and ``pressure_mean`` /
+        ``pressure_rms`` / ``pressure_max`` (``e = (|B_out|^2 - |B_in|^2 - 2 mu0 p_edge) / |B_in|^2``, ``e ~ 2
+        d|B|/|B|``; area-weighted mean, rms, max |e|), plus the grid.
+    """
+    from vmex.core import virtual_casing as vc
+
+    vci = vc.PlasmaVacuumInterface.from_wout(plasma.equilibrium().wout, nphi=int(nphi), ntheta=int(ntheta),
+                                             p_edge=float(p_edge), digits=int(digits))
+    gamma = _to_points(vci.gamma)
+    field.set_points(np.ascontiguousarray(gamma.reshape(-1, 3)))
+    B_out = _to_points(vci.B_plasma) + field.B().reshape(gamma.shape)
+    Bin2 = np.asarray(vci.Bin_mag2, dtype=float)
+    w = np.asarray(vci.weights, dtype=float)
+    bn = np.sum(B_out * _to_points(vci.normal), axis=-1) / np.sqrt(Bin2)
+    e = (np.sum(B_out ** 2, axis=-1) - Bin2 - 2.0 * MU0 * float(p_edge)) / Bin2
+    return dict(nphi=int(nphi), ntheta=int(ntheta), digits=int(digits),
+                bnormal_rms=float(np.sqrt(np.sum(w * bn ** 2))), bnormal_max=float(np.max(np.abs(bn))),
+                pressure_mean=float(np.sum(w * e)), pressure_rms=float(np.sqrt(np.sum(w * e ** 2))),
+                pressure_max=float(np.max(np.abs(e))))
 
 
 class CoilPlasmaDistance(Optimizable):
@@ -717,6 +858,165 @@ class CoilPlasmaDistance(Optimizable):
         npts = gamma.shape[0]
         g_gamma = sum(gY[k * npts:(k + 1) * npts] @ R for k, R in enumerate(rots))
         g_gamma = g_gamma.reshape(self.plasma.nphi, self.plasma.ntheta, 3)
+        return derivative, {self.plasma: {"gamma": _to_jax_layout(g_gamma)}}
+
+    @derivative_dec
+    def dJ(self):
+        derivative, parts = self.dJ_parts()
+        for owner, ct in parts.items():
+            derivative += owner.pullback(ct)
+        return derivative
+
+
+class CoilXLineDistance(Optimizable):
+    """``J = sum_i mean_{q,p} max(d_min - |x_iq - y_p|, 0)^2``: coil ``i`` against the X-line points ``y_p``.
+
+    ``y_p`` are the quadrature points of ``xline.curve`` (the upper null, one field period) and their stellarator images
+    ``(x, -y, -z)`` (the lower null); ``curves`` must be the full coil set, so every period is covered. With
+    ``coils.coil_plasma_threshold`` this keeps room for a vessel that follows the plasma and its X-lines at a margin, with
+    the coils a clearance beyond it (``d_min`` = margin + clearance).
+    """
+
+    MIRROR = np.array([1.0, -1.0, -1.0])
+
+    def __init__(self, curves, xline, minimum_distance):
+        self.curves, self.xline = list(curves), xline
+        self.minimum_distance = float(minimum_distance)
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=self.curves + [xline])
+
+    def _points(self):
+        g = self.xline.curve.gamma()
+        return np.concatenate([g, g * self.MIRROR])
+
+    def J(self):
+        Y = self._points()
+        return float(sum(np.mean(np.maximum(self.minimum_distance
+                                            - np.linalg.norm(c.gamma()[:, None, :] - Y[None, :, :], axis=-1), 0.0) ** 2)
+                         for c in self.curves))
+
+    def shortest_distance(self):
+        Y = self._points()
+        return float(min(np.min(np.linalg.norm(c.gamma()[:, None, :] - Y[None, :, :], axis=-1)) for c in self.curves))
+
+    @derivative_dec
+    def dJ(self):
+        Y = self._points()
+        derivative = Derivative({})
+        gY = np.zeros_like(Y)
+        for curve in self.curves:
+            diff = curve.gamma()[:, None, :] - Y[None, :, :]
+            D = np.linalg.norm(diff, axis=-1)
+            coef = -2.0 * np.maximum(self.minimum_distance - D, 0.0) / (D.size * np.maximum(D, 1e-300))
+            derivative += curve.dgamma_by_dcoeff_vjp(np.einsum("qp,qpj->qj", coef, diff))
+            gY -= np.einsum("qp,qpj->pj", coef, diff)
+        n = Y.shape[0] // 2
+        derivative += self.xline.curve.dgamma_by_dcoeff_vjp(np.ascontiguousarray(gY[:n] + gY[n:] * self.MIRROR))
+        return derivative
+
+
+
+class ClosestApproachConstraint(EqualityConstraint):
+    """A coil clearance as augmented-Lagrangian rows: one per coil quadrature point, ``max(d_min - d_q, 0) / d_min``
+    with ``d_q`` the distance from that point to the NEAREST plasma-boundary (``CoilPlasmaDistance``) or X-line
+    (``CoilXLineDistance``) point.
+
+    The wrapped penalties average the squared shortfall over every coil-point x target-point pair, so as a hard limit
+    (``PenaltyConstraint``, sqrt(J) / d_min) a few close pairs were diluted ~15x: vessel scan 2026-10-23, row 0.019
+    "met" with the closest coil at 0.279 m for a 0.4 m limit. Here the inf-norm tolerance bounds the closest approach
+    itself. The nearest point is an argmin (piecewise smooth, like a max), pulled back through the coils and through the
+    boundary (shared VMEX pullback) or the X-line curve.
+    """
+
+    def __init__(self, key, distance):
+        self.key, self.distance = str(key), distance
+        self.curves, self.d_min = list(distance.curves), float(distance.minimum_distance)
+        EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=[distance])
+
+    def _targets(self):
+        if isinstance(self.distance, CoilPlasmaDistance):
+            terms = self.distance._terms()
+            return None if terms is None else terms[2]
+        return self.distance._points()
+
+    def _closest(self, Y):
+        out = []
+        for curve in self.curves:
+            X = curve.gamma()
+            diff = X[:, None, :] - Y[None, :, :]
+            D = np.linalg.norm(diff, axis=-1)
+            idx = np.argmin(D, axis=1)
+            q = np.arange(X.shape[0])
+            out.append((idx, D[q, idx], diff[q, idx]))
+        return out
+
+    def residuals(self):
+        Y = self._targets()
+        if Y is None:          # rejected equilibrium: the barrier rejects the point anyway
+            return {self.key: np.zeros(sum(c.gamma().shape[0] for c in self.curves))}
+        return {self.key: np.concatenate([np.maximum(self.d_min - d, 0.0) / self.d_min for _, d, _ in self._closest(Y)])}
+
+    def residuals_vjp_parts(self, cotangents):
+        v = np.asarray(cotangents[self.key], dtype=float).ravel()
+        Y = self._targets()
+        if Y is None:
+            return Derivative({}), {}
+        derivative, gY, k = Derivative({}), np.zeros_like(Y), 0
+        for curve, (idx, d, diff) in zip(self.curves, self._closest(Y)):
+            n = d.size
+            coef = np.where(d < self.d_min, -v[k:k + n] / (self.d_min * np.maximum(d, 1e-300)), 0.0)
+            k += n
+            gX = coef[:, None] * diff              # d row / d x = -(x - y) / (|x - y| d_min)
+            derivative += curve.dgamma_by_dcoeff_vjp(np.ascontiguousarray(gX))
+            np.add.at(gY, idx, -gX)
+        if isinstance(self.distance, CoilPlasmaDistance):
+            gamma, rots, _ = self.distance._terms()
+            npts = gamma.shape[0]
+            g_gamma = sum(gY[j * npts:(j + 1) * npts] @ R for j, R in enumerate(rots))
+            g_gamma = g_gamma.reshape(self.distance.plasma.nphi, self.distance.plasma.ntheta, 3)
+            return derivative, {self.distance.plasma: {"gamma": _to_jax_layout(g_gamma)}}
+        n = Y.shape[0] // 2
+        derivative += self.distance.xline.curve.dgamma_by_dcoeff_vjp(
+            np.ascontiguousarray(gY[:n] + gY[n:] * self.distance.MIRROR))
+        return derivative, {}
+
+class PlasmaVesselDistance(Optimizable):
+    """array/boozer_all.py's plasma-vessel margin on the VMEX boundary: ``sdf.quadratic_threshold`` of the boundary
+    points (one field period; the vessel SDFs are nfp-symmetric) with ``sign = -1``, i.e. the boundary is penalized
+    where it is less than ``minimum_distance`` inside the vessel. The sdf parameters are dofs (``depends_on``).
+    """
+
+    def __init__(self, plasma, sdf, minimum_distance, sign=-1.0):
+        self.plasma, self.sdf = plasma, sdf
+        self.minimum_distance, self.sign = float(minimum_distance), float(sign)
+        self.J_jax = jax.jit(lambda pts, params: sdf.quadratic_threshold(pts, params, self.sign, self.minimum_distance))
+        self.grad_pts = jax.jit(jax.grad(self.J_jax, argnums=0))
+        self.grad_params = jax.jit(jax.grad(self.J_jax, argnums=1))
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[plasma, sdf])
+
+    def _gamma(self):
+        cache = self.plasma.evaluate()
+        if not cache["accepted"]:
+            return None
+        return np.asarray(_to_points(cache["out"]["gamma"]), dtype=float).reshape(-1, 3)
+
+    def J(self):
+        gamma = self._gamma()
+        return 0.0 if gamma is None else float(self.J_jax(gamma, self.sdf.local_full_x))
+
+    def shortest_distance(self):
+        """Smallest signed depth of the boundary inside the vessel (inf if the equilibrium is rejected)."""
+        gamma = self._gamma()
+        if gamma is None:
+            return np.inf
+        return float(np.min(self.sdf.pure(gamma, self.sdf.local_full_x, self.sign)))
+
+    def dJ_parts(self):
+        gamma = self._gamma()
+        if gamma is None:
+            return Derivative({}), {}
+        params = self.sdf.local_full_x
+        g_gamma = np.asarray(self.grad_pts(gamma, params)).reshape(self.plasma.nphi, self.plasma.ntheta, 3)
+        derivative = Derivative({self.sdf: np.asarray(self.grad_params(gamma, params))})
         return derivative, {self.plasma: {"gamma": _to_jax_layout(g_gamma)}}
 
     @derivative_dec

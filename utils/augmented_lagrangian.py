@@ -44,7 +44,7 @@ from scipy.optimize import minimize
 from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
 
-__all__ = ["EqualityConstraint", "AugmentedLagrangian", "merge_cotangents",
+__all__ = ["EqualityConstraint", "PenaltyConstraint", "AugmentedLagrangian", "merge_cotangents",
            "solve_augmented_lagrangian"]
 
 
@@ -110,6 +110,47 @@ class BandConstraint(InequalityConstraint):
         v = np.asarray(cotangents[f"{self.key}_band"], dtype=float).ravel()
         n = v.size // 2
         return self.constraint.residuals_vjp_parts({self.key: v[n:] - v[:n]})   # d(tau - r) = -dr, d(tau + r) = +dr
+
+
+class PenaltyConstraint(EqualityConstraint):
+    """Hinge penalties ``J_i >= 0`` (zero exactly when an engineering limit holds) as one equality block of rows
+    ``r_i = sqrt(J_i) / scale_i = 0``.
+
+    With escalated quadratic weights an unmeetable limit drove the weights to 1e7-1e8 and froze the solve (scan v2);
+    capping the escalation let the coils run past their limits instead (scan v3: curvature 2-7x, coils 0.14 m from the
+    plasma for a 0.22 m floor). As an augmented-Lagrangian block the limit is held by a multiplier that converges to the
+    force it needs. ``sqrt`` makes a row the RMS violation (degree 1 in it, so the gradient stays bounded at the limit);
+    ``scale`` makes it relative to the limit. The rows are non-negative, so the multipliers only ever push towards
+    feasibility. ``penalties`` are Optimizables with ``J`` and ``dJ`` or ``dJ_parts`` (a shared plasma pullback).
+    """
+
+    def __init__(self, key, penalties, scales):
+        self.key, self.penalties = str(key), list(penalties)
+        self.scales = np.asarray(scales, dtype=float).ravel() * np.ones(len(self.penalties))
+        EqualityConstraint.__init__(self, x0=np.asarray([]), depends_on=self.penalties)
+
+    def _values(self):
+        return np.array([max(float(J.J()), 0.0) for J in self.penalties])
+
+    def residuals(self):
+        return {self.key: np.sqrt(self._values()) / self.scales}
+
+    def residuals_vjp_parts(self, cotangents):
+        v = np.asarray(cotangents[self.key], dtype=float).ravel()
+        values = self._values()
+        derivative, pending = Derivative({}), {}
+        for J, vi, Ji, scale in zip(self.penalties, v, values, self.scales):
+            if Ji <= 0.0 or vi == 0.0:
+                continue                                  # inside the limit: no gradient (sqrt'(0) is taken as 0)
+            factor = float(vi / (2.0 * np.sqrt(Ji) * scale))
+            if hasattr(J, "dJ_parts"):
+                d, parts = J.dJ_parts()
+                derivative += factor * d
+                merge_cotangents(pending, {owner: {name: factor * np.asarray(ct, dtype=float)
+                                                   for name, ct in cts.items()} for owner, cts in parts.items()})
+            else:
+                derivative += factor * J.dJ(partials=True)
+        return derivative, {owner: ct for owner, ct in pending.values()}
 
 
 class SubsetConstraint(EqualityConstraint):
@@ -193,7 +234,7 @@ class AugmentedLagrangian(Optimizable):
     @staticmethod
     def _lookup(value, name):
         """``value`` for block ``name``: a scalar (every block), or a mapping keyed by the full block name
-        (``"0:bnormal"``), the block key (``"bnormal"``) or ``"default"``. Blocks whose residuals have different natural
+        (``"0:bnormal"``), the block key (``"bnormal"``), ``"hard"`` (every ``hard_*`` block) or ``"default"``. Blocks whose residuals have different natural
         scales need different tolerances: one global eta0 = 3e-4 left run 910's boundary-regularity block (a speed-ratio
         residual living at ~1e-2) unable ever to meet its gate, so its multiplier stayed at zero."""
         if value is None:
@@ -201,8 +242,9 @@ class AugmentedLagrangian(Optimizable):
         if np.isscalar(value):
             return float(value)
         value = dict(value)
-        for key in (name, name.split(":", 1)[-1], "default"):
-            if value.get(key) is not None:
+        block = name.split(":", 1)[-1]
+        for key in (name, block, "hard" if block.startswith("hard_") else None, "default"):   # "hard": all coils.hard
+            if key is not None and value.get(key) is not None:
                 return float(value[key])
         return None
 
