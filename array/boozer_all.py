@@ -611,7 +611,7 @@ if null_type == 'DN':
 # fresh perturbation is drawn, repeating until all three converge to a
 # non-self-intersecting state. A generous cap turns a pathological case into a
 # task failure rather than an indefinite hang.
-PERTURB_STD = 0.01   # metres (2 cm, both DN and SN)
+PERTURB_STD = 0.01   # metres (1 cm, both DN and SN)
 PERTURB_ORDERS = (0, 1, 2)   # Fourier harmonics to perturb
 MAX_PERTURB_TRIES = 10
 pert_rng = np.random.default_rng(DEVICE_ID)
@@ -1091,7 +1091,7 @@ except _XpointSurfaceSatisfied:
 
 
 def _attempt_ar_reduction(j, dofs):
-    """Aspect-ratio reduction (--AR 1), run before each of the FIRST 5 outer BFGS
+    """Aspect-ratio reduction (--AR 2), run before each of the FIRST 5 outer BFGS
     iterations (see the call site). Compute the last closed flux surface (LCFS) on a
     SEPARATE BoozerSurface -- a copy of the optimization surface on a fresh field over the
     SAME (current) coils, so the optimization surface itself is never disturbed -- via the
@@ -1197,7 +1197,7 @@ def _attempt_ar_reduction(j, dofs):
 for j in range(15):
     dat_dict["iter"] = 0
 
-    # Aspect-ratio reduction (--AR 1): for the FIRST 5 outer iterations, lower the
+    # Aspect-ratio reduction (--AR 2): for the FIRST 5 outer iterations, lower the
     # optimization-surface AR toward the 80% LCFS toroidal-flux surface (the LCFS is
     # computed on a separate BoozerSurface). See _attempt_ar_reduction.
     if ar_enabled and j < 5:
@@ -1318,9 +1318,9 @@ for j in range(15):
         / np.abs(FIELDLINE_MEANDIST_THRESHOLD)
     )
     if mono <= 1:
-        monodromy_err = (np.max([np.abs(d.matrix - np.eye(d.matrix.shape[0])) for d in tmos])-MONODROMY_THRESHOLD)/MONODROMY_THRESHOLD
+        monodromy_err = max(np.max([np.abs(d.matrix - np.eye(d.matrix.shape[0])) for d in tmos]) - MONODROMY_THRESHOLD, 0.) / MONODROMY_THRESHOLD
     else:
-        monodromy_err = (np.max([np.abs(np.trace(d.matrix) - 2) for d in tmos]) - MONODROMY_THRESHOLD) / MONODROMY_THRESHOLD
+        monodromy_err = max(np.max([np.abs(np.trace(d.matrix) - 2) for d in tmos]) - MONODROMY_THRESHOLD, 0.) / MONODROMY_THRESHOLD
 
     # check which constraints are violated and increase weight if violated by more than 0.1%
     if curr_err > 0.001 and CURRENT_WEIGHT.value != 0.:
@@ -1514,6 +1514,9 @@ if isinstance(sdf, HelicalVesselSDF):
     _drds = sdf.max_dr_ds()
     final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
     final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
+    # radius positivity R(t) > 0 (paper section 5): absolute violation (target 0)
+    _rmin = sdf.min_radius()
+    final_metrics['vessel_min_radius'] = (_rmin, 0.0, max(-_rmin, 0.0))
     final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
 
 # Welded-pipe vessel geometry: the mitre validity feeds the 0.1% gate (target 0);
@@ -1522,6 +1525,14 @@ if isinstance(sdf, HelicalCylinderVesselSDF):
     _viol = sdf.geometric_violation()
     final_metrics['vessel_mitre_violation'] = (_viol, 0.0, _viol)
     final_metrics['vessel_max_turn_angle_deg'] = (sdf.max_turn_angle(), None, None)
+
+# Pill-pipe / renaissance / torus geometric validity (paper section 5: eq. (20) for the
+# pill pipe, r < R for the torus): the worst violation of the shape inequalities,
+# relative between dimensions and absolute for positivity, i.e. the same
+# vessel_shape_err that drives the plasma-vessel-margin escalation. Gated, like the
+# helical-vessel regime metrics, so a geometrically invalid vessel fails the 0.1% check.
+if isinstance(sdf, (PillPipeSDF, RennaissanceSDF, TorusSDF)):
+    final_metrics['vessel_shape_violation'] = (vessel_shape_err, 0.0, vessel_shape_err)
 
 # also record the full 2x2 monodromy (tangent) matrix per X-point so the
 # device browser can display it; entries are descriptive (no threshold/error).

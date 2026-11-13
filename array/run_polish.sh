@@ -27,4 +27,5 @@ export PYTHONPATH="/mnt/home/agiuliani/ceph/STAR_LITE:${PYTHONPATH:-}"
 # discriminant constraint (--discriminant 1) needs; the plain venv's simsopt lacks it.
 source /mnt/home/agiuliani/ceph/STAR_LITE/venv_gradgradB/bin/activate
 
-./boozer_singular_opt.py "$design_json" --num-aux "$num_aux"
+# optional 3rd argument: 1 adds the snowflake-discriminant constraint (identity polish only)
+./boozer_singular_opt.py "$design_json" --num-aux "$num_aux" --discriminant "${3:-0}"

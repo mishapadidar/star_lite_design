@@ -11,16 +11,19 @@ auxiliary coils:
   1) initially ALL aux currents and radii are DEPENDENT (fixed dofs, solved by
      the under-determined pinv Newton polish; z is independent/held);
   2) then the partition is re-drawn: everything is unfixed and only the
-     dependent currents are fixed -- 1 current for the 'trace' system, 3 for
-     'identity' -- giving a square LU Newton polish.  The remaining mu
-     (radii, z, other currents) become free dofs, i.e. design variables.
+     dependent currents are fixed (1 current for the 'trace' system; for
+     'identity', 3 in general but 2 when the X-point is stellarator
+     symmetric, since M[0,0] == M[1,1] is then redundant), giving a square
+     LU Newton polish.  The remaining mu (radii, z, other currents) become
+     free dofs, i.e. design variables.
 
-The optimization then adds inequality constraints on the aux currents:
-  * dependent currents (via the DependentMu optimizable + QuadraticPenalty):
-        -EPS <= I_dep <= EPS,  EPS = 1e-3 (mu units; *_CURRENT_SCALE -> A)
-  * independent currents: same bound as the modular coil currents
-    (|I| <= CURRENT_THRESHOLD), via a CurrentBound-analogue on the mu dof,
-    accumulated into J_curr so it shares CURRENT_WEIGHT and its escalation.
+The optimization then bounds ALL aux currents, dependent and independent
+alike, by |I| <= AUX_CURRENT_EPS (5e3 A), with one shared escalating weight
+AUX_CURRENT_WEIGHT (J_aux_current):
+  * dependent currents through the DependentMu optimizable + QuadraticPenalty
+    (their value is an implicit function of the design variables, so the
+    gradient flows through the adjoint);
+  * independent currents (free mu dofs) through MuBound.
 
 It also keeps the aux coils clear of the modular coils: AuxCoilDistance adds a
 one-sided quadratic clearance penalty (minimum separation
@@ -104,7 +107,7 @@ parser.add_argument("--num-aux", type=int, default=NUM_AUX_DEFAULT,
 parser.add_argument("--discriminant", type=int, default=0, choices=(0, 1),
                     help="1 to add the snowflake-discriminant inequality constraint "
                          "Delta > DISCRIMINANT_THRESHOLD (identity polish only); "
-                         "0 (default) off. Recorded in the output filename (_disc<0|1>).")
+                         "0 (default) off. Recorded in the output filename (_disc1 suffix when on).")
 args = parser.parse_args()
 
 _in = os.path.abspath(args.design_json)
@@ -132,9 +135,10 @@ TASK_NAME = os.path.basename(os.path.dirname(_in)) or os.path.basename(_in)
 # Device ID = crc32 of the folder name (matches boozer_all.py / device_browser.py),
 # embedded in the output json/yaml names: design_polished_final_<DEVICE_ID>.json.
 DEVICE_ID = zlib.crc32(TASK_NAME.encode())
-# Tag used in the OUTPUT filenames so a run WITH the snowflake-discriminant constraint
-# (--discriminant 1) does not overwrite one without it: design_..._<DEVICE_ID>_disc<0|1>.
-DEVICE_TAG = f'{DEVICE_ID}_disc{discriminant}'
+# Tag used in the OUTPUT filenames: a run WITH the snowflake-discriminant constraint
+# (--discriminant 1) is written as design_..._<DEVICE_ID>_disc1 so it does not overwrite
+# the default run, which keeps the plain design_..._<DEVICE_ID> names expected downstream.
+DEVICE_TAG = f'{DEVICE_ID}_disc1' if discriminant else f'{DEVICE_ID}'
 print(f"Task: {TASK_NAME}")
 print(f"Input: {_in}")
 print(f"Output dir: {OUT_DIR}")
@@ -592,8 +596,8 @@ for boozer_surface in boozer_surfaces:
 # through DependentMu (their value is an implicit function of the design vars, so
 # the gradient must flow through the adjoint); independent currents are free mu
 # dofs handled directly by MuBound. (mu units: EPS/_CURRENT_SCALE; EPS is in A.)
-config['AUX_CURRENT_EPS'] = 5e3  # Amperes
-config['AUX_CURRENT_WEIGHT'] = 1e2
+config.setdefault('AUX_CURRENT_EPS', 5e3)  # Amperes
+config.setdefault('AUX_CURRENT_WEIGHT', 1e2)
 AUX_CURRENT_EPS = config['AUX_CURRENT_EPS']
 AUX_CURRENT_WEIGHT = Weight(config['AUX_CURRENT_WEIGHT'])
 _aux_eps_mu = AUX_CURRENT_EPS / _CURRENT_SCALE   # bound in mu units
@@ -1356,6 +1360,8 @@ for j in range(5):
     config['WELL_WEIGHT'] = WELL_WEIGHT.value
     config['FIELDLINE_MEANZ_WEIGHT'] = FIELDLINE_MEANZ_WEIGHT.value
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
+    if discriminant_enabled:
+        config['DISCRIMINANT_WEIGHT'] = DISCRIMINANT_WEIGHT.value
 
     # Save to YAML
     with open(OUT_DIR + f'design_polished_{j}.yaml', 'w') as f:
@@ -1422,6 +1428,9 @@ if isinstance(sdf, HelicalVesselSDF):
     _drds = sdf.max_dr_ds()
     final_metrics['vessel_max_kappa_radius'] = (_kr, 1.0, max(_kr - 1.0, 0.0))
     final_metrics['vessel_max_dr_ds'] = (_drds, 1.0, max(_drds - 1.0, 0.0))
+    # radius positivity R(t) > 0 (paper section 5): absolute violation (target 0)
+    _rmin = sdf.min_radius()
+    final_metrics['vessel_min_radius'] = (_rmin, 0.0, max(-_rmin, 0.0))
     final_metrics['vessel_arclength_variation'] = (sdf.arclength_variation(), None, None)
 
 # Welded-pipe vessel geometry: the mitre validity feeds the 0.1% gate (target 0);
@@ -1430,6 +1439,26 @@ if isinstance(sdf, HelicalCylinderVesselSDF):
     _viol = sdf.geometric_violation()
     final_metrics['vessel_mitre_violation'] = (_viol, 0.0, _viol)
     final_metrics['vessel_max_turn_angle_deg'] = (sdf.max_turn_angle(), None, None)
+
+# Pill-pipe / renaissance / torus geometric validity (paper section 5: eq. (20) for the
+# pill pipe, r < R for the torus): the worst violation of the shape inequalities,
+# relative between dimensions and absolute for positivity, i.e. the same
+# vessel_shape_err that drives the plasma-vessel-margin escalation. Gated, like the
+# helical-vessel regime metrics, so a geometrically invalid vessel fails the 0.1% check.
+if isinstance(sdf, (PillPipeSDF, RennaissanceSDF, TorusSDF)):
+    final_metrics['vessel_shape_violation'] = (vessel_shape_err, 0.0, vessel_shape_err)
+
+# Snowflake discriminant Delta (worst = smallest over the singular field lines). Always
+# reported; gated on its relative shortfall below DISCRIMINANT_THRESHOLD only when the
+# constraint is enabled (--discriminant 1, identity polish).
+_disc_min = min(d.value() for d in discriminants)
+if discriminant_enabled:
+    final_metrics['snowflake_discriminant_Delta'] = (
+        _disc_min, DISCRIMINANT_THRESHOLD,
+        max(DISCRIMINANT_THRESHOLD - _disc_min, 0.) / abs(DISCRIMINANT_THRESHOLD)
+        if DISCRIMINANT_WEIGHT.value != 0. else 0.0)
+else:
+    final_metrics['snowflake_discriminant_Delta'] = (_disc_min, None, None)
 
 # record the solved auxiliary-coil parameters (currents in Amperes) per fl.
 for fi, fl in enumerate(sing_fls):
