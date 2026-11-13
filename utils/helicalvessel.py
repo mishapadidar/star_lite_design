@@ -35,8 +35,12 @@ FOOT_TOL = 1e-11
 #   R(t) = sum_{m=0}^{N} rc[m] cos(2 pi nfp m t) + sum_{m=1}^{N} rs[m] sin(2 pi nfp m t)
 # The tube is the union of balls B(C(t), R(t)); its exact signed distance is
 #   Phi(p) = min_t ( ||p - C(t)|| - R(t) ),
-# valid (a smooth, non-self-intersecting tube) where max_t R*kappa < 1 AND
-# max_t |dR/ds| < 1 (ds = ||C'|| dt arclength).
+# valid (a smooth tube without local self-intersections or creases) where
+#   max_t [ R*kappa + (1/2) d^2(R^2)/ds^2 ] < 1   AND   max_t |dR/ds| < 1
+# (ds = ||C'|| dt arclength; this is the canal-surface condition
+# r < (1 - (r^2)''/2)/kappa of the vacuum-vessel paper, arXiv:2607.27127, section 5,
+# which reduces to R*kappa < 1 for a constant radius). Global self-intersections
+# (parts of the tube far apart in t but close in space) are not excluded.
 # The radius Fourier order `r_order` (Mr) is independent of the centerline order N
 # and is a static flag too: Mr=0 is a constant-radius tube (only rc[0]); Mr>0 lets
 # the radius vary with the toroidal parameter.
@@ -224,6 +228,30 @@ def max_dr_ds_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID
     slope = lambda s: jnp.abs(jax.grad(R)(s)) / jnp.linalg.norm(jax.jacfwd(C)(s))
     return jnp.max(jax.vmap(slope)(tg))
 
+def _crease_regime(s, C, R):
+    """Canal-surface crease metric at parameter s: R*kappa + (1/2) d^2(R^2)/ds^2, with
+    s-derivatives along the centerline ARCLENGTH (dimensionless). The tube has no local
+    crease where it is < 1 (paper condition r < (1 - (r^2)''/2)/kappa); for a constant
+    radius it is exactly R*kappa. With v = ||C'(t)|| and v' = C'.C''/v:
+        (1/2) d^2(R^2)/ds^2 = [ (R'^2 + R R'') v - R R' v' ] / v^3   (' = d/dt)."""
+    Cp, Cpp = jax.jacfwd(C)(s), jax.jacfwd(jax.jacfwd(C))(s)
+    v = jnp.linalg.norm(Cp)
+    vp = jnp.dot(Cp, Cpp) / v
+    kap = jnp.linalg.norm(jnp.cross(Cp, Cpp)) / v ** 3
+    r, rp, rpp = R(s), jax.grad(R)(s), jax.grad(jax.grad(R))(s)
+    half_r2_ss = ((rp ** 2 + r * rpp) * v - r * rp * vp) / v ** 3
+    return r * kap + half_r2_ss
+
+def max_crease_regime_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
+    """max_t [ R*kappa + (1/2) d^2(R^2)/ds^2 ] over one field period (the metric is
+    1/nfp-periodic, see _geometric_penalty): the curvature regime metric (must stay < 1).
+    Equal to max_t R*kappa for a constant radius."""
+    xc, xs, yc, ys, zc, zs, rc, rs = _unpack(params, stellsym, r_order)
+    C = lambda s: _C(s, xc, xs, yc, ys, zc, zs, nfp, ntor)
+    R = lambda s: _R(s, rc, rs, nfp)
+    tg = jnp.linspace(0.0, 1.0 / nfp, n_grid, endpoint=False)
+    return jnp.max(jax.vmap(lambda s: _crease_regime(s, C, R))(tg))
+
 def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """Squared coefficient of variation of the centerline speed ||C'(t)||:
     mean((|C'| - <|C'|>)^2) / <|C'|>^2. Zero iff the centerline is parametrized
@@ -240,10 +268,12 @@ def arclength_variation_helical_vessel(params, nfp, ntor, stellsym, r_order, n_g
 
 def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     """Geometrical penalty on the tube, sampled on a uniform grid, combining:
-      (1) the valid-tube regime  R(t)*kappa(t) < 1  (no self-intersection across a
-          bend) and  |dR/ds| < 1  (radius grows slower than arclength; no swallowing
-          along the axis), each as a MEAN of squared hinges over the grid (smooth,
-          unlike a max over t which would concentrate the gradient at one point);
+      (1) the valid-tube regime  R*kappa + (1/2) d^2(R^2)/ds^2 < 1  (no local
+          self-intersection or crease across a bend; paper condition
+          r < (1 - (r^2)''/2)/kappa, which is R*kappa < 1 for a constant radius) and
+          |dR/ds| < 1  (radius grows slower than arclength; no swallowing along the
+          axis), each as a MEAN of squared hinges over the grid (smooth, unlike a max
+          over t which would concentrate the gradient at one point);
       (2) radius positivity  R(t) > 0  (a negative radius is meaningless), as a
           mean of squared hinges over the grid; and
       (3) a constant-arclength penalty on the centerline: the squared coefficient
@@ -260,13 +290,11 @@ def _geometric_penalty(params, nfp, ntor, stellsym, r_order, n_grid=N_GRID):
     # value -- nfp x finer resolution than [0,1) for the same n_grid.
     tg = jnp.linspace(0.0, 1.0 / nfp, n_grid, endpoint=False)
     def per_t(s):
-        Cp, Cpp = jax.jacfwd(C)(s), jax.jacfwd(jax.jacfwd(C))(s)
-        speed = jnp.linalg.norm(Cp)
-        kap = jnp.linalg.norm(jnp.cross(Cp, Cpp)) / speed ** 3
+        speed = jnp.linalg.norm(jax.jacfwd(C)(s))
         slope = jnp.abs(jax.grad(R)(s)) / speed       # |dR/ds|
-        return speed, R(s) * kap, slope, R(s)
-    speeds, Rkap, slopes, Rs = jax.vmap(per_t)(tg)
-    curv = jnp.mean(jnp.maximum(Rkap - 1.0, 0.0) ** 2)     # R*kappa < 1 everywhere
+        return speed, _crease_regime(s, C, R), slope, R(s)
+    speeds, regime, slopes, Rs = jax.vmap(per_t)(tg)
+    curv = jnp.mean(jnp.maximum(regime - 1.0, 0.0) ** 2)   # R*kappa + (R^2)_ss/2 < 1 everywhere
     slp = jnp.mean(jnp.maximum(slopes - 1.0, 0.0) ** 2)    # |dR/ds| < 1 everywhere
     pos = jnp.mean(jnp.maximum(-Rs, 0.0) ** 2)             # radius must stay positive
     mean = jnp.mean(speeds)
@@ -345,6 +373,7 @@ class HelicalVesselSDF(Optimizable):
         self._radius_fn = jax.jit(partial(radius_helical_vessel, nfp=self.nfp,
                                           stellsym=self.stellsym, r_order=self._Mr))
         self._max_dr_ds_fn = jax.jit(partial(max_dr_ds_helical_vessel, n_grid=N_GRID, **_sj))
+        self._max_regime_fn = jax.jit(partial(max_crease_regime_helical_vessel, n_grid=N_GRID, **_sj))
         self._arclen_fn = jax.jit(partial(arclength_variation_helical_vessel, n_grid=N_GRID, **_sj))
 
     @classmethod
@@ -462,13 +491,17 @@ class HelicalVesselSDF(Optimizable):
         return np.asarray(self._radius_fn(np.asarray(t, float), self.local_full_x))
 
     def max_kappa_radius(self, n_grid=N_GRID):
-        """max_t R(t)*kappa(t): the curvature regime metric (must stay < 1).
+        """max_t [ R*kappa + (1/2) d^2(R^2)/ds^2 ]: the curvature regime metric (must
+        stay < 1; paper condition r < (1 - (r^2)''/2)/kappa). For a constant radius the
+        second term vanishes and this is max_t R(t)*kappa(t), as before; the name is
+        kept because the drivers and summary.txt use it.
 
-        R*kappa is 1/nfp-periodic (intrinsic + nfp-frequency profile), so sampling
+        The metric is 1/nfp-periodic (intrinsic + nfp-frequency profile), so sampling
         one field period [0, 1/nfp) captures the maximum at nfp x finer resolution."""
-        t = np.linspace(0.0, 1.0 / self.nfp, n_grid, endpoint=False)
-        x = self.local_full_x
-        return float(np.max(np.asarray(self._kappa_fn(t, x)) * np.asarray(self._radius_fn(t, x))))
+        if n_grid == N_GRID:
+            return float(self._max_regime_fn(self.local_full_x))
+        return float(max_crease_regime_helical_vessel(
+            self.local_full_x, self.nfp, self.ntor, self.stellsym, self._Mr, n_grid=n_grid))
 
     def min_radius(self, n_grid=N_GRID):
         """min_t R(t): smallest tube radius over one field period (R is 1/nfp-periodic).
