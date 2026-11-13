@@ -114,12 +114,13 @@ def to_nonstellsym_fieldline(fieldline, new_coils, options=None):
     return pfl
 
 
-def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints):
+def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints, base_idx=SN_BASE_COIL_IDX):
     """Convert a loaded double-null (stellsym) design into a single-null
     (nfp=2, stellsym=False) one.
 
-    Rebuilds the coils from the 3 independent Y>0 bases (coils 0,3,4), then for
-    each configuration converts the Boozer surface, magnetic axis and (top)
+    Rebuilds the coils from the independent bases base_idx, one per rotation
+    orbit (default: designA's 3 Y>0 bases, coils 0,3,4; designB uses coils 0,2),
+    then for each configuration converts the Boozer surface, magnetic axis and (top)
     X-point to the non-stellsym field on the rebuilt coils, and builds the
     bottom X-point as its own solved field line (initialized from the top by
     the stellsym mirror). At initialization everything reproduces the original
@@ -128,7 +129,7 @@ def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints):
     Returns: (new_boozer_surfaces, new_axes, new_xpoints, bottom_xpoints,
               new_coils, base_curves, base_currents)."""
     coils = boozer_surfaces[0].biotsavart.coils
-    new_coils, base_curves, base_currents = rebuild_coils_single_null(coils)
+    new_coils, base_curves, base_currents = rebuild_coils_single_null(coils, base_idx)
 
     new_bs, new_ax, new_xp, bot_xp = [], [], [], []
     for bsurf, (iota, G), axis, xp in zip(boozer_surfaces, iota_Gs, axes, xpoints):
