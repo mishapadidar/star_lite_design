@@ -239,7 +239,24 @@ max_Z = np.max([np.abs(c.curve.gamma()[:, 2]) for c in boozer_surfaces[0].biotsa
 # coils). NEW key (boozer_all did not write it); an existing yaml may override it.
 config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
 AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
-radii0 = np.linspace(0.5, 1.5, num_aux)
+# Initial aux-coil radii, tried IN ORDER until the singular polish (stages 1-2) and the
+# total-field current continuation both succeed (see the placement loop below):
+#   'near_xpoint': radii centred on the X-point's mean major radius R_X, spaced by the
+#                  aux-to-aux clearance (so that constraint holds from the start), >= 0.1 m;
+#   'default':     linspace(0.5, 1.5), the original placement.
+# On the 60 accepted devices of the designB campaign 7456743, 'near_xpoint' brought 19 to
+# the optimization against 9 for 'default', and the two together 21.
+AUX_PLACEMENTS = ('near_xpoint', 'default')
+
+
+def _aux_radii0(placement, xpoint):
+    if placement == 'near_xpoint':
+        g = xpoint.curve.gamma()
+        R_X = float(np.mean(np.sqrt(g[:, 0] ** 2 + g[:, 1] ** 2)))
+        return np.maximum(R_X + AUX_COIL_DISTANCE_THRESHOLD * (np.arange(num_aux) - (num_aux - 1) / 2), 0.1)
+    return np.linspace(0.5, 1.5, num_aux)
+
+
 MU_NAMES = _mu_names(2 * num_aux + 1)
 
 # A loaded X-point is always parametrized stellsym=False, but it may in fact be
@@ -287,8 +304,9 @@ DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
 INDEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS, num_aux)]
 
 
-sing_fls = []
-for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
+def _singular_polish(idx, xpoint, boozer_surface, radii0):
+    """Singular polish (stages 1-2) of one X-point with the aux coils started at radii0:
+    returns the polished SingularPeriodicFieldline, or None if stage 1 or 2 fails."""
     mu0 = np.concatenate([np.zeros(num_aux), radii0, [max_Z + AUX_COIL_DISTANCE_THRESHOLD]])
     # The polish gets its OWN copy of the X-point curve: the plain `xpoint`
     # field line keeps re-solving its curve every objective evaluation, so
@@ -342,7 +360,8 @@ for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
           f"iter={res['iter']}  square={res['square']}  "
           f"||r||_inf={np.linalg.norm(res['residual'], ord=np.inf):.3e}")
     if not res['success']:
-        raise SystemExit(f"idx={idx}: stage-1 singular polish failed")
+        print(f"[idx={idx}] stage-1 singular polish failed", flush=True)
+        return None
 
     # (2) re-partition: unfix the currents, radii and z, then fix only the
     # dependent currents (1 for trace, 3 for identity). Square -> LU Newton.
@@ -355,18 +374,13 @@ for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
           f"iter={res['iter']}  square={res['square']}  "
           f"||r||_inf={np.linalg.norm(res['residual'], ord=np.inf):.3e}")
     if not (res['success'] and res['square']):
-        raise SystemExit(f"idx={idx}: stage-2 (square) singular polish failed")
+        print(f"[idx={idx}] stage-2 (square) singular polish failed", flush=True)
+        return None
     print(f"[idx={idx}] mu: " + '  '.join(
         f"{nm}={v * _CURRENT_SCALE:+.4e}A" if k < num_aux else f"{nm}={v:+.4f}"
         for k, (nm, v) in enumerate(zip(MU_NAMES, fl.mu))))
-    sing_fls.append(fl)
+    return fl
 
-# From here on, the POLISHED singular field lines stand in for the X-points
-# everywhere downstream (vessel penalties, meanZ, tangent maps, callback,
-# snapshots/restores, VTK dumps and saves). Their res['PLU']/res['vjp']
-# adjoints propagate sensitivities to the modular coils and the independent
-# mu design variables.
-xpoints = sing_fls
 
 # Recompute the Boozer surfaces and magnetic axes in the TOTAL field (modular +
 # auxiliary): wrap each polished singular field line in a SingularBiotSavart and
@@ -402,8 +416,10 @@ def _scaled_aux_field(fl, s):
     return BiotSavart(list(fl.biotsavart.coils) + aux)
 
 
-new_boozer_surfaces, new_axes = [], []
-for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing_fls)):
+def _current_continuation(idx, boozer_surface, axis, fl):
+    """Current continuation of the Boozer surface and magnetic axis into the total field
+    of the polished field line fl: returns (BoozerSurface, PeriodicFieldLine) solved on
+    SingularBiotSavart(fl), or None if the target-volume surface is lost."""
     surf = boozer_surface.surface
     # state = (surface dofs, iota, G, axis dofs, axis length) at the last accepted s
     state = (surf.get_dofs().copy(), boozer_surface.res['iota'], boozer_surface.res['G'],
@@ -442,14 +458,55 @@ for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing
             if ds < S_CONT_DSMIN:
                 surf.set_dofs(state[0])
                 axis.curve.set_dofs(state[3])
-                print(f"ERROR: idx={idx}: total-field BoozerSurface lost at s*={s:.5f} "
-                      f"(last converged iota={state[1]:+.8f})")
-                raise SystemExit(1)
+                print(f"[idx={idx}] total-field BoozerSurface lost at s*={s:.5f} "
+                      f"(last converged iota={state[1]:+.8f})", flush=True)
+                return None
     # s = 1 reached: the last accepted solves are on SingularBiotSavart(fl)
     print(f"[idx={idx}] current continuation reached s=1: iota={state[1]:+.8f}", flush=True)
-    new_boozer_surfaces.append(nbs)
-    new_axes.append(nax)
+    return nbs, nax
+
+
+# Aux-coil placement loop: for each X-point, try AUX_PLACEMENTS in order and keep the
+# first one whose singular polish (stages 1-2) AND current continuation both succeed.
+# The Boozer surface and the axis are put back in their modular-field state before
+# every attempt (a failed continuation leaves them at its last accepted s).
+sing_fls, new_boozer_surfaces, new_axes, aux_placements = [], [], [], []
+for idx, (xpoint, boozer_surface, axis) in enumerate(zip(xpoints, boozer_surfaces, axes)):
+    surf_dofs0 = boozer_surface.surface.get_dofs().copy()
+    axis_dofs0 = axis.curve.get_dofs().copy()
+    for placement in AUX_PLACEMENTS:
+        boozer_surface.surface.set_dofs(surf_dofs0)
+        axis.curve.set_dofs(axis_dofs0)
+        radii0 = _aux_radii0(placement, xpoint)
+        print(f"[idx={idx}] aux placement '{placement}': initial radii = "
+              + ", ".join(f"{r:.3f}" for r in radii0), flush=True)
+        fl = _singular_polish(idx, xpoint, boozer_surface, radii0)
+        if fl is None:
+            print(f"[idx={idx}] aux placement '{placement}' failed (singular polish)", flush=True)
+            continue
+        solved = _current_continuation(idx, boozer_surface, axis, fl)
+        if solved is None:
+            print(f"[idx={idx}] aux placement '{placement}' failed (surface lost)", flush=True)
+            continue
+        print(f"[idx={idx}] aux placement '{placement}' kept", flush=True)
+        break
+    else:
+        print(f"ERROR: idx={idx}: no aux placement in {AUX_PLACEMENTS} gave a polished X-point "
+              f"with a total-field Boozer surface")
+        raise SystemExit(1)
+    sing_fls.append(fl)
+    new_boozer_surfaces.append(solved[0])
+    new_axes.append(solved[1])
+    aux_placements.append(placement)
 boozer_surfaces, axes = new_boozer_surfaces, new_axes
+config['AUX_PLACEMENT'] = aux_placements   # recorded in the output yaml
+
+# From here on, the POLISHED singular field lines stand in for the X-points
+# everywhere downstream (vessel penalties, meanZ, tangent maps, callback,
+# snapshots/restores, VTK dumps and saves). Their res['PLU']/res['vjp']
+# adjoints propagate sensitivities to the modular coils and the independent
+# mu design variables.
+xpoints = sing_fls
 
 # Snapshot the INITIAL device WITH the auxiliary coils, BEFORE any design polishing.
 # This device carries the aux coils but has not been optimized, so it may not satisfy
