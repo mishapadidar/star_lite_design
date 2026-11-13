@@ -329,7 +329,15 @@ for idx, (xpoint, boozer_surface) in enumerate(zip(xpoints, boozer_surfaces)):
     for k in range(num_aux):
         fl.fix(f'I{k+1}')
         fl.fix(f'r{k+1}')
+    # Stage 1 starts far from the polished state: give it 40 Newton iterations (was 10)
+    # and the damped (line-search) step, so full steps cannot throw the field line away;
+    # both options are restored right after, for stage 2 and the optimization.
+    _maxiter0 = fl.options['newton_maxiter']
+    fl.options['newton_maxiter'] = 40
+    fl.options['newton_linesearch'] = True
     res = fl.run_code(CurveLength(fl_curve).J())
+    fl.options['newton_maxiter'] = _maxiter0
+    fl.options.pop('newton_linesearch', None)
     print(f"[idx={idx}] stage-1 polish (all I, r dependent; pinv): success={res['success']}  "
           f"iter={res['iter']}  square={res['square']}  "
           f"||r||_inf={np.linalg.norm(res['residual'], ord=np.inf):.3e}")
@@ -367,28 +375,79 @@ xpoints = sing_fls
 # total field too. Each object that drives its own set_points gets its OWN
 # SingularBiotSavart(fl) wrapper (all sharing fl), mirroring the original
 # per-objective BiotSavart(coils) so their point caches stay independent.
+#
+# CURRENT CONTINUATION: instead of one Newton solve from the modular-field surface
+# straight into the full aux field, ramp the aux currents s*I_k, s: 0 -> 1, re-solving
+# the Boozer surface (target volume) and the magnetic axis at each step from the
+# previous converged state. Adaptive step (x1.5 on success, up to S_CONT_DSMAX; halve
+# and restore on failure). A step is accepted only if the surface converges, does not
+# self-intersect (checked at phi = 0) and the axis converges. If the step falls below
+# S_CONT_DSMIN the target-volume surface is lost: report s* and stop.
+S_CONT_DS0, S_CONT_DSMAX, S_CONT_DSMIN = 0.05, 0.25, 1e-4
+
+
+def _self_intersecting(surf):
+    try:
+        return surf.is_self_intersecting()
+    except Exception:   # raised when a cross section folds back on itself
+        return True
+
+
+def _scaled_aux_field(fl, s):
+    """Modular + s * aux field: the aux coils of SingularBiotSavart(fl) (same curves
+    and currents, synced from fl.mu, stellsym partners included), each current
+    scaled by s."""
+    sbs = SingularBiotSavart(fl)
+    aux = [Coil(c.curve, ScaledCurrent(c.current, s)) for c in sbs._aux_bs.coils]
+    return BiotSavart(list(fl.biotsavart.coils) + aux)
+
+
 new_boozer_surfaces, new_axes = [], []
 for idx, (boozer_surface, axis, fl) in enumerate(zip(boozer_surfaces, axes, sing_fls)):
-    nbs = BoozerSurface(SingularBiotSavart(fl), boozer_surface.surface,
-                        boozer_surface.label, boozer_surface.targetlabel,
-                        constraint_weight=boozer_surface.constraint_weight,
-                        options=boozer_surface.options)
-    bs_res = nbs.run_code(boozer_surface.res['iota'], boozer_surface.res['G'])
-    # fail fast: the total-field surface must converge AND not self-intersect.
-    if not bs_res['success']:
-        print(f"ERROR: idx={idx}: total-field BoozerSurface re-solve did not converge")
-        raise SystemExit(1)
-    if nbs.surface.is_self_intersecting():
-        print(f"ERROR: idx={idx}: total-field BoozerSurface is self-intersecting")
-        raise SystemExit(1)
+    surf = boozer_surface.surface
+    # state = (surface dofs, iota, G, axis dofs, axis length) at the last accepted s
+    state = (surf.get_dofs().copy(), boozer_surface.res['iota'], boozer_surface.res['G'],
+             axis.curve.get_dofs().copy(), axis.res['length'])
+    s, ds = 0.0, S_CONT_DS0
+    print(f"[idx={idx}] current continuation: s=0  iota={state[1]:+.8f}  G={state[2]:.8e}", flush=True)
+    while s < 1.0:
+        st = min(s + ds, 1.0)
+        surf.set_dofs(state[0])
+        axis.curve.set_dofs(state[3])
+        # the final step (s = 1) uses SingularBiotSavart itself
+        field = SingularBiotSavart(fl) if st == 1.0 else _scaled_aux_field(fl, st)
+        nbs = BoozerSurface(field, surf, boozer_surface.label, boozer_surface.targetlabel,
+                            constraint_weight=boozer_surface.constraint_weight,
+                            options=dict(boozer_surface.options))
+        bs_res = nbs.run_code(state[1], state[2])
+        surf_ok = bool(bs_res['success']) and not _self_intersecting(surf)
+        ax_ok = False
+        if surf_ok:
+            nax = PeriodicFieldLine(SingularBiotSavart(fl) if st == 1.0 else _scaled_aux_field(fl, st),
+                                    axis.curve, options=axis.options)
+            ax_res = nax.run_code(state[4])
+            ax_ok = bool(ax_res['success'])
+        if surf_ok and ax_ok:
+            s = st
+            state = (surf.get_dofs().copy(), bs_res['iota'], bs_res['G'],
+                     axis.curve.get_dofs().copy(), ax_res['length'])
+            print(f"[idx={idx}]   s={s:.5f} ok    it={bs_res['iter']:2d}  iota={bs_res['iota']:+.8f}  "
+                  f"G={bs_res['G']:.8e}", flush=True)
+            ds = min(1.5 * ds, S_CONT_DSMAX)
+        else:
+            ds /= 2
+            why = 'axis did not converge' if surf_ok else (
+                'surface self-intersecting' if bs_res['success'] else 'surface did not converge')
+            print(f"[idx={idx}]   s={st:.5f} FAIL  ({why}); ds -> {ds:.2e}", flush=True)
+            if ds < S_CONT_DSMIN:
+                surf.set_dofs(state[0])
+                axis.curve.set_dofs(state[3])
+                print(f"ERROR: idx={idx}: total-field BoozerSurface lost at s*={s:.5f} "
+                      f"(last converged iota={state[1]:+.8f})")
+                raise SystemExit(1)
+    # s = 1 reached: the last accepted solves are on SingularBiotSavart(fl)
+    print(f"[idx={idx}] current continuation reached s=1: iota={state[1]:+.8f}", flush=True)
     new_boozer_surfaces.append(nbs)
-
-    nax = PeriodicFieldLine(SingularBiotSavart(fl), axis.curve, options=axis.options)
-    ax_res = nax.run_code(axis.res['length'])
-    # fail fast: the total-field magnetic axis must converge.
-    if not ax_res['success']:
-        print(f"ERROR: idx={idx}: total-field magnetic-axis re-solve did not converge")
-        raise SystemExit(1)
     new_axes.append(nax)
 boozer_surfaces, axes = new_boozer_surfaces, new_axes
 

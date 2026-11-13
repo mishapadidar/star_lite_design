@@ -933,16 +933,59 @@ class SingularPeriodicFieldline(Optimizable):
                 # non-square: pseudo-inverse step, dx = pinv(Jm) @ b
                 # (minimum-norm least-squares solution).
                 dx, _, _, _ = np.linalg.lstsq(Jm, b, rcond=None)
-            x[col_mask] -= dx
-            curve.set_dofs(x[:-(nmu + 1)])
-            length = x[-(nmu + 1)]
-            mu = x[-nmu:]
-            i += 1
-            r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_matrix_all, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
+            if self.options.get('newton_linesearch', False):
+                # Damped Newton step x - t*dx, t = 1, 1/2, 1/4, ... (off by default;
+                # option 'newton_linesearch'): accept the first t whose residual 2-norm
+                # is finite and decreases (Armijo, c = 1e-4); if t drops below 2**-10,
+                # restore the previous point and stop (no decrease along dx).
+                x_prev, r_prev, J_prev, M_prev = x.copy(), r, J, M
+                f_prev = np.linalg.norm(b)
+                f_new = np.inf
+                t = 1.0
+                accepted = False
+                while t >= 2.0 ** -10:
+                    x = x_prev.copy()
+                    x[col_mask] -= t * dx
+                    curve.set_dofs(x[:-(nmu + 1)])
+                    length = x[-(nmu + 1)]
+                    mu = x[-nmu:]
+                    try:
+                        r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_matrix_all, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
+                        f_new = np.linalg.norm(r[row_mask])
+                    except Exception:
+                        f_new = np.inf
+                    if np.isfinite(f_new) and f_new <= (1.0 - 1e-4 * t) * f_prev:
+                        accepted = True
+                        break
+                    t *= 0.5
+                if verbose and (t < 1.0 or not accepted):
+                    print(f"  line search: iter={i + 1}  t={t:.4g}  ||b||_2 {f_prev:.3e} -> {f_new:.3e}"
+                          + ("" if accepted else "  (no decrease: restore and stop)"), flush=True)
+                if not accepted:
+                    x = x_prev
+                    curve.set_dofs(x[:-(nmu + 1)])
+                    length = x[-(nmu + 1)]
+                    mu = x[-nmu:]
+                    r, J, M = r_prev, J_prev, M_prev
+                    b = r[row_mask]
+                    Jm = J[row_mask][:, col_mask]
+                    break
+                i += 1
+            else:
+                x[col_mask] -= dx
+                curve.set_dofs(x[:-(nmu + 1)])
+                length = x[-(nmu + 1)]
+                mu = x[-nmu:]
+                i += 1
+                r, J, M = singular_field_line_residual(curve, curve_tm, length, self.biotsavart, mu, self.monodromy_matrix_all, stellsym=self.stellsym_aux, monodromy_constraint=mon_constraint, target_monodromy=self.options['target_monodromy'], target_trace=self.options['target_trace'])
             b = r[row_mask]
             Jm = J[row_mask][:, col_mask]
             #if verbose:
             #    self._print_iter(i, b, Jm, M, mu, col_mask)
+        # Judge success on the FINAL residual. The loop tests the residual at the top
+        # of each iteration, so a solve that converged on the last allowed iteration
+        # (i == maxiter) used to be declared failed.
+        norm = np.linalg.norm(b, ord=np.inf)
 
         res = {
             'residual': b,

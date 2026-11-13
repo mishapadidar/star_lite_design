@@ -22,6 +22,9 @@ export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
 export PYTHONPATH="/mnt/home/agiuliani/ceph/STAR_LITE:${PYTHONPATH:-}"
 
-source /mnt/home/agiuliani/ceph/STAR_LITE/venv/bin/activate
+# venv_gradgradB = venv with simsopt from branch star_lite_gradgradB (ag/gradgradB_vjp +
+# ag/edits_for_star_lite): it provides BiotSavart.d3B_by_dXdXdX, which the snowflake-
+# discriminant constraint (--discriminant 1) needs; the plain venv's simsopt lacks it.
+source /mnt/home/agiuliani/ceph/STAR_LITE/venv_gradgradB/bin/activate
 
 ./boozer_singular_opt.py "$design_json" --num-aux "$num_aux"
