@@ -330,6 +330,7 @@ def pure_well_polynomial(tf, vol, G, B0, B1):
 
 def well_pure(tf, vol, G, B0, B1):
     a, b, c, d = pure_well_polynomial(tf, vol, G, B0, B1)
+    #x = jnp.linspace(0, 0.25*tf, 100)
     x = jnp.linspace(0, tf, 100)
     d2V_dtf2 = 6*a*x + 2*b
     return d2V_dtf2
