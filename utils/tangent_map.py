@@ -201,6 +201,10 @@ def monodromy_eps_pure(B, gradB, L, gamma, D, eps, mtype, frame='NB'):
         diff = jnp.abs(Rf-jnp.eye(2))
     elif mtype == 'jordan':
         diff = jnp.abs(Rf[0, 0] + Rf[1, 1] - 2.)
+    elif mtype == 'trace_min':
+        # lower bound on the trace, tr(M) >= eps (e.g. eps = 2.1 keeps an X-point clearly
+        # hyperbolic): penalty max(eps - tr(M), 0)**2, zero as soon as the bound holds
+        return jnp.maximum(eps - (Rf[0, 0] + Rf[1, 1]), 0.)**2
     else:
         raise Exception('mtype not implemented')
     return jnp.mean(jnp.maximum(diff-eps, 0)**2)
