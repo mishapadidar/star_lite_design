@@ -282,11 +282,11 @@ class SingularBiotSavart(MagneticField):
         fl = self.fl
         a = np.asarray(a, dtype=float)
         nmu = a.size
-        free_mask = np.asarray(fl.local_dofs_free_status, dtype=bool)  # True = independent
+        free_mask = fl.mu_free_status()  # True = independent (incl. a shared geometry's r, Z)
         # direct: free (independent) mu slots
         g = np.zeros(nmu)
         g[free_mask] = a[free_mask]
-        deriv = Derivative({fl: g})
+        deriv = fl.mu_derivative(g)   # (r, Z) part -> shared geometry, if any
         # implicit: dependent (fixed) mu slots propagate through dmu/d(indep, c)
         dep_idx = np.where(~free_mask)[0]
         if dep_idx.size:

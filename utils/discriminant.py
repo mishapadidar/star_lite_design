@@ -434,7 +434,7 @@ class SnowflakeDiscriminant(Optimizable):
         mu_free = ~col_mask[-nmu:]
         mu_direct = np.zeros(nmu)
         mu_direct[mu_free] = dJ_dmu[mu_free]
-        return coil_direct + Derivative({fl: mu_direct}) - adj_term
+        return coil_direct + fl.mu_derivative(mu_direct) - adj_term
 
     def compute(self):
         fl = self.fieldline
@@ -758,7 +758,7 @@ class DSigma(Optimizable):
         mu_free = ~col_mask[-nmu:]
         mu_direct = np.zeros(nmu)
         mu_direct[mu_free] = d_mu[mu_free]
-        free_mu = Derivative({fl: mu_direct})
+        free_mu = fl.mu_derivative(mu_direct)
 
         return coil_direct + dB_direct + free_mu - adj_term
 

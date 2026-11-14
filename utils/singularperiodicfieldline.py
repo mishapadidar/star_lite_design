@@ -655,6 +655,53 @@ def _mu_names(nmu):
     return [f'I{k+1}' for k in range(N)] + [f'r{k+1}' for k in range(N)] + ['z']
 
 
+class AuxCoilGeometry(Optimizable):
+    """Geometry of N planar circular auxiliary coils centred on the machine axis: the radii
+    r_1..r_N and the common height Z, as the local dofs 'r1'..'rN', 'z'.
+
+    Pass it as ``geometry=`` to several :class:`SingularPeriodicFieldline` objects to make them
+    share one aux-coil geometry (each keeps its own currents)::
+
+        geom = AuxCoilGeometry(radii, z)
+        fl1 = SingularPeriodicFieldline(bs1, curve1, currents1, geometry=geom)
+        fl2 = SingularPeriodicFieldline(bs2, curve2, currents2, geometry=geom)
+
+    The geometry dofs are independent design variables: the Newton polish of a field line never
+    solves for them (their fixed/free state only says whether the optimizer may move them).
+    """
+
+    def __init__(self, radii=None, z=None, dofs=None):
+        # ``dofs`` is supplied by simsopt's from_dict on reconstruction (values, names, mask).
+        if dofs is not None:
+            super().__init__(dofs=dofs)
+        else:
+            radii = np.asarray(radii, dtype=float).ravel()
+            super().__init__(x0=np.concatenate((radii, [float(z)])),
+                             names=[f'r{k+1}' for k in range(radii.size)] + ['z'])
+
+    @classmethod
+    def from_mu(cls, mu):
+        """Geometry (r, Z) of a full mu = (I_1..I_N, r_1..r_N, Z)."""
+        mu = np.asarray(mu, dtype=float)
+        N = (mu.size - 1) // 2
+        return cls(radii=mu[N:2 * N], z=mu[-1])
+
+    @property
+    def radii(self):
+        return np.asarray(self.local_full_x)[:-1]
+
+    @property
+    def z(self):
+        return float(self.local_full_x[-1])
+
+    @property
+    def num_coils(self):
+        return self.local_full_dof_size - 1
+
+    def recompute_bell(self, parent=None):
+        pass
+
+
 def singularperiodicfieldline_dcoils_dcurrents_vjp(lm, biotsavart, fieldline):
     """lm^T dg/d(external inputs) at the converged singular polish, with the
     same call signature as periodicfieldline_dcoils_dcurrents_vjp so the class
@@ -673,9 +720,9 @@ def singularperiodicfieldline_dcoils_dcurrents_vjp(lm, biotsavart, fieldline):
     deriv = fieldline._lm_to_vjp(lm, row_mask, n_mon, dres2_dB, dM_dB, dM_dgradB)
     J_indep = fieldline.res.get('J_indep')
     if J_indep is not None and J_indep.shape[1] > 0:
-        g = np.zeros(fieldline.local_full_dof_size)
+        g = np.zeros(fieldline.mu.size)
         g[fieldline.res['indep_idx']] = lm @ J_indep
-        deriv = deriv + Derivative({fieldline: g})
+        deriv = deriv + fieldline.mu_derivative(g)   # (r, Z) part -> shared geometry, if any
     return deriv
 
 
@@ -697,7 +744,7 @@ class SingularPeriodicFieldline(Optimizable):
     """
 
     def __init__(self, biotsavart, curve, mu=None, options=None, stellsym_aux=True,
-                 monodromy_matrix=None, length=None, dofs=None):
+                 monodromy_matrix=None, length=None, dofs=None, geometry=None):
         # mu ARE the local dofs of this Optimizable.  Fixing a mu dof
         # (self.fix('z')) marks it DEPENDENT: the Newton solver solves for it
         # and it is removed from the optimization design space.  Free mu dofs
@@ -707,11 +754,27 @@ class SingularPeriodicFieldline(Optimizable):
         # DOFs object carrying the mu values, names AND the fixed/free mask, so
         # it preserves the dependent/independent partition across save/load.
         # It takes precedence over ``mu`` (also serialized, but maskless).
+        #
+        # ``geometry`` (an AuxCoilGeometry, possibly shared with other field lines)
+        # takes the radii and the height out of the local dofs: the local dofs are
+        # then the aux CURRENTS only, and ``mu`` (argument) holds those N currents.
+        # self.mu is still the full (I, r, Z); the geometry is never solved for by
+        # the Newton polish, and every mu-gradient routes its (r, Z) part to the
+        # geometry object (see mu_free_status / mu_derivative).
+        self.geometry = geometry   # set first: self.mu reads it
+        parents = [biotsavart] if geometry is None else [biotsavart, geometry]
         if dofs is not None:
-            super().__init__(dofs=dofs, depends_on=[biotsavart])
-        else:
+            super().__init__(dofs=dofs, depends_on=parents)
+        elif geometry is None:
             mu = np.asarray(mu, dtype=float)
-            super().__init__(x0=mu, names=_mu_names(len(mu)), depends_on=[biotsavart])
+            super().__init__(x0=mu, names=_mu_names(len(mu)), depends_on=parents)
+        else:
+            currents = np.asarray(mu, dtype=float).ravel()
+            if currents.size != geometry.num_coils:
+                raise ValueError(f"with geometry=, mu must hold the {geometry.num_coils} aux "
+                                 f"currents only; got {currents.size} values.")
+            super().__init__(x0=currents, names=[f'I{k+1}' for k in range(currents.size)],
+                             depends_on=parents)
         self.biotsavart = biotsavart
         self.curve = curve
         self.need_to_run_code = True
@@ -810,13 +873,46 @@ class SingularPeriodicFieldline(Optimizable):
 
     @property
     def mu(self):
-        """The auxiliary-coil parameter vector (I_1..I_N, r_1..r_N, Z) == the
-        local dofs of this Optimizable (both free and fixed entries)."""
-        return np.asarray(self.local_full_x)
+        """The auxiliary-coil parameter vector (I_1..I_N, r_1..r_N, Z): the local
+        dofs of this Optimizable (both free and fixed entries), or, with a
+        ``geometry``, its local dofs (the currents) followed by the geometry's."""
+        if self.geometry is None:
+            return np.asarray(self.local_full_x)
+        return np.concatenate((np.asarray(self.local_full_x), np.asarray(self.geometry.local_full_x)))
 
     @mu.setter
     def mu(self, value):
-        self.local_full_x = np.asarray(value, dtype=float)
+        value = np.asarray(value, dtype=float)
+        if self.geometry is None:
+            self.local_full_x = value
+            return
+        n = self.local_full_dof_size
+        self.local_full_x = value[:n]
+        # The polish never moves the geometry, so (r, Z) is written only when a caller
+        # supplies different values on purpose; every field line sharing it then changes.
+        if not np.array_equal(value[n:], np.asarray(self.geometry.local_full_x)):
+            self.geometry.local_full_x = value[n:]
+
+    def mu_free_status(self):
+        """Boolean mask over the full mu: True = INDEPENDENT (held by the Newton
+        polish), False = DEPENDENT (solved for). Without a geometry this is the
+        simsopt free-dof status of the local dofs. With one, it is that status for
+        the currents and True for every (r, Z) entry: a shared geometry is never
+        solved for."""
+        free = np.asarray(self.local_dofs_free_status, dtype=bool)
+        if self.geometry is None:
+            return free
+        return np.concatenate((free, np.ones(self.geometry.local_full_dof_size, dtype=bool)))
+
+    def mu_derivative(self, g):
+        """simsopt Derivative of a covector ``g`` over the full mu, deposited on the
+        objects that own the dofs: this field line, or, with a geometry, the
+        currents on this field line and the (r, Z) part on the geometry."""
+        g = np.asarray(g, dtype=float)
+        if self.geometry is None:
+            return Derivative({self: g})
+        n = self.local_full_dof_size
+        return Derivative({self: g[:n].copy()}) + Derivative({self.geometry: g[n:].copy()})
 
     # ------------------------------------------------------------ solvers
     def run_code(self, length, mu=None):
@@ -845,7 +941,7 @@ class SingularPeriodicFieldline(Optimizable):
         length) and num_aux=3 (nmu=7): 'trace' has 101 constraint rows
         -> 6 free mu (fix 1); 'identity' has 103 -> 4 free mu (fix 3).
         """
-        nmu = self.local_full_dof_size
+        nmu = self.mu.size   # full mu, also with a geometry (whose entries are all independent)
         if monodromy_constraint not in ('identity', 'trace', 'target_monodromy'):
             raise ValueError(f"Unknown monodromy_constraint {monodromy_constraint!r}; "
                              "must be 'identity' or 'trace'.")
@@ -902,7 +998,7 @@ class SingularPeriodicFieldline(Optimizable):
         # stellsym branch (a collocation-row selection) does not match the curve's
         # column count for a stellsym=True curve.
         col_mask = np.ones(curve.get_dofs().size + 1 + nmu, dtype=bool)
-        col_mask[-nmu:] = ~np.asarray(self.local_dofs_free_status, dtype=bool)
+        col_mask[-nmu:] = ~self.mu_free_status()
         x = np.concatenate((curve.get_dofs(), [length], mu))
         i = 0
 
@@ -1286,7 +1382,7 @@ class SingularPeriodicFieldline(Optimizable):
             # all local dofs, free and fixed).
             self_arr = np.zeros(nmu)
             self_arr[indep_idx] = dmu_dindep[q]
-            out[names[dep_idx[q]]] = Derivative({self: self_arr}) + coil_deriv
+            out[names[dep_idx[q]]] = self.mu_derivative(self_arr) + coil_deriv
         self._dmu_cache = out
         return dict(out)
 
@@ -1314,7 +1410,7 @@ class DependentMu(Optimizable):
 
     def __init__(self, fl, name):
         Optimizable.__init__(self, depends_on=[fl])
-        names = _mu_names(fl.local_full_dof_size)
+        names = _mu_names(fl.mu.size)
         if name not in names:
             raise ValueError(f"Unknown mu name {name!r}; valid names are {names}.")
         self.fl = fl
@@ -1349,7 +1445,7 @@ class DependentMu(Optimizable):
             if length is None:
                 length = CurveLength(fl.curve).J()
             fl.run_code(length)
-        if bool(np.asarray(fl.local_dofs_free_status)[self._idx]):
+        if bool(fl.mu_free_status()[self._idx]):
             raise RuntimeError(
                 f"mu dof {self.name!r} is FREE (independent); DependentMu requires "
                 f"a dependent (fixed) dof. Call fl.fix({self.name!r}) and re-solve.")
@@ -1430,7 +1526,7 @@ class AuxCoilDistance(Optimizable):
         clouds. J = J_mod + J_aux; the gradients wrt mu (-> radii, Z; the currents
         get 0) and wrt each curve gamma (-> the dgamma_by_dcoeff_vjp seed) come
         straight from autodiff, replacing the hand-written derivatives."""
-        N = (self.fl.local_full_dof_size - 1) // 2
+        N = (self.fl.mu.size - 1) // 2
         thr, athr = self.threshold, self.aux_threshold
         stellsym = bool(self.fl.stellsym_aux)
 
@@ -1515,9 +1611,9 @@ class AuxCoilDistance(Optimizable):
         # fl.dmu_dep_by_ddesign() supplies (as SingularBiotSavart._mu_to_derivative
         # does). We depend on geometry only (not the currents), so require it free
         # and fail loudly rather than return a silently wrong gradient.
-        nmu = self.fl.local_full_dof_size
+        nmu = self.fl.mu.size
         N = (nmu - 1) // 2
-        free = np.asarray(self.fl.local_dofs_free_status, dtype=bool)
+        free = self.fl.mu_free_status()   # with a shared geometry, (r, Z) is always independent
         fixed_geo = [i for i in range(N, nmu) if not free[i]]   # radii N..2N-1, Z at 2N
         if fixed_geo:
             names = _mu_names(nmu)
@@ -1536,7 +1632,7 @@ class AuxCoilDistance(Optimizable):
         mu = jnp.asarray(self.fl.mu)
         gammas = self._gammas()
         _, (g_mu, seeds) = self._jax_valgrad(mu, gammas)
-        deriv = Derivative({self.fl: np.asarray(g_mu)})
+        deriv = self.fl.mu_derivative(np.asarray(g_mu))
         for c, seed in zip(self.curves, seeds):
             deriv = deriv + c.dgamma_by_dcoeff_vjp(np.asarray(seed))
         return deriv

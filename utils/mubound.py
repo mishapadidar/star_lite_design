@@ -13,7 +13,7 @@ class MuBound(Optimizable):
         Optimizable.__init__(self, depends_on=[fl])
         self.fl = fl
         self.name = name
-        self._idx = _mu_names(fl.local_full_dof_size).index(name)
+        self._idx = _mu_names(fl.mu.size).index(name)
         self.threshold = threshold
 
     def J(self):
@@ -24,6 +24,6 @@ class MuBound(Optimizable):
     def dJ(self):
         v = float(self.fl.mu[self._idx])
         ex = max(abs(v) - self.threshold, 0.)
-        g = np.zeros(self.fl.local_full_dof_size)
+        g = np.zeros(self.fl.mu.size)
         g[self._idx] = 2.0 * ex * np.sign(v)
-        return Derivative({self.fl: g})
+        return self.fl.mu_derivative(g)   # (r, Z) part -> shared geometry, if any
