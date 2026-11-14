@@ -12,8 +12,10 @@ PYTHONPATH provides `disbatchc`, and sbatch exports the environment):
 tasks.jobs (written by mk_tasks.sh) holds one 'bash ./prefix.sh <15 args>' line per device,
 with step=boozer (15th argument). disBatch runs these lines on the allocated cores. Each
 time a boozer task returns 0 (device accepted and copied to ceph), the driver submits the
-same line with num_aux (10th argument) set to N and step set to polish, once per N in
---num-aux, so the polishes start as soon as cores are free, on any node. Once every boozer
+same line with num_aux (10th argument) set to N and step set to polish and to double
+(--steps), once per N in --num-aux: for each N, the polish (boozer_singular_opt.py) and the
+two-configuration optimization (boozer_double_opt.py) of the device run side by side, as
+separate tasks that start as soon as cores are free, on any node. Once every boozer
 task has returned, the driver tells disBatch that no more tasks are coming: nodes are then
 retired as they fall idle, and disBatch exits when the last polish returns.
 
@@ -47,6 +49,12 @@ BOOZER_END = (b"> 0.1%, aborting", b"boozer_all.py failed", b"max_rel_error.txt 
 POLISH_END = (b"succeeded (max rel err", b"out of spec (max rel err",
               b"(no design_polished_final", b"polished render failed", b"device not accepted?",
               b"Finished: ")
+# a double task (prefix.sh step=double) prints the same succeeded / out of spec messages
+DOUBLE_END = (b"succeeded (max rel err", b"out of spec (max rel err",
+              b"(no design_double_final", b"device not accepted?", b"Finished: ")
+# Steps submitted for each accepted device and each num_aux, with the suffix prefix.sh adds
+# to the num_aux=N name of the task (scratch dir, log) and the end markers of its log.
+POST_STEPS = {"polish": ("", POLISH_END), "double": ("_double", DOUBLE_END)}
 TAIL_BYTES = 1 << 16
 
 
@@ -115,7 +123,13 @@ def accepted_on_ceph(args):
     return any(os.path.isfile(j[:-len(".json")] + ".yaml") for j in jsons)
 
 
-def initial_tasks(devices, num_aux_list, resume):
+def post_tasks(head, args, num_aux_list, steps):
+    """(step, head, args, num_aux) of the tasks that follow an accepted boozer task: for each
+    num_aux, one task per step (polish, double), so that they run side by side."""
+    return [(step, head, args, n) for n in num_aux_list for step in steps]
+
+
+def initial_tasks(devices, num_aux_list, steps, resume):
     """(step, head, args, num_aux) of the tasks to submit at start, and the number of
     devices skipped by --resume."""
     tasks, skipped = [], 0
@@ -123,9 +137,10 @@ def initial_tasks(devices, num_aux_list, resume):
         if not resume:
             tasks.append(("boozer", head, args, 0))
         elif accepted_on_ceph(args):
-            todo = [n for n in num_aux_list
-                    if not ran_to_end(log_path(task_name(args, n)), POLISH_END)]
-            tasks += [("polish", head, args, n) for n in todo]
+            todo = [t for t in post_tasks(head, args, num_aux_list, steps)
+                    if not ran_to_end(log_path(task_name(args, t[3]) + POST_STEPS[t[0]][0]),
+                                      POST_STEPS[t[0]][1])]
+            tasks += todo
             skipped += not todo
         elif ran_to_end(log_path(task_name(args, 0)), BOOZER_END):
             skipped += 1
@@ -141,6 +156,10 @@ def main():
     ap.add_argument("tasks", help="task file written by mk_tasks.sh (step=boozer lines)")
     ap.add_argument("--num-aux", type=int, nargs="+", default=[3, 4, 5, 6],
                     help="numbers of aux coils to polish each accepted device at (default: 3 4 5 6)")
+    ap.add_argument("--steps", nargs="+", default=["polish", "double"], choices=sorted(POST_STEPS),
+                    help="steps run for each accepted device and each num_aux: polish "
+                         "(boozer_singular_opt.py) and/or double (boozer_double_opt.py), as "
+                         "separate tasks side by side (default: polish double)")
     ap.add_argument("--resume", action="store_true",
                     help="skip the work whose logs/outputs show it is done (see the module doc)")
     ap.add_argument("--dry-run", action="store_true",
@@ -160,14 +179,15 @@ def main():
                 raise SystemExit("expected step=boozer task lines, got: %s" % line.strip())
             devices.append((head, args))
 
-    start, skipped = initial_tasks(devices, num_aux_list, opts.resume)
+    steps = list(dict.fromkeys(opts.steps))   # distinct, in the order given
+    start, skipped = initial_tasks(devices, num_aux_list, steps, opts.resume)
     n_boozer = sum(1 for t in start if t[0] == "boozer")
-    log("%d devices in %s: %d boozer tasks and %d polish tasks to submit now, %d devices "
-        "skipped (resume=%s, num_aux=%s)" % (len(devices), opts.tasks, n_boozer,
-                                             len(start) - n_boozer, skipped, opts.resume,
-                                             num_aux_list))
+    log("%d devices in %s: %d boozer tasks and %d %s tasks to submit now, %d devices "
+        "skipped (resume=%s, num_aux=%s, steps after boozer=%s)"
+        % (len(devices), opts.tasks, n_boozer, len(start) - n_boozer, "/".join(steps), skipped,
+           opts.resume, num_aux_list, steps))
     if opts.dry_run:
-        for step in ("boozer", "polish"):
+        for step in ["boozer"] + steps:
             cmds = [make_cmd(h, a, n, s) for s, h, a, n in start if s == step]
             log("%s: %d tasks%s" % (step, len(cmds), ", first ones:" if cmds else ""))
             for c in cmds[:3]:
@@ -233,8 +253,8 @@ def main():
                 boozer_left -= 1
                 if rc == 0:
                     accepted += 1
-                    for n in num_aux_list:
-                        submit("polish", head, args, n)
+                    for t in post_tasks(head, args, num_aux_list, steps):
+                        submit(*t)
                         pending += 1
             log("task %d (%s, attempt %s, num_aux %s) returned %s | boozer left %d, accepted %d, "
                 "tasks pending %d" % (tid, step, args[ATTEMPT], num_aux, rc, boozer_left, accepted, pending))

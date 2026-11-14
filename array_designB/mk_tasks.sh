@@ -22,7 +22,10 @@
 # Polished devices out of spec are kept in output_oos/ with their summary.txt (prefix.sh).
 # The polish now uses AUX_RADIUS_MAX = 1.2, N_POLISH_STAGES = 10 and DISCRIMINANT_WEIGHT = 1e-6
 # (boozer_singular_opt.py); campaign 7463849 ran with 1.5, 5 and 1e-8.
-# Writes tasks.jobs (shuffled with a fixed seed, as mk_tasks.sh does).
+# For each accepted device and each num_aux, the driver submits TWO tasks side by side: the
+# polish (prefix.sh step=polish, boozer_singular_opt.py) and the two-configuration
+# optimization (step=double, boozer_double_opt.py).
+# Writes tasks.jobs, shuffled with a new random seed at every run (see below).
 NUM_AUX=0  # boozer step: the num_aux=0 device (designB_driver.py sets num_aux per polish task)
 margin=0.06
 wells="0 OFF"  # one task per (well, attempt); emit() reads $well from the loop below
@@ -45,7 +48,12 @@ for well in $wells; do
   for attempt in $(seq 0 1919); do emit "$attempt" 0.05; done
 done
 
-# Shuffle the task list (fixed seed, so the order is reproducible) so that every disBatch
-# wave mixes all attempts.
-python3 -c "import random; L = open('tasks.jobs').read().splitlines(); random.Random(0).shuffle(L); open('tasks.jobs', 'w').write('\n'.join(L) + '\n')"
+# Shuffle the task list, so that the order in which the boozer tasks start (hence which ones
+# make the first wave) is random: a NEW seed at every run (the time, or SEED=<n> to
+# reproduce an order), printed and recorded in tasks.jobs.seed. It only orders the tasks: the
+# devices and their perturbations (seeded by the device name) do not depend on it.
+SEED="${SEED:-$(date +%s)}"
+echo "$SEED" > tasks.jobs.seed
+python3 -c "import random, sys; L = open('tasks.jobs').read().splitlines(); random.Random(int(sys.argv[1])).shuffle(L); open('tasks.jobs', 'w').write('\n'.join(L) + '\n')" "$SEED"
+echo "task order shuffled with seed $SEED (recorded in tasks.jobs.seed)"
 echo "$(wc -l < tasks.jobs) tasks written to tasks.jobs"

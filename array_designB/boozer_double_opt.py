@@ -127,6 +127,10 @@ parser.add_argument("--discriminant", type=int, default=0, choices=(0, 1),
                     help="1 to add the snowflake-discriminant inequality constraint "
                          "Delta > DISCRIMINANT_THRESHOLD (identity polish only); "
                          "0 (default) off. Recorded in the output filename (_disc1 suffix when on).")
+parser.add_argument("--stages", type=int, default=10,
+                    help="number of outer BFGS stages (default 10; lower it for a quick end-to-end test)")
+parser.add_argument("--maxiter", type=int, default=1000,
+                    help="BFGS iterations per stage (default 1000; lower it for a quick end-to-end test)")
 args = parser.parse_args()
 
 _in = os.path.abspath(args.design_json)
@@ -1255,11 +1259,11 @@ print("""
 ################################################################################
 """)
 # Number of iterations to perform:
-MAXITER=1000
+MAXITER = int(args.maxiter)   # --maxiter, default 1000
 # Outer BFGS stages (each up to MAXITER iterations, followed by the x10 escalation of the
 # weights of the constraints still violated by more than 0.1%). Was 5: in campaign 7463849
 # most out-of-spec polishes missed by small margins (0.2-1%) after the 5 stages.
-N_POLISH_STAGES = 10
+N_POLISH_STAGES = int(args.stages)   # --stages, default 10
 
 dofs = JF.x.copy()
 callback(dofs)
@@ -1750,3 +1754,13 @@ out_iota_Gs = [[boozer_surfaces[0].res['iota'], boozer_surfaces[0].res['G']]] + 
 out_axes = [axes[0]] + out_axes
 save([out_boozer_surfaces, out_iota_Gs, out_axes, xpoints, sdf], OUT_DIR + f'design_double_final_{DEVICE_TAG}.json')
 print(f"wrote {OUT_DIR}design_double_final_{DEVICE_TAG}.json (combined modular+aux coil set)")
+
+# One single-configuration copy per configuration, in the standard 5-entry layout, each in
+# its own sub-directory, so that the render scripts (run_render.sh: mk_manifolds.py,
+# plot_manifolds.py), which take ONE configuration and write next to their input, can be
+# run on each: config1/ = X-point (aux off), config2/ = snowflake (combined coils).
+for _k, _name in enumerate(('config1', 'config2')):
+    os.makedirs(OUT_DIR + _name, exist_ok=True)
+    save([[out_boozer_surfaces[_k]], [out_iota_Gs[_k]], [out_axes[_k]], [xpoints[_k]], sdf],
+         OUT_DIR + f'{_name}/design_double_final_{DEVICE_TAG}.json')
+    print(f"wrote {OUT_DIR}{_name}/design_double_final_{DEVICE_TAG}.json")

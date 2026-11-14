@@ -29,6 +29,13 @@ set -uo pipefail
 #           defaults to $HOME_DIR/output and may be relative to $HOME_DIR (e.g.
 #           INIT_ROOT=archive/campaign_7463849/output to polish an archived device).
 #           The task (scratch dir, log) is named after the polished device (num_aux=N).
+#   double  the two-configuration optimization (boozer_double_opt.py via run_double.sh:
+#           config 1 = the device itself, aux coils off, hyperbolic X-point; config 2 = a
+#           snowflake with num_aux aux coils) of a device already on ceph, read as for
+#           polish. Same 0.1% gate on its max_rel_error.txt: within spec -> output/, out of
+#           spec -> output_oos/. Its dir, scratch dir and log are named <num_aux=N name>_double,
+#           so that it runs alongside the polish task of the same device and num_aux. No
+#           render (the render scripts expect a single-configuration design).
 
 margin="$1"
 well="$2"
@@ -62,13 +69,16 @@ force="${13:-OFF}"
 # (..._num_aux_AR_attempt_force_monothr).
 mono_thr="${14:-0.1}"
 
-# Part of the flow to run (all | boozer | polish), see the header. Last positional arg,
-# after the device identity, so it changes no folder name.
+# Part of the flow to run (all | boozer | polish | double), see the header. Last positional
+# arg, after the device identity, so it changes no folder name.
 STEP="${15:-all}"
 case "$STEP" in
-  all|boozer|polish) ;;
-  *) echo "ERROR: step must be all, boozer or polish (got '$STEP')"; exit 1 ;;
+  all|boozer|polish|double) ;;
+  *) echo "ERROR: step must be all, boozer, polish or double (got '$STEP')"; exit 1 ;;
 esac
+# polish and double start from a device already on ceph instead of running boozer_all
+FROM_CEPH=0
+case "$STEP" in polish|double) FROM_CEPH=1 ;; esac
 
 if [ "$well" = "OFF" ]; then
   well_str="OFF"
@@ -104,6 +114,9 @@ INIT_NAME="$(task_name 0)"
 # keep the num_aux=0 name.
 if [ "$STEP" = "polish" ]; then
   TASK_LOG_NAME="$(task_name "$NUM_AUX_POLISH")"
+elif [ "$STEP" = "double" ]; then
+  # the two-configuration optimization at num_aux=N: its own name, next to the polish's
+  TASK_LOG_NAME="$(task_name "$NUM_AUX_POLISH")_double"
 else
   TASK_LOG_NAME="$INIT_NAME"
 fi
@@ -126,6 +139,10 @@ SYNC_INCLUDES=(
   --include='design_polished_final_*.yaml'
   --include='design_unpolished_final_*.json'
   --include='design_unpolished_final_*.yaml'
+  --include='design_double_final_*.json'
+  --include='design_double_final_*.yaml'
+  --include='design_double_unpolished_*.json'
+  --include='design_double_unpolished_*.yaml'
   --include='LCFS_*.json'
   --include='LCFS[0-9][0-9]_*.json'
   --include='singular.json'
@@ -197,6 +214,8 @@ sync_oos() {
   mkdir -p "$dest"
   rsync -a --include='design_polished_final_*.json' \
            --include='design_polished_final_*.yaml' \
+           --include='design_double_final_*.json' \
+           --include='design_double_final_*.yaml' \
            --include='summary.txt' \
            --include='max_rel_error.txt' \
            --exclude='*' "$d/" "$dest/"
@@ -236,9 +255,9 @@ echo "mono=$mono attempt=$attempt"
 
 INIT_DIR="./output/$INIT_NAME"
 
-# step=polish: the num_aux=0 device was accepted and copied to ceph by its boozer task;
-# take its design json (+ paired yaml) from there instead of running steps (1)-(2).
-if [ "$STEP" = "polish" ]; then
+# step=polish or double: the num_aux=0 device was accepted and copied to ceph by its boozer
+# task; take its design json (+ paired yaml) from there instead of running steps (1)-(2).
+if [ "$FROM_CEPH" -eq 1 ]; then
   INIT_ROOT="${INIT_ROOT:-$HOME_DIR/output}"
   case "$INIT_ROOT" in /*) ;; *) INIT_ROOT="$HOME_DIR/$INIT_ROOT" ;; esac  # we are in $RUN now
   INIT_SRC="$INIT_ROOT/$(shard "$INIT_NAME")/$INIT_NAME"
@@ -247,12 +266,12 @@ if [ "$STEP" = "polish" ]; then
     echo "ERROR: no design_opt_final_*.json + .yaml in $INIT_SRC (device not accepted?)"
     exit 1
   fi
-  echo "polish step: init device $INIT_JSON"
+  echo "$STEP step: init device $INIT_JSON"
 fi
 
 # Steps (1)-(2), the boozer part, run for step=all and step=boozer. Not indented, so that
 # they stay identical to the original flow.
-if [ "$STEP" != "polish" ]; then
+if [ "$FROM_CEPH" -eq 0 ]; then
 # ───────────────────── (1) initial optimization -> num_aux=0 ──────────────────
 bash run_boozer_all.sh \
   "$margin" "$well" "$Z" "$distance" "$on_vessel" \
@@ -313,7 +332,7 @@ else
   MONO_CONSTRAINT=""
 fi
 
-if [ -n "$MONO_CONSTRAINT" ]; then
+if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" != "double" ]; then
   num_aux="$NUM_AUX_POLISH"
   POLISH_NAME="$(task_name "$num_aux")"
   POLISH_DIR="./output/$POLISH_NAME"
@@ -367,6 +386,56 @@ if [ -n "$MONO_CONSTRAINT" ]; then
       # Append min/max/mean axis elongation to summary.txt (best-effort, non-fatal).
       bash run_elongation.sh "$POLISHED_JSON" || echo "WARNING: elongation computation failed for polished device"
       sync_dir "$POLISH_DIR"
+    fi
+  fi
+fi
+
+# ──────────── (4) two-configuration optimization (step=double, mono 1/2) ───────
+if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
+  num_aux="$NUM_AUX_POLISH"
+  DOUBLE_NAME="$(task_name "$num_aux")_double"
+  DOUBLE_DIR="./output/$DOUBLE_NAME"
+  mkdir -p "$DOUBLE_DIR"
+
+  echo "--- double optimization num_aux=$num_aux ($MONO_CONSTRAINT): X-point (aux off) + snowflake ---"
+  # boozer_double_opt.py reads the input json + its sibling yaml and writes
+  # design_double_final_<DEVICE_ID>.json (+ .yaml), summary.txt and max_rel_error.txt IN
+  # PLACE in the double dir. Copy the init json + paired yaml in, as for the polish.
+  INIT_JSON_BASE="$(basename "$INIT_JSON")"
+  INIT_YAML="${INIT_JSON%.json}.yaml"
+  cp "$INIT_JSON" "$DOUBLE_DIR/$INIT_JSON_BASE"
+  cp "$INIT_YAML" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
+
+  DISC=0; [ "$MONO_CONSTRAINT" = "identity" ] && DISC=1
+  bash run_double.sh "$DOUBLE_DIR/$INIT_JSON_BASE" "$num_aux" "$DISC" || true
+  rm -f "$DOUBLE_DIR/$INIT_JSON_BASE" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
+
+  DOUBLE_JSON="$(ls "$DOUBLE_DIR"/design_double_final_*.json 2>/dev/null | head -1)"
+  if [ -z "$DOUBLE_JSON" ]; then
+    echo "double optimization num_aux=$num_aux failed (no design_double_final_*.json) — discarding (nothing to ceph)"
+    rm -rf "$DOUBLE_DIR"
+  else
+    # Same 0.1% gate; its max_rel_error.txt is the worst constraint error over BOTH
+    # configurations (including the trace bound of the X-point).
+    double_err="$DOUBLE_DIR/max_rel_error.txt"
+    if [ ! -f "$double_err" ] || awk '{ exit !($1 > 0.001) }' "$double_err"; then
+      echo "double num_aux=$num_aux out of spec (max rel err = $(cat "$double_err" 2>/dev/null)): design + summary.txt kept in output_oos/, not in output/"
+      sync_oos "$DOUBLE_DIR"
+      rm -rf "$DOUBLE_DIR"
+    else
+      echo "double optimization num_aux=$num_aux succeeded (max rel err = $(cat "$double_err") <= 0.1%)"
+      # Render BOTH configurations: boozer_double_opt.py wrote one single-configuration json
+      # per configuration in config1/ (X-point, aux off) and config2/ (snowflake), and the
+      # render scripts write next to their input. A failed render is a warning only: the
+      # device is still copied to ceph.
+      for cfg in config1 config2; do
+        CFG_JSON="$(ls "$DOUBLE_DIR/$cfg"/design_double_final_*.json 2>/dev/null | head -1)"
+        echo "=== rendering double device, $cfg: $DOUBLE_DIR/$cfg ==="
+        if [ -z "$CFG_JSON" ] || ! bash run_render.sh "$CFG_JSON" "$DOUBLE_DIR/$cfg"; then
+          echo "WARNING: render of $cfg failed"
+        fi
+      done
+      sync_dir "$DOUBLE_DIR"
     fi
   fi
 fi
