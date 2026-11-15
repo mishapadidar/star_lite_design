@@ -39,12 +39,13 @@ p = Path(sys.argv[1])
 
 # Only run on the FINAL design jsons (design_opt_final_<ID>.json from boozer_all.py,
 # design_polished_final_<ID>.json from the polish, or design_unpolished_final_<ID>.json
-# from boozer_singular.py). Refuse anything else -- in
+# from boozer_singular.py, or the single-configuration design_double_final_<ID>.json that
+# boozer_double_opt.py writes in config1/ and config2/). Refuse anything else -- in
 # particular the diagnostic design_opt_xpoint_deletion.json.
-m = re.match(r'design_(?:opt|polished|unpolished)_final_(\d+)(?:_disc[01])?\.json$', p.name)
+m = re.match(r'design_(?:opt|polished|unpolished|double)_final_(\d+)(?:_disc[01])?\.json$', p.name)
 if m is None:
-    print(f"mk_elongation: '{p.name}' is not a design_opt_final_/design_polished_final_/design_unpolished_final_ "
-          f"json (e.g. design_opt_xpoint_deletion.json); skipping, summary.txt unchanged.")
+    print(f"mk_elongation: '{p.name}' is not a design_opt_final_/design_polished_final_/design_unpolished_final_/"
+          f"design_double_final_ json (e.g. design_opt_xpoint_deletion.json); skipping, summary.txt unchanged.")
     sys.exit(0)
 device_id = m.group(1)
 
