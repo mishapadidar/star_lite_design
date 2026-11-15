@@ -131,6 +131,9 @@ parser.add_argument("--stages", type=int, default=10,
                     help="number of outer BFGS stages (default 10; lower it for a quick end-to-end test)")
 parser.add_argument("--maxiter", type=int, default=1000,
                     help="BFGS iterations per stage (default 1000; lower it for a quick end-to-end test)")
+parser.add_argument("--trace-min", type=float, default=None,
+                    help="lower bound on tr M of the config 1 X-point (default: 2 + the yaml's "
+                         "MONODROMY_THRESHOLD, i.e. boozer_all's --mono-thr)")
 args = parser.parse_args()
 
 _in = os.path.abspath(args.design_json)
@@ -597,7 +600,8 @@ xpoints = [xp_x] + sing_fls
 FIELDS = [lambda: BiotSavart(coils_x)] + [(lambda fl=fl: SingularBiotSavart(fl)) for fl in sing_fls]
 iota_Gs = [[bs.res['iota'], bs.res['G']] for bs in boozer_surfaces]
 IOTAS_TARGET = list(IOTAS_TARGET) * len(boozer_surfaces)   # the yaml target, for each configuration
-TRACE_MIN = 2.0 + float(config['MONODROMY_THRESHOLD'])     # config 1: tr M >= 2 + boozer_all's --mono-thr
+# config 1: tr M >= TRACE_MIN; --trace-min, or by default 2 + boozer_all's --mono-thr
+TRACE_MIN = args.trace_min if args.trace_min is not None else 2.0 + float(config['MONODROMY_THRESHOLD'])
 print(f"two configurations: config 1 X-point (aux off, tr M >= {TRACE_MIN}), config 2 snowflake "
       f"({num_aux} aux coils); iota targets {IOTAS_TARGET}")
 
