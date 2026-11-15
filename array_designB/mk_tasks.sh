@@ -1,34 +1,29 @@
 #!/bin/bash
-# Next designB campaign (decided 2026-11-14, after campaign 7463849): config 0, SN,
-# margin 0.06, well 0.0 and well OFF, AR 2, monothr 0.05 only, on-axis |B| ripple
-# threshold 0.5% (MODB_RIPPLE_THRESHOLD; 0.1% up to 7463849).
+# designB campaign decided on 2026-11-15, after campaign 7474635 (archived in
+# archive/campaign_7474635/): config 0, SN, margin 0.06, well 0.0 only, AR 2, monothr 0.05,
+# with a bound on the near-axis elongation (boozer_all.py --elongation: elongation in the
+# plane normal to the magnetic axis <= bound at 16 toroidal angles), and ONLY double devices
+# after the boozer step (no polish).
 #
-# tasks.jobs holds only the boozer step of each device (prefix.sh step=boozer, num_aux=0).
-# It is run by designB_driver.py (embedded disBatch), which submits, for each device
-# accepted by its boozer task, one polish task (prefix.sh step=polish) per num_aux in
-# {3, 4, 5, 6} into the same disBatch run, on whatever cores are free.
-#
-# Campaign 7463849 (2400 tasks; cancelled on 2026-11-14 after 1920 had finished; archived in
-# archive/campaign_7463849/ with its task list, its generator mk_tasks.sh, its output/ and
-# logs/) kept accepted devices for 791 of the 2000 tasks at monothr 0.05 (39.6 %) and for 99
-# of the 400 at monothr 0.02 (24.8 %). No polish succeeded at 0.02 (2 of the 423 finished
-# polishes succeeded overall), so 0.02 is dropped.
-#   monothr 0.05, for each of well 0.0 and well OFF: attempts 0-1919 -> 2 x 1920 = 3840 tasks,
-#   on 30 icelake nodes x 64 cores (submit_driver.sh) + 15 genoa nodes x 96 cores added with the
-#   run's dbUtil.sh = 3360 cores (attempt 0 is the unperturbed reference device; attempts
-#   >= 1 are perturbed with a seed derived from the device name). At well 0.0 these names,
-#   hence seeds and starting points, are those of archived devices of 7456743 (attempts 0-5)
-#   and 7463849 (6-1919), but the runs differ: the ripple threshold, not in the name, changed.
-# Polished devices out of spec are kept in output_oos/ with their summary.txt (prefix.sh).
-# The polish now uses AUX_RADIUS_MAX = 1.2, N_POLISH_STAGES = 10 and DISCRIMINANT_WEIGHT = 1e-6
-# (boozer_singular_opt.py); campaign 7463849 ran with 1.5, 5 and 1e-8.
-# For each accepted device and each num_aux, the driver submits TWO tasks side by side: the
-# polish (prefix.sh step=polish, boozer_singular_opt.py) and the two-configuration
-# optimization (step=double, boozer_double_opt.py).
+# tasks.jobs holds only the boozer step of each device (prefix.sh step=boozer, num_aux=0):
+#   elongation bound in {OFF, 5, 4, 3} x attempts 0-959 -> 4 x 960 = 3840 tasks, on 30 icelake
+#   nodes x 64 cores (submit_driver.sh) + 15 genoa nodes x 96 cores added with the run's
+#   dbUtil.sh = 3360 cores. Attempt 0 is the unperturbed reference device; attempts >= 1 are
+#   perturbed with a seed derived from the device name WITHOUT its elongation field, so attempt
+#   k starts from the same coils for the four bounds (and, for OFF, from those of attempt k at
+#   well 0.0 of campaign 7474635).
+# It is run by designB_driver.py (embedded disBatch), which submits, for each device accepted
+# by its boozer task, the two-configuration optimization (prefix.sh step=double,
+# boozer_double_opt.py) for each num_aux in {3, 4, 5} and each lower bound on tr M of the
+# config 1 X-point in {2.05, 2.2}: 6 double tasks per accepted device, into the same disBatch
+# run, on whatever cores are free (submit_driver.sh: --steps double --num-aux 3 4 5
+# --trace-min 2.05 2.2). The elongation bound applies to both configurations of a double.
+# Doubles out of spec are kept in output_oos/ with their summary.txt (prefix.sh).
 # Writes tasks.jobs, shuffled with a new random seed at every run (see below).
-NUM_AUX=0  # boozer step: the num_aux=0 device (designB_driver.py sets num_aux per polish task)
+NUM_AUX=0  # boozer step: the num_aux=0 device (designB_driver.py sets num_aux per double task)
 margin=0.06
-wells="0 OFF"  # one task per (well, attempt); emit() reads $well from the loop below
+well=0
+elongs="OFF 5 4 3"  # one task per (elongation bound, attempt); emit() reads $elong from the loop below
 Z=0
 distance=0
 on_vessel=0
@@ -42,10 +37,10 @@ force=OFF
 mkdir -p logs
 : > tasks.jobs
 emit() {  # emit <attempt> <mono_thr>
-  echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${null} ${NUM_AUX} ${AR} $1 ${force} $2 boozer" >> tasks.jobs
+  echo "bash ./prefix.sh ${margin} ${well} ${Z} ${distance} ${on_vessel} ${config} ${vessel_id} ${mono} ${null} ${NUM_AUX} ${AR} $1 ${force} $2 boozer ${elong}" >> tasks.jobs
 }
-for well in $wells; do
-  for attempt in $(seq 0 1919); do emit "$attempt" 0.05; done
+for elong in $elongs; do
+  for attempt in $(seq 0 959); do emit "$attempt" 0.05; done
 done
 
 # Shuffle the task list, so that the order in which the boozer tasks start (hence which ones

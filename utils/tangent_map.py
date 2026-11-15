@@ -324,6 +324,10 @@ class TangentMap(Optimizable):
         self.iota_dL     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=2)(B, gradB, L, gamma)
         self.iota_dgamma = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=3)(B, gradB, L, gamma)
 
+        # near-axis elongation at phi and its partials w.r.t. (B, gradB, L, gamma), from the
+        # same return map (one jitted call returns the value and the four partials).
+        self.elongation_jax = lambda B, gradB, L, gamma: elongation_pure(B, gradB, L, gamma, self.D, self.frame)
+        self.elongation_and_partials = jit(jax.value_and_grad(self.elongation_jax, argnums=(0, 1, 2, 3)))
 
         self.axis = axis
         curve = axis.curve
@@ -335,7 +339,9 @@ class TangentMap(Optimizable):
         self._matrix = None
         self._iota = None
         self._diota_dcoils = None
-    
+        self._elongation = None
+        self._delongation_dcoils = None
+
     @property
     def matrix(self):
         if self._matrix is None:
@@ -462,19 +468,54 @@ class TangentMap(Optimizable):
         """Return-map elongation at this tangent map's starting phi: the aspect ratio of
         the invariant ellipse of the one-field-period monodromy R[-1] (i.e. the
         flux-surface cross-section elongation at phi). Built only from the return map
-        R[-1] -- see elongation_pure. Non-differentiable (evaluation only). Sweep `phi`
-        (see __init__) to obtain the toroidal elongation profile."""
+        R[-1] -- see elongation_pure. Sweep `phi` (see __init__) to obtain the toroidal
+        elongation profile. Its derivative w.r.t. the coil dofs is delongation_dcoils."""
+        if self._elongation is None:
+            self.compute_elongation()
+        return self._elongation
+
+    @property
+    def delongation_dcoils(self):
+        if self._delongation_dcoils is None:
+            self.compute_elongation()
+        return self._delongation_dcoils
+
+    def compute_elongation(self):
+        """Elongation and its derivative w.r.t. the coil dofs. Mirrors compute_iota():
+        partials of elongation_pure w.r.t. B/gradB/L/gamma, chained through the field's
+        B_and_dB_vjp and the field-line solve adjoint (PLU + vjp)."""
         axis = self.axis
         curve = self.curve
         biotsavart = self.biotsavart
+
         if axis.need_to_run_code:
-            axis.run_code(axis.res['length'])
+            res = axis.res
+            axis.run_code(res['length'])
+
         biotsavart.set_points(curve.gamma())
         B = biotsavart.B()
         gradB = biotsavart.dB_by_dX()
+        gradgradB = biotsavart.d2B_by_dXdX()
         L = axis.res['length']
         gamma = curve.gamma()
-        return float(elongation_pure(B, gradB, L, gamma, self.D, self.frame))
+        elongation, partials = self.elongation_and_partials(B, gradB, L, gamma)
+        self._elongation = float(elongation)
+        delongation_dB, delongation_dgradB, delongation_dL, delongation_dgamma_partial = [np.asarray(p) for p in partials]
+
+        Pc, Lc, Uc = axis.res['PLU']
+        delongation_dcoils = sum(biotsavart.B_and_dB_vjp(delongation_dB, delongation_dgradB))
+
+        dgamma_da = curve.dgamma_by_dcoeff()
+        dB_da = np.einsum('ikl,ikm->ilm', gradB, dgamma_da, optimize=True)
+        dgradB_da = np.einsum('ijkl,ikm->ijlm', gradgradB, dgamma_da, optimize=True)
+        delongation_dgamma = np.einsum('ij,ijm->m', delongation_dB, dB_da, optimize=True) + \
+                             np.einsum('ijk,ijkm->m', delongation_dgradB, dgradB_da, optimize=True) + \
+                             np.einsum('ik,ikm->m', delongation_dgamma_partial, dgamma_da)
+        dJ_ds = np.concatenate([delongation_dgamma, [float(delongation_dL)]])
+
+        adj = forward_backward(Pc, Lc, Uc, dJ_ds)
+        delongation_dcoils -= axis.res['vjp'](adj, axis.biotsavart, axis)
+        self._delongation_dcoils = delongation_dcoils
 
 class Monodromy(Optimizable):
     def __init__(self, tangent_map):

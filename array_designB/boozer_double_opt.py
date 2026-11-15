@@ -94,7 +94,7 @@ from star_lite_design.utils.singularperiodicfieldline import (
     SingularPeriodicFieldline, DependentMu, AuxCoilDistance, _mu_names, _CURRENT_SCALE)
 from star_lite_design.utils.singularbiotsavart import SingularBiotSavart
 from star_lite_design.utils.mubound import MuBound
-from star_lite_design.utils.tangent_map import TangentMap, Monodromy, AxisIota
+from star_lite_design.utils.tangent_map import TangentMap, Monodromy, AxisIota, AxisElongation
 from star_lite_design.utils.discriminant import SnowflakeDiscriminant
 from star_lite_design.utils.total_field_coil_force import TotalFieldLpCurveForce
 
@@ -644,6 +644,28 @@ if axis_iota_enabled:
                        for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
 else:
     AXIS_IOTA_TARGET, J_axis_iota = [], None
+
+# Near-axis elongation bound, as in boozer_all.py (its --elongation, read here from the yaml
+# as ELONGATION_MAX; None or absent: no bound): the elongation of the flux-surface
+# cross-section in the plane normal to the magnetic axis is kept <= ELONGATION_MAX at
+# N_ELONGATION toroidal angles (a full field period, or half of one for a stellarator-symmetric
+# axis), for BOTH configurations, each with its own field.
+N_ELONGATION = 16
+ELONGATION_MAX = config.get('ELONGATION_MAX')
+elongation_enabled = ELONGATION_MAX is not None
+if elongation_enabled:
+    ELONGATION_MAX = float(ELONGATION_MAX)
+    ELONGATION_WEIGHT = Weight(config.setdefault('ELONGATION_WEIGHT', 1.0))
+    elong_tmos = []
+    for axis, mk in zip(axes, FIELDS):
+        _nfp_e, _stellsym_e = axis.curve.nfp, axis.curve.stellsym
+        _phis_e = (np.linspace(0., 0.5/_nfp_e, N_ELONGATION) if _stellsym_e
+                   else np.linspace(0., 1./_nfp_e, N_ELONGATION, endpoint=False))
+        elong_tmos += [TangentMap(axis, mk(), 0.0, mtype='identity', phi=float(phi)) for phi in _phis_e]
+    ELONGATION_LIST = [AxisElongation(tmo) for tmo in elong_tmos]
+    J_elongation = sum([QuadraticPenalty(e, ELONGATION_MAX, 'max') for e in ELONGATION_LIST])
+else:
+    ELONGATION_WEIGHT, ELONGATION_LIST, J_elongation = Weight(0.0), [], None
 nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, mk()) for boozer_surface, mk in zip(boozer_surfaces, FIELDS)]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
@@ -879,6 +901,9 @@ JF = (J_nonQSRatio
 # On-axis iota constraint (only for --AR 1/2 devices).
 if axis_iota_enabled:
     JF = JF + AXIS_IOTA_WEIGHT * J_axis_iota
+# Near-axis elongation bound of both configurations (only when the yaml sets ELONGATION_MAX).
+if elongation_enabled:
+    JF = JF + ELONGATION_WEIGHT * J_elongation
 
 # Snowflake discriminant constraint Delta > DISCRIMINANT_THRESHOLD (--discriminant 1, identity only).
 if discriminant_enabled:
@@ -954,6 +979,10 @@ if axis_iota_enabled:
     penalties['on-axis iota'] = AXIS_IOTA_WEIGHT * J_axis_iota
     penalty_weights['on-axis iota'] = AXIS_IOTA_WEIGHT
     states['on-axis iota'] = AXIS_IOTA_LIST
+# Likewise the near-axis elongation bound (its maxima are printed in the callback table).
+if elongation_enabled:
+    penalties['elongation'] = ELONGATION_WEIGHT * J_elongation
+    penalty_weights['elongation'] = ELONGATION_WEIGHT
 
 # Snowflake discriminant constraint enters the objective / escalation / weight-scaling
 # tables ONLY when enabled (--discriminant 1, identity polish). Its VALUE is still
@@ -1049,6 +1078,10 @@ def callback(dofs):
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
     table2.add_row('aspect ratio', ' '.join([f'{bsurf.surface.aspect_ratio():.4e}' for bsurf in boozer_surfaces]))
     table2.add_row('modB axis deviation', ' '.join([f'{r.max_deviation():.4e}' for r in modB_ripples]))
+    if elongation_enabled:
+        _el = [e.J() for e in ELONGATION_LIST]
+        table2.add_row('axis elongation max', ' '.join([f'{max(_el[k:k+N_ELONGATION]):.4f}' for k in range(0, len(_el), N_ELONGATION)])
+                       + f'  (bound: <= {ELONGATION_MAX})')
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
     # auxiliary-coil parameters, per fl: summarize the currents (scaled to
     # Amperes) by min/max, separated into DEPENDENT (solved, bounded to
@@ -1311,6 +1344,9 @@ for j in range(N_POLISH_STAGES):
                if aux_amps else 0.)
     iota_err = max([np.abs(IOTAS.J() - IOT_TARGET)/np.abs(IOT_TARGET) for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
     axis_iota_err = max([np.abs(aio.J() - tgt)/np.abs(tgt) for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)]) if axis_iota_enabled else 0.0
+    # near-axis elongation bound: relative excess of the largest elongation (both configurations)
+    elongation_max = max(e.J() for e in ELONGATION_LIST) if elongation_enabled else None
+    elongation_err = max(elongation_max - ELONGATION_MAX, 0.)/ELONGATION_MAX if elongation_enabled else 0.0
     mr_err = max(np.abs(mr.J()-MR_TARGET)/MR_TARGET for mr in mrs)
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
@@ -1421,6 +1457,9 @@ for j in range(N_POLISH_STAGES):
     if axis_iota_err > 0.001 and AXIS_IOTA_WEIGHT.value != 0.:
         AXIS_IOTA_WEIGHT*=10
         print("ON-AXIS IOTA ERROR", axis_iota_err)
+    if elongation_err > 0.001 and ELONGATION_WEIGHT.value != 0.:
+        ELONGATION_WEIGHT*=10
+        print("ELONGATION ERROR", elongation_err)
     if mr_err > 0.001 and MAJOR_RADIUS_WEIGHT.value !=0.:
         MAJOR_RADIUS_WEIGHT*=10
         print("MR ERROR", mr_err)
@@ -1519,6 +1558,10 @@ for j in range(N_POLISH_STAGES):
     if axis_iota_enabled:
         config['AXIS_IOTA_WEIGHT'] = AXIS_IOTA_WEIGHT.value
         config['AXIS_IOTA_TARGET'] = list(AXIS_IOTA_TARGET)[:1]
+    # Elongation bound (None: no bound) and, when there is one, its escalated weight.
+    config['ELONGATION_MAX'] = ELONGATION_MAX
+    if elongation_enabled:
+        config['ELONGATION_WEIGHT'] = ELONGATION_WEIGHT.value
     config['MONODROMY_WEIGHT'] = MONODROMY_WEIGHT.value
     config['MAJOR_RADIUS_WEIGHT'] = MAJOR_RADIUS_WEIGHT.value
     config['BOOZER_RESIDUAL_WEIGHT'] = BOOZER_RESIDUAL_WEIGHT.value
@@ -1604,6 +1647,10 @@ final_metrics = {
 # config 1's X-point, which is gated, and descriptive per-configuration values
 # (config 1 = X-point, aux off; config 2 = snowflake).
 final_metrics['xpoint_trace'] = (xpoint_trace(), TRACE_MIN, trace_err if MONODROMY_WEIGHT.value != 0. else 0.0)
+# Near-axis elongation bound (only when the yaml sets ELONGATION_MAX): the largest elongation
+# over the N_ELONGATION angles of both configurations; its relative excess feeds the 0.1% gate.
+if elongation_enabled:
+    final_metrics['elongation_bound'] = (elongation_max, ELONGATION_MAX, elongation_err if ELONGATION_WEIGHT.value != 0. else 0.0)
 for _k, (_bsurf, _nq, _io, _mrat) in enumerate(zip(boozer_surfaces, nonQS_list, IOTAS_LIST, mirror_ratios), start=1):
     final_metrics[f'nonQS_percent_config{_k}'] = (100. * _nq.J()**0.5, None, None)
     final_metrics[f'iota_config{_k}'] = (_io.J(), None, None)

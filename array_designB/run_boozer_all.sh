@@ -5,10 +5,11 @@
 # Does NOT touch ceph -- the master decides what to copy back.
 #
 #   run_boozer_all.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                     <vessel_id> <mono> <attempt> <null> [AR] [force] [mono_thr]
+#                     <vessel_id> <mono> <attempt> <null> [AR] [force] [mono_thr] [elongation]
 #
 # force: maximum coil force per unit length in N/m, or OFF (default) for none.
 # mono_thr: monodromy threshold of the boozer_all constraint (default 0.1).
+# elongation: upper bound on the near-axis elongation, or OFF (default) for none.
 # Exit status is boozer_all.py's; the master gates on the produced design json.
 set -uo pipefail
 
@@ -16,6 +17,7 @@ margin="$1"; well="$2"; Z="$3"; distance="$4"; on_vessel="$5"
 config="$6"; vessel_id="$7"; mono="$8"; attempt="$9"; null="${10}"; AR="${11:-0}"
 force="${12:-OFF}"
 mono_thr="${13:-0.1}"
+elongation="${14:-OFF}"
 
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -42,4 +44,5 @@ source /mnt/home/agiuliani/ceph/STAR_LITE/venv/bin/activate
   --null "$null" \
   --AR "$AR" \
   --force "$force" \
-  --mono-thr "$mono_thr"
+  --mono-thr "$mono_thr" \
+  --elongation "$elongation"

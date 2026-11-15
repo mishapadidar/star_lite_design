@@ -38,9 +38,10 @@ import time
 
 # prefix.sh positional arguments, 0-based here:
 #   0 margin  1 well  2 Z  3 distance  4 on_vessel  5 config  6 vessel_id  7 mono  8 null
-#   9 num_aux  10 AR  11 attempt  12 force  13 mono_thr  14 step
-NUM_AUX, ATTEMPT, STEP = 9, 11, 14
-N_ARGS = 15
+#   9 num_aux  10 AR  11 attempt  12 force  13 mono_thr  14 step  15 elongation
+# (a 17th, trace_min, is appended by make_cmd() to the double tasks run with a trace bound)
+NUM_AUX, ATTEMPT, STEP, ELONG = 9, 11, 14, 15
+N_ARGS = 16
 
 # Messages that prefix.sh prints when a step ends (any outcome), searched in the tail of
 # the task log. A task killed mid-way (job cancelled) has none of them.
@@ -58,17 +59,33 @@ POST_STEPS = {"polish": ("", POLISH_END), "double": ("_double", DOUBLE_END)}
 TAIL_BYTES = 1 << 16
 
 
+# A double task run with its own bound on tr M of the config 1 X-point (--trace-min) is the
+# step "double@<bound>", e.g. "double@2.2": prefix.sh gets step=double and the bound as its
+# 17th argument, and names the task <num_aux=N name>_trmin=<bound>_double.
+def step_base(step):
+    return step.partition("@")[0]
+
+
+def step_suffix(step):
+    """What prefix.sh appends to the num_aux=N name of the task (scratch dir, log)."""
+    base, _, tmin = step.partition("@")
+    return "_trmin=%s_double" % tmin if tmin else POST_STEPS[base][0]
+
+
 def log(msg):
     print(time.strftime("%Y-%m-%d %H:%M:%S ") + msg, flush=True)
 
 
 def split_cmd(cmd):
     """(head, args) of a task line: head = the tokens up to and including prefix.sh,
-    args = its 15 positional arguments."""
+    args = its 16 positional arguments (a line without the 16th, the elongation bound, gets
+    OFF)."""
     toks = cmd.split()
     for k, t in enumerate(toks):
         if t.endswith("prefix.sh"):
             args = toks[k + 1:]
+            if len(args) == N_ARGS - 1:
+                args.append("OFF")
             if len(args) != N_ARGS:
                 raise SystemExit("expected %d prefix.sh arguments, got %d in: %s" % (N_ARGS, len(args), cmd))
             return toks[:k + 1], args
@@ -76,9 +93,10 @@ def split_cmd(cmd):
 
 
 def make_cmd(head, args, num_aux, step):
+    base, _, tmin = step.partition("@")
     a = list(args)
-    a[NUM_AUX], a[STEP] = str(num_aux), step
-    return " ".join(head + a)
+    a[NUM_AUX], a[STEP] = str(num_aux), base
+    return " ".join(head + a + ([tmin] if tmin else []))
 
 
 def well_str(w):
@@ -89,9 +107,9 @@ def task_name(args, num_aux):
     """Device folder name, as built by prefix.sh's task_name() (must match it exactly)."""
     a = args
     return ("margin=%s_well=%s_Z=%s_onvessel=%s_distance=%s_configID=%s_vesselID=%s_mono=%s"
-            "_null=%s_num_aux=%s_AR=%s_attempt=%s_force=%s_monothr=%s"
+            "_null=%s_num_aux=%s_AR=%s_attempt=%s_force=%s_monothr=%s_elong=%s"
             % (("%.2f" % float(a[0])).replace(".", "p"), well_str(a[1]), a[2], a[4], a[3], a[5],
-               a[6], a[7], a[8], num_aux, a[10], a[11], a[12], a[13]))
+               a[6], a[7], a[8], num_aux, a[10], a[11], a[12], a[13], a[ELONG]))
 
 
 def shard(name):
@@ -138,8 +156,8 @@ def initial_tasks(devices, num_aux_list, steps, resume):
             tasks.append(("boozer", head, args, 0))
         elif accepted_on_ceph(args):
             todo = [t for t in post_tasks(head, args, num_aux_list, steps)
-                    if not ran_to_end(log_path(task_name(args, t[3]) + POST_STEPS[t[0]][0]),
-                                      POST_STEPS[t[0]][1])]
+                    if not ran_to_end(log_path(task_name(args, t[3]) + step_suffix(t[0])),
+                                      POST_STEPS[step_base(t[0])][1])]
             tasks += todo
             skipped += not todo
         elif ran_to_end(log_path(task_name(args, 0)), BOOZER_END):
@@ -160,6 +178,11 @@ def main():
                     help="steps run for each accepted device and each num_aux: polish "
                          "(boozer_singular_opt.py) and/or double (boozer_double_opt.py), as "
                          "separate tasks side by side (default: polish double)")
+    ap.add_argument("--trace-min", nargs="+", default=[], metavar="BOUND",
+                    help="lower bounds on tr M of the config 1 X-point for the double step: one "
+                         "double task per bound (boozer_double_opt.py --trace-min), named "
+                         "..._trmin=<bound>_double (default: one double with the script's own "
+                         "bound, named ..._double)")
     ap.add_argument("--resume", action="store_true",
                     help="skip the work whose logs/outputs show it is done (see the module doc)")
     ap.add_argument("--dry-run", action="store_true",
@@ -180,6 +203,12 @@ def main():
             devices.append((head, args))
 
     steps = list(dict.fromkeys(opts.steps))   # distinct, in the order given
+    # with --trace-min, the double step becomes one "double@<bound>" step per bound
+    for b in opts.trace_min:
+        float(b)   # a number, kept as typed: it goes into the task name
+    if opts.trace_min and "double" in steps:
+        k = steps.index("double")
+        steps[k:k + 1] = ["double@" + b for b in dict.fromkeys(opts.trace_min)]
     start, skipped = initial_tasks(devices, num_aux_list, steps, opts.resume)
     n_boozer = sum(1 for t in start if t[0] == "boozer")
     log("%d devices in %s: %d boozer tasks and %d %s tasks to submit now, %d devices "

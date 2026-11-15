@@ -11,7 +11,12 @@ set -uo pipefail
 # for a failed / out-of-spec device except the run log.
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt] [force] [mono_thr] [step]
+#                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt] [force] [mono_thr] [step] \
+#                    [elongation] [trace_min]
+#
+# elongation (16th): upper bound on the near-axis elongation, or OFF (default); a field of the
+# device name. trace_min (17th, step=double only): lower bound on tr M of the config 1 X-point;
+# when given, the double is named <num_aux=N name>_trmin=<bound>_double.
 #
 # Flow: boozer_all -> gate. If it passes, render the num_aux=0 device and copy it to
 # ceph BEFORE polishing. Then (mono 1/2) polish at num_aux=NUM_AUX_POLISH; if the
@@ -76,6 +81,19 @@ case "$STEP" in
   all|boozer|polish|double) ;;
   *) echo "ERROR: step must be all, boozer, polish or double (got '$STEP')"; exit 1 ;;
 esac
+# Upper bound on the near-axis elongation forwarded to boozer_all.py (--elongation), or OFF
+# for none. It is the last field of the folder name (task_name) but not part of the
+# perturbation seed: an attempt starts from the same coils for every bound.
+elong="${16:-OFF}"
+
+# step=double only: lower bound on tr M of the config 1 X-point (boozer_double_opt.py
+# --trace-min). Empty (default): the script's own 2 + mono_thr, and the task keeps the plain
+# <num_aux=N name>_double name. Otherwise the task is named <num_aux=N name>_trmin=<bound>_double,
+# so that the doubles of one device at several bounds run side by side.
+trace_min="${17:-}"
+DOUBLE_SUFFIX="_double"
+[ -n "$trace_min" ] && DOUBLE_SUFFIX="_trmin=${trace_min}_double"
+
 # polish and double start from a device already on ceph instead of running boozer_all
 FROM_CEPH=0
 case "$STEP" in polish|double) FROM_CEPH=1 ;; esac
@@ -98,7 +116,7 @@ HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 # Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the device
 # IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}_force=${force}_monothr=${mono_thr}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}_force=${force}_monothr=${mono_thr}_elong=${elong}"
 }
 
 # Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
@@ -116,7 +134,7 @@ if [ "$STEP" = "polish" ]; then
   TASK_LOG_NAME="$(task_name "$NUM_AUX_POLISH")"
 elif [ "$STEP" = "double" ]; then
   # the two-configuration optimization at num_aux=N: its own name, next to the polish's
-  TASK_LOG_NAME="$(task_name "$NUM_AUX_POLISH")_double"
+  TASK_LOG_NAME="$(task_name "$NUM_AUX_POLISH")${DOUBLE_SUFFIX}"
 else
   TASK_LOG_NAME="$INIT_NAME"
 fi
@@ -275,7 +293,7 @@ if [ "$FROM_CEPH" -eq 0 ]; then
 # ───────────────────── (1) initial optimization -> num_aux=0 ──────────────────
 bash run_boozer_all.sh \
   "$margin" "$well" "$Z" "$distance" "$on_vessel" \
-  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR" "$force" "$mono_thr"
+  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR" "$force" "$mono_thr" "$elong"
 
 # boozer_all.py writes design_opt_final_<DEVICE_ID>.json (the device ID is in the
 # name); locate it by glob (one per device dir).
@@ -393,7 +411,7 @@ fi
 # ──────────── (4) two-configuration optimization (step=double, mono 1/2) ───────
 if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
   num_aux="$NUM_AUX_POLISH"
-  DOUBLE_NAME="$(task_name "$num_aux")_double"
+  DOUBLE_NAME="$(task_name "$num_aux")${DOUBLE_SUFFIX}"
   DOUBLE_DIR="./output/$DOUBLE_NAME"
   mkdir -p "$DOUBLE_DIR"
 
@@ -407,7 +425,10 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
   cp "$INIT_YAML" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
 
   DISC=0; [ "$MONO_CONSTRAINT" = "identity" ] && DISC=1
-  bash run_double.sh "$DOUBLE_DIR/$INIT_JSON_BASE" "$num_aux" "$DISC" || true
+  # trace_min (17th argument), when given, becomes boozer_double_opt.py's --trace-min, added
+  # to whatever DOUBLE_OPT_ARGS the environment already carries.
+  DOUBLE_OPT_ARGS="${DOUBLE_OPT_ARGS:-}${trace_min:+ --trace-min $trace_min}" \
+    bash run_double.sh "$DOUBLE_DIR/$INIT_JSON_BASE" "$num_aux" "$DISC" || true
   rm -f "$DOUBLE_DIR/$INIT_JSON_BASE" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
 
   DOUBLE_JSON="$(ls "$DOUBLE_DIR"/design_double_final_*.json 2>/dev/null | head -1)"

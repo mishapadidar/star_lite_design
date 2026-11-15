@@ -11,5 +11,8 @@ module load disBatch/beta
 # 30 icelake nodes x 64 cores = 1920 cores. More cores join the same run by submitting the
 # designB_driver_disBatch_<job>_dbUtil.sh that disBatch writes at start, e.g. 15 genoa nodes
 # x 96 cores: 45 nodes and 3360 cores, under the per-user cap of the ccm QOS (45 nodes, 3840 cpus).
+# After the boozer step: only doubles, for num_aux 3, 4, 5 and the trace bounds 2.05 and 2.2
+# (6 double tasks per accepted device); options given on the command line come after and win.
 sbatch -p ccm -N 30 -C icelake --ntasks-per-node=64 -c 1 -t 7-00:00:00 -J designB \
-       -o logs/designB_driver_%j.out --wrap "python3 designB_driver.py tasks.jobs $*"
+       -o logs/designB_driver_%j.out \
+       --wrap "python3 designB_driver.py tasks.jobs --steps double --num-aux 3 4 5 --trace-min 2.05 2.2 $*"

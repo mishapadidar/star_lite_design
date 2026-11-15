@@ -32,7 +32,7 @@ from simsopt.geo import (
 )
 from simsopt.objectives import QuadraticPenalty, Weight
 
-from star_lite_design.utils.tangent_map import TangentMap, Monodromy, AxisIota
+from star_lite_design.utils.tangent_map import TangentMap, Monodromy, AxisIota, AxisElongation
 from star_lite_design.utils.lcfs import grow_to_lcfs, continue_to_flux, toroidal_flux
 from star_lite_design.utils.boozer_surface_utils import BoozerResidual
 from star_lite_design.utils.current_bound import CurrentBound
@@ -94,6 +94,11 @@ parser.add_argument("--force", type=str, default="OFF")
 # max|M - I| <= thr; mono 2: |tr M - 2| <= thr). Part of the device identity, so it is the
 # last field of the folder name (TASK_NAME).
 parser.add_argument("--mono-thr", type=str, default="0.1")
+# --elongation: upper bound on the near-axis elongation (aspect ratio of the flux-surface
+# cross-section in the plane normal to the magnetic axis), enforced at N_ELONGATION toroidal
+# angles, or OFF for no bound. It is the last field of the folder name (TASK_NAME) but NOT part
+# of the perturbation seed, so a given attempt starts from the same coils for every bound.
+parser.add_argument("--elongation", type=str, default="OFF")
 
 args = parser.parse_args()
 
@@ -132,11 +137,15 @@ else:
 # attempt index. DEVICE_ID is a deterministic hash of that name so the random
 # coil perturbation below is reproducible and device_browser can recompute the
 # same ID from the folder name (it uses the identical zlib.crc32 convention).
-TASK_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_vessel}"
+# The elongation bound is the last field of the folder name, but DEVICE_ID (hence the
+# perturbation seed) is the hash of the name WITHOUT it (SEED_NAME): attempt k starts from
+# the same perturbed coils for every bound, and its devices share one DEVICE_ID.
+SEED_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_vessel}"
              f"_distance={distance_weight}_configID={config_id}_vesselID={vessel_id}"
              f"_mono={mono}_null={null_type}_num_aux={num_aux}_AR={args.AR}"
              f"_attempt={attempt}_force={args.force}_monothr={args.mono_thr}")
-DEVICE_ID = zlib.crc32(TASK_NAME.encode())
+TASK_NAME = SEED_NAME + f"_elong={args.elongation}"
+DEVICE_ID = zlib.crc32(SEED_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
 print(f"Task: {TASK_NAME}")
 print(f"Device ID: {DEVICE_ID}")
@@ -362,6 +371,29 @@ if axis_iota_enabled:
                        for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)])
 else:
     AXIS_IOTA_TARGET, J_axis_iota = [], None
+
+# Near-axis elongation bound (--elongation): the elongation of the flux-surface cross-section
+# in the plane normal to the magnetic axis (TangentMap frame 'NB', AxisElongation.J()/dJ()) is
+# kept <= ELONGATION_MAX at N_ELONGATION toroidal angles, equally spaced over a full field
+# period, or over half of one for a stellarator-symmetric axis (the other half is its mirror
+# image). --elongation OFF: no tangent map is built and nothing is added to JF.
+N_ELONGATION = 16
+ELONGATION_MAX = None if args.elongation == "OFF" else float(args.elongation)
+config['ELONGATION_MAX'] = ELONGATION_MAX   # read by the stages that follow (yaml)
+elongation_enabled = ELONGATION_MAX is not None
+if elongation_enabled:
+    ELONGATION_WEIGHT = Weight(config.setdefault('ELONGATION_WEIGHT', 1.0))
+    elong_tmos = []
+    for axis, boozer_surface in zip(axes, boozer_surfaces):
+        _nfp_e, _stellsym_e = axis.curve.nfp, axis.curve.stellsym
+        _phis_e = (np.linspace(0., 0.5/_nfp_e, N_ELONGATION) if _stellsym_e
+                   else np.linspace(0., 1./_nfp_e, N_ELONGATION, endpoint=False))
+        elong_tmos += [TangentMap(axis, BiotSavart(boozer_surface.biotsavart.coils), 0.0,
+                                  mtype='identity', phi=float(phi)) for phi in _phis_e]
+    ELONGATION_LIST = [AxisElongation(tmo) for tmo in elong_tmos]
+    J_elongation = sum([QuadraticPenalty(e, ELONGATION_MAX, 'max') for e in ELONGATION_LIST])
+else:
+    ELONGATION_WEIGHT, ELONGATION_LIST, J_elongation = Weight(0.0), [], None
 nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, BiotSavart(boozer_surface.biotsavart.coils)) for boozer_surface in boozer_surfaces]
 print([J.J()**0.5 for J in nonQS_list])
 J_nonQSRatio = (1./len(boozer_surfaces)) * sum(nonQS_list)
@@ -546,6 +578,9 @@ JF = (J_nonQSRatio
 # both the base and the SN bottom-X-point-tracking objective.
 if axis_iota_enabled:
     JF = JF + AXIS_IOTA_WEIGHT * J_axis_iota
+# Near-axis elongation bound (only with --elongation <bound>), likewise in both objectives.
+if elongation_enabled:
+    JF = JF + ELONGATION_WEIGHT * J_elongation
 
 # JF_base excludes the SN bottom-X-point penalties. For SN the ACTIVE objective
 # JF adds the bottom X-point-to-surface and X-point-to-coil penalties, and BFGS
@@ -626,6 +661,11 @@ if axis_iota_enabled:
     penalties['on-axis iota'] = AXIS_IOTA_WEIGHT * J_axis_iota
     penalty_weights['on-axis iota'] = AXIS_IOTA_WEIGHT
     states['on-axis iota'] = AXIS_IOTA_LIST
+# Likewise the near-axis elongation bound, only when --elongation sets one (its maximum over
+# the N_ELONGATION angles is printed in the callback table, see below).
+if elongation_enabled:
+    penalties['elongation'] = ELONGATION_WEIGHT * J_elongation
+    penalty_weights['elongation'] = ELONGATION_WEIGHT
 
 # fix some currents
 for bbsurf in boozer_surfaces:
@@ -880,6 +920,9 @@ def callback(dofs):
         table2.add_row(k, ' '.join([f'{J.J():.4e}' for J in states[k]]))
     table2.add_row('aspect ratio', ' '.join([f'{bsurf.surface.aspect_ratio():.4e}' for bsurf in boozer_surfaces]))
     table2.add_row('modB axis deviation', ' '.join([f'{r.max_deviation():.4e}' for r in modB_ripples]))
+    if elongation_enabled:
+        _el = [e.J() for e in ELONGATION_LIST]
+        table2.add_row('axis elongation', f'max {max(_el):.4f}  min {min(_el):.4f}  (bound: <= {ELONGATION_MAX})')
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
     if bottom_xpoints is not None:
         table2.add_row('xpoint_bottom(0)', ' '.join([f'{np.array2string(bx.curve.gamma()[0])}' for bx in bottom_xpoints]))
@@ -1291,6 +1334,9 @@ for j in range(15):
     curr_err = max([max([c-CURRENT_THRESHOLD, 0.])/CURRENT_THRESHOLD for c in currents_list])
     iota_err = max([np.abs(IOTAS.J() - IOT_TARGET)/np.abs(IOT_TARGET) for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
     axis_iota_err = max([np.abs(aio.J() - tgt)/np.abs(tgt) for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)]) if axis_iota_enabled else 0.0
+    # near-axis elongation bound: relative excess of the largest of the N_ELONGATION elongations
+    elongation_max = max(e.J() for e in ELONGATION_LIST) if elongation_enabled else None
+    elongation_err = max(elongation_max - ELONGATION_MAX, 0.)/ELONGATION_MAX if elongation_enabled else 0.0
     mr_err = np.abs(mr.J()-MR_TARGET)/MR_TARGET
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
@@ -1400,6 +1446,9 @@ for j in range(15):
     if axis_iota_err > 0.001 and AXIS_IOTA_WEIGHT.value != 0.:
         AXIS_IOTA_WEIGHT*=10
         print("ON-AXIS IOTA ERROR", axis_iota_err)
+    if elongation_err > 0.001 and ELONGATION_WEIGHT.value != 0.:
+        ELONGATION_WEIGHT*=10
+        print("ELONGATION ERROR", elongation_err)
     if mr_err > 0.001 and MAJOR_RADIUS_WEIGHT.value !=0.:
         MAJOR_RADIUS_WEIGHT*=10
         print("MR ERROR", mr_err)
@@ -1490,6 +1539,10 @@ for j in range(15):
     if axis_iota_enabled:
         config['AXIS_IOTA_WEIGHT'] = AXIS_IOTA_WEIGHT.value
         config['AXIS_IOTA_TARGET'] = list(AXIS_IOTA_TARGET)
+    # Elongation bound (None: no bound) and, when there is one, its escalated weight.
+    config['ELONGATION_MAX'] = ELONGATION_MAX
+    if elongation_enabled:
+        config['ELONGATION_WEIGHT'] = ELONGATION_WEIGHT.value
     # IOTAS_TARGET is a slice copy of config['IOTAS_TARGET']; the AR step may have retargeted
     # it to the lowered-AR surface's iota, so write it back so the polish/restart sees it.
     config['IOTAS_TARGET'][config_id] = float(IOTAS_TARGET[0])
@@ -1567,6 +1620,11 @@ final_metrics = {
                                    else np.max([np.abs(np.trace(d.matrix) - 2) for d in tmos]),
                                                                                    MONODROMY_THRESHOLD,           monodromy_err if MONODROMY_WEIGHT.value != 0. else 0.0),
 }
+
+# Near-axis elongation bound (only with --elongation <bound>): the largest of the
+# N_ELONGATION elongations against the bound; its relative excess feeds the 0.1% gate.
+if elongation_enabled:
+    final_metrics['elongation_bound'] = (elongation_max, ELONGATION_MAX, elongation_err if ELONGATION_WEIGHT.value != 0. else 0.0)
 
 # Helical vessel geometry: report the regime metrics (both must stay < 1) and the
 # centerline arclength variation in summary.txt. The two regime constraints carry a
