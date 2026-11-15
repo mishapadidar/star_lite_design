@@ -434,6 +434,8 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
         if [ -z "$CFG_JSON" ] || ! bash run_render.sh "$CFG_JSON" "$DOUBLE_DIR/$cfg"; then
           echo "WARNING: render of $cfg failed"
         fi
+        # Append min/max/mean axis elongation to this configuration's summary.txt (best-effort, non-fatal).
+        [ -z "$CFG_JSON" ] || bash run_elongation.sh "$CFG_JSON" || echo "WARNING: elongation computation failed for $cfg"
       done
       sync_dir "$DOUBLE_DIR"
     fi
