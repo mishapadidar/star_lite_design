@@ -168,6 +168,10 @@ SYNC_INCLUDES=(
   --include='summary.txt'
   --include='max_rel_error.txt'
   --include='scene_*.png'
+  --include='elongation_profile.txt'
+  --include='elongation_profile.png'
+  --include='unfolding_C*.txt'
+  --include='unfolding_C_*.png'
   --include='xs_*.png'
   --include='poincare*.txt'
   --include='xpoint.txt'
@@ -256,6 +260,15 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+# Thinning a campaign while it runs: $HOME_DIR/skip_tasks.txt, when present, holds one
+# extended regular expression per line; a task whose name matches one of them stops here
+# with status 1 (not accepted, so the driver submits no later step for it).
+if [ -s "$HOME_DIR/skip_tasks.txt" ] && printf '%s\n' "$TASK_LOG_NAME" | grep -q -E -f "$HOME_DIR/skip_tasks.txt"; then
+  echo "SKIPPED: the task name matches a pattern of skip_tasks.txt"
+  echo "Finished: $(date)"
+  exit 1
+fi
 
 # archive*: past campaigns (outputs, logs) kept in array_designB/archive/, never staged
 rsync -a --exclude 'output*' --exclude 'logs*' --exclude '*_disBatch_*' --exclude 'archive*' "$HOME_DIR/" "$RUN/"
@@ -452,12 +465,25 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
       for cfg in config1 config2; do
         CFG_JSON="$(ls "$DOUBLE_DIR/$cfg"/design_double_final_*.json 2>/dev/null | head -1)"
         echo "=== rendering double device, $cfg: $DOUBLE_DIR/$cfg ==="
-        if [ -z "$CFG_JSON" ] || ! bash run_render.sh "$CFG_JSON" "$DOUBLE_DIR/$cfg"; then
+        if [ -z "$CFG_JSON" ] || ! bash run_render.sh "$CFG_JSON" "$DOUBLE_DIR/$cfg" noviews; then
           echo "WARNING: render of $cfg failed"
         fi
         # Append min/max/mean axis elongation to this configuration's summary.txt (best-effort, non-fatal).
         [ -z "$CFG_JSON" ] || bash run_elongation.sh "$CFG_JSON" || echo "WARNING: elongation computation failed for $cfg"
       done
+      # Views of the whole double (scene_top.png, scene_left.png): mk_paraview.py on the double
+      # dir itself, with the VTK of the matplotlib venv. Best-effort, non-fatal.
+      echo "=== device views of the double: $DOUBLE_DIR ==="
+      ( source /mnt/home/agiuliani/ceph/STAR_LITE/venv_matplotlib/bin/activate \
+        && env -u DISPLAY python mk_paraview.py "$DOUBLE_DIR" ) \
+        || echo "WARNING: device views (scene_*.png) of the double failed"
+      # Post-processing of the in-spec double (run_double_analysis.sh): (1) toroidal profile of
+      # the near-axis elongation, (3) unfolding constant C over 128 GP coil perturbations, with
+      # their figures. Best-effort, non-fatal (about 30 minutes). Step (2), the repair with the
+      # aux currents, is not run here.
+      echo "=== analysis of the double (elongation profile, unfolding constant C): $DOUBLE_DIR ==="
+      bash run_double_analysis.sh "$DOUBLE_DIR" \
+        || echo "WARNING: $? analysis step(s) of the double failed"
       sync_dir "$DOUBLE_DIR"
     fi
   fi

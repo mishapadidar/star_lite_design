@@ -4,7 +4,7 @@
 # by mk_paraview.py). Operates in the current (scratch) dir and
 # writes its plots/renders into the device's output dir. Does NOT touch ceph.
 #
-#   run_render.sh <design_json> <output_dir>
+#   run_render.sh <design_json> <output_dir> [noviews]
 #
 # <design_json> is design_opt_final.json for the init device or
 # design_polished_final.json for a polished device; <output_dir> is the device
@@ -13,6 +13,10 @@ set -uo pipefail
 
 design_json="$1"
 out_dir="$2"
+# Optional third argument "noviews": skip the device views. Used for the two configurations of
+# a double: the geometry files that mk_paraview.py reads are in the double's own directory,
+# where prefix.sh makes the views itself.
+views="${3:-views}"
 
 # No module load: the module set this used (modules/2.3-20240529, with paraview/5.10.1)
 # was retired and no ParaView module is left on the cluster; the venv's python does not
@@ -37,7 +41,9 @@ env -u DISPLAY ./plot_manifolds.py "$design_json"
 # in the matplotlib venv (no ParaView on the cluster any more). A failure is reported with
 # a warning instead of failing the render, which would make prefix.sh exit before copying
 # the device to ceph.
-if python -c "import vtk" 2> /dev/null; then
+if [ "$views" = "noviews" ]; then
+  echo "device views (scene_*.png) not made here (noviews)"
+elif python -c "import vtk" 2> /dev/null; then
   xvfb-run -a python mk_paraview.py "$out_dir" \
     || echo "WARNING: mk_paraview.py failed on $(hostname): device views (scene_*.png) skipped"
 else
