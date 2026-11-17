@@ -1291,9 +1291,9 @@ def callback(dofs):
                        + f'  (bound: <= {ELONGATION_MAX})')
     _Cs = EC.values()
     _bnd = f'bound: <= {EC_MAX}'
-    table2.add_row(f'E[C] unfolding (t={EC_T:g})', f'{np.nanmean(_Cs):.5f}  min {np.nanmin(_Cs):.4f}  max {np.nanmax(_Cs):.4f}  '
-                   f'({int(np.isfinite(_Cs).sum())} of {len(_Cs)} directions with a real split; '
-                   f'{"not bounded" if EC_USE_MEAN else _bnd})')
+    if not EC_USE_MEAN:      # with the bound on the mean, only the row of the sections is shown
+        table2.add_row(f'E[C] unfolding (t={EC_T:g})', f'{np.nanmean(_Cs):.5f}  min {np.nanmin(_Cs):.4f}  max {np.nanmax(_Cs):.4f}  '
+                       f'({int(np.isfinite(_Cs).sum())} of {len(_Cs)} directions with a real split; {_bnd})')
     table2.add_row('E[C] over the sections', 'mean %.5f  min %.4f  max %.4f' % ec_phi_stats()
                    + f'  ({"mean " + _bnd if EC_USE_MEAN else "not bounded"})')
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
