@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """boozer_risk_opt.py
 
+The E[C] that the bound --ec-max applies to is chosen with --ec-section: E[C] in ONE toroidal
+section, given by the fraction T in [0, 1) of the full turn of the snowflake field line
+(default 0, the section at phi = 0), or the MEAN of E[C] over the sections ('mean'). E[C] in a
+section is ExactMeanUnfoldingC with its phi0; the profile over the sections and their mean are
+PhiMeanUnfoldingC, transported from that section. Both are always reported (start lines, table,
+summary.txt: unfolding_EC = the bounded one, unfolding_EC_section, unfolding_EC_phi_mean / _min /
+_max) and checked by --check-gradient.
+
 Risk-neutral continuation of a FINISHED double device (boozer_double_opt.py): the same
 two-configuration optimization, started from the double's final design
 (design_double_final_<TAG>.json: config 1 X-point with the aux coils off, config 2 snowflake),
@@ -11,12 +19,12 @@ with one more inequality constraint,
 where C is the unfolding constant of the snowflake under a Gaussian-process perturbation of
 the modular coils (utils/discriminant.py: the two X-points born from the snowflake separate by
 C * sqrt(sigma) for a perturbation of amplitude sigma; the aux coils are not perturbed),
-measured in the (R, Z) section at phi = 0, and E[.] is the mean over --risk-samples FIXED
-realizations (seeds 0, 1, ...; sample-average approximation of the expectation). The
+measured in the (R, Z) section at phi = 0, and E[.] is the expectation over the Gaussian
+process, computed exactly (ExactMeanUnfoldingC: the response of the return map is a Gaussian
+2-vector, so the expectation is a one-dimensional integral; no realizations are drawn). The
 constraint is a one-sided quadratic penalty with its own escalating weight, and its relative
-excess enters the 0.1% gate (summary.txt: unfolding_EC). The realizations are those of
-mk_unfolding.py, which then measures E[C] on 128 of them (the first ones in sample, the
-others out of sample).
+excess enters the 0.1% gate (summary.txt: unfolding_EC). mk_unfolding.py measures the mean of
+C over 128 realizations of the same process, as an independent check.
 
 Everything after the start-up is boozer_double_opt.py, of which this file is a copy; its
 docstring follows. Here the snowflake is NOT generated from a boozer_all device: both
@@ -126,15 +134,17 @@ from simsopt._core.derivative import derivative_dec
 
 
 class _WeightedPerturbation:
-    r"""sum_k c_k * (unit GP realization k), as ONE perturbation of the modular coils, with the
-    part of the interface of a CoilPerturbationField that DSigma uses (dB_by_dsigma,
-    dgradB_by_dsigma, dB_by_dsigma_vjp).
+    r"""A perturbation of the modular coils with an ARBITRARY displacement (_d, _dp: the
+    displacement of each coil and its theta-derivative), with the part of the interface of a
+    CoilPerturbationField that DSigma uses (dB_by_dsigma, dgradB_by_dsigma, dB_by_dsigma_vjp).
 
-    delta_B = dB/dsigma at sigma = 0 is LINEAR in the displacement of the coils, so the
-    response of the return map to this perturbation is sum_k c_k D_sigma_k: the adjoints of all
-    the realizations can be run at once (MeanUnfoldingC.dJ, adjoint='grouped'). The field is
-    the formula of CoilPerturbationField._Bfield with the displacement as an ARGUMENT of the
-    compiled functions, so that set_weights() does not recompile anything."""
+    delta_B = dB/dsigma at sigma = 0 is LINEAR in the displacement of the coils, hence so is
+    D_sigma: ExactMeanUnfoldingC takes its Jacobian w.r.t. the displacement, and runs its
+    adjoint for the displacements it sets here. The field is the formula of
+    CoilPerturbationField._Bfield with the displacement as an ARGUMENT of the compiled
+    functions, so that changing it does not recompile anything. Built from a list of
+    CoilPerturbationField (their unit samples are kept in _d_all, _dp_all; set_weights(c)
+    sets the displacement to their combination)."""
 
     def __init__(self, perturbations):
         import jax
@@ -198,97 +208,252 @@ class _WeightedPerturbation:
         return deriv
 
 
-class MeanUnfoldingC(Optimizable):
-    r"""E[C]: the mean, over FIXED Gaussian-process realizations of the perturbation of the
-    modular coils, of the unfolding constant C of a snowflake (the two X-points born from it
-    separate by C * sqrt(sigma)); see utils/discriminant.py, SnowflakeUnfolding, whose C and
-    dC this reproduces realization by realization.
+class _GroupedDSigma:
+    """Holder of the compiled evaluation of D_sigma for a batch of perturbations (used by
+    ExactMeanUnfoldingC, on an object with _weighted and _dsigma_weighted)."""
 
-    All the realizations share the return-map quadratic jet K of the snowflake (the expensive
-    part, with the third derivatives of the field): it is evaluated once, and its adjoint is
-    run once on the summed cotangent, instead of once per realization as a list of
-    SnowflakeUnfolding objects would. Per realization k only the response D_sigma_k of the
-    return map to that perturbation (DSigma) and its adjoint are computed.
+    def _build_grouped_forward(self, frame):
+        """Compiled function of D_sigma for a batch of field perturbations delta_B.
 
-    J() = mean_k C_k, dJ() its gradient w.r.t. the modular-coil dofs and the free aux (mu)
-    dofs. J() raises when a realization has no real split (C undefined): the optimizer treats
-    it as a failed evaluation.
-    """
+        D_sigma solves the collocation system of dsigma_pure (utils/discriminant.py), whose
+        operator only depends on the unperturbed field, the length and the grid, with a
+        right-hand side that is linear in delta_B. The operator is built and factorized once
+        and solved with one right-hand side per delta_B of the batch (first axis of dB_all)."""
+        import jax
+        import jax.numpy as jnp
+        from star_lite_design.utils.tangent_map import A_pure, reduced_frame_pure
+        D = jnp.asarray(self._dsigma_weighted.D_full)
 
-    def __init__(self, fieldline, biotsavart, seeds, length_scale=0.5, frame='RZ', phi0=0.0,
-                 adjoint='grouped'):
+        def dsigma_all(B, gradB_ss, dB_all, L, gamma):
+            # dsigma_pure for dB_all of shape (realization, N, 3) -> D_sigma's (realization, 2)
+            gradB = jnp.transpose(gradB_ss, (0, 2, 1))
+            N = B.shape[0]
+            A = A_pure(B, gradB)
+            modB = jnp.linalg.norm(B, axis=-1)
+            bhat = B / modB[:, None]
+
+            def resid0(eta):                      # the operator of dsigma_pure, without source
+                r = jnp.matmul(D, eta) / L - jnp.einsum('nij,nj->ni', A, eta)
+                return jnp.concatenate([eta[0][None, :], r[1:]], axis=0)   # first row: eta(0) = 0
+
+            Lop = jax.jacfwd(resid0)(jnp.zeros_like(B)).reshape((3 * N, 3 * N))
+            source = (dB_all - bhat[None] * jnp.sum(bhat[None] * dB_all, axis=-1)[..., None]) / modB[None, :, None]
+            rhs = source.at[:, 0, :].set(0.0).reshape((source.shape[0], 3 * N)).T    # (3N, realization)
+            eta_end = jnp.linalg.solve(Lop, rhs)[-3:, :]                             # eta at the last node
+            _, Pt, _ = reduced_frame_pure(B, gamma, D, frame)
+            return (Pt[-1] @ eta_end).T
+
+        dBdsigma = self._weighted._dBdsigma
+        self._dB_chunk = jax.jit(lambda p, g, gd, I, dc, dpc: jax.vmap(
+            lambda d, dp: dBdsigma(p, g, gd, I, d, dp))(dc, dpc))
+        self._dsigma_all = jax.jit(dsigma_all)
+
+
+class ExactMeanUnfoldingC(Optimizable):
+    r"""E[C], the mean unfolding constant of a snowflake under Gaussian-process perturbations
+    of the modular coils, computed EXACTLY (no realizations).
+
+    D_sigma (2-vector) is linear in the displacement of the coils, which is Gaussian (per coil
+    and per component, sample = L_s z with z standard normal and L_s the factor of the
+    covariance of simsopt's GaussianSampler). So D_sigma ~ N(0, Sigma), Sigma = M M^T with
+    M = G L_s and G the Jacobian of D_sigma w.r.t. the displacement and its derivative. And
+    C(K, D) is homogeneous of degree 1/2 in D. With Sigma = S S^T (Cholesky) and
+    D = r S u(theta), r Rayleigh and theta uniform:
+
+        E[C] = E[sqrt(r)] * mean over theta of C(K, S u(theta)),  E[sqrt(r)] = 2^(1/4) Gamma(5/4).
+
+    The mean over theta is a midpoint rule with n_theta angles (converged to 6 digits with 256).
+    J() raises when a direction has no real split. dJ(): C depends on K (adjoint of the jet,
+    disc.jet_cotangent_vjp) and on Sigma; d(Sigma) only involves dG contracted with two FIXED
+    displacements, i.e. two adjoints of D_sigma for those displacements (_WeightedPerturbation).
+    values() returns E[sqrt(r)] * C(theta): its mean is E[C]."""
+
+    def __init__(self, fieldline, biotsavart, length_scale=0.5, frame='RZ', phi0=0.0, n_theta=1024):
+        import jax
+        import jax.numpy as jnp
+        from math import gamma
         self.fieldline = fieldline
         self.nfp = int(fieldline.curve.nfp)
-        self.seeds = [int(s) for s in seeds]
         self.disc = SnowflakeDiscriminant(fieldline, biotsavart, frame=frame, phi0=phi0)
-        self.perturbations = [CoilPerturbationField(biotsavart, length_scale=length_scale, seed=s)
-                              for s in self.seeds]
-        self.dsigmas = [DSigma(fieldline, pert, frame=frame, biotsavart=biotsavart, phi0=phi0)
-                        for pert in self.perturbations]
-        # adjoint of the D_sigma's in dJ: 'persample' = one adjoint per realization; 'grouped' =
-        # two adjoints in all, whatever the number of realizations: D_sigma is linear in the
-        # perturbation, so sum_k w_k . D_sigma_k = sum_i e_i . D_sigma[sum_k w_k,i * realization k]
-        # (i = 1, 2 the components of the cotangents w_k), see _WeightedPerturbation.
-        if adjoint not in ('grouped', 'persample'):
-            raise ValueError(f"adjoint must be 'grouped' or 'persample', got {adjoint!r}")
-        self.adjoint = adjoint
-        self._weighted = _WeightedPerturbation(self.perturbations)
+        # one perturbation object: it supplies the sampler (the covariance) and the coil data
+        pert = CoilPerturbationField(biotsavart, length_scale=length_scale, seed=0)
+        self._Ls = np.asarray(pert._unit_samples[0].sampler.L)
+        self._weighted = _WeightedPerturbation([pert])
         self._dsigma_weighted = DSigma(fieldline, self._weighted, frame=frame, biotsavart=biotsavart, phi0=phi0)
+        _GroupedDSigma._build_grouped_forward(self, frame)       # self._dsigma_all
+        dBdsigma, dsigma_all = self._weighted._dBdsigma, self._dsigma_all
+
+        def D_of(d, dp, p, g, gd, I, B, gB, L):
+            return dsigma_all(B, gB, dBdsigma(p, g, gd, I, d, dp)[None], L, p)[0]
+
+        self._jacD = jax.jit(jax.jacrev(D_of, argnums=(0, 1)))
+        self._chol_vjp = lambda Sigma, cot: np.asarray(jax.vjp(jnp.linalg.cholesky, jnp.asarray(Sigma))[1](jnp.asarray(cot))[0])
+        th = (np.arange(int(n_theta)) + 0.5) * 2.0 * np.pi / int(n_theta)
+        self._u = np.stack([np.cos(th), np.sin(th)], axis=1)     # (n_theta, 2)
+        self._c_half = 2.0 ** 0.25 * gamma(1.25)
         self._solution = None
-        super().__init__(depends_on=[self.disc] + self.dsigmas)
+        super().__init__(depends_on=[self.disc, self._dsigma_weighted])
 
     def recompute_bell(self, parent=None):
         self._solution = None
 
     def _solve(self):
-        """(K, [(C_k, xi_k) or (nan, None)]) for the nearest split pair of each realization."""
+        """K, the rows M of Sigma = M M^T, its Cholesky factor S and (C, xi) per angle."""
         if self._solution is None:
-            K = self.nfp * np.asarray(self.disc.jet())      # full-torus jet, as SnowflakeUnfolding
+            import jax.numpy as jnp
+            K = self.nfp * np.asarray(self.disc.jet())
+            pts, B, gradB, _, L = self._dsigma_weighted._field_data()
+            w = self._weighted
+            g, gd, I = w._coil_data()
+            zero = jnp.zeros(w._d_all[0].shape)
+            Gd, Gdp = self._jacD(zero, zero, jnp.asarray(pts), g, gd, I, jnp.asarray(B), jnp.asarray(gradB), L)
+            Gd, Gdp = np.asarray(Gd), np.asarray(Gdp)            # (2, coil, quadrature point, 3)
+            nq, m = Gd.shape[2], self._Ls.shape[0]
+            G = np.zeros((2, Gd.shape[1], m, 3))                 # on (d, d', higher derivatives)
+            G[:, :, :nq], G[:, :, nq:2 * nq] = Gd, Gdp
+            M = np.einsum('icaj,ab->icbj', G, self._Ls)          # D = sum over (c, b, j) of M z
+            Sigma = np.einsum('icbj,kcbj->ik', M, M)
+            S = np.linalg.cholesky(Sigma)
             out = []
-            for ds in self.dsigmas:
-                sols = unfolding_solutions(K, np.asarray(ds.d_sigma()))
+            for u in self._u:
+                sols = unfolding_solutions(K, S @ u)
                 out.append((float(sols[0]['C']), np.asarray(sols[0]['xi'])) if sols else (float('nan'), None))
-            self._solution = (K, out)
+            self._solution = (K, M, Sigma, S, out)
         return self._solution
 
     def values(self):
-        """C of each realization (nan where the snowflake has no real split)."""
-        return np.array([C for C, _ in self._solve()[1]])
+        return self._c_half * np.array([C for C, _ in self._solve()[4]])
+
+    def sigma(self):
+        """Covariance (2x2) of D_sigma."""
+        return self._solve()[2]
+
+    def std(self):
+        """Standard deviation of C: E[C^2] = E[r] * mean over theta of C(theta)^2, E[r] = sqrt(pi/2)."""
+        C = np.array([C for C, _ in self._solve()[4]])
+        return float(np.sqrt(max(np.sqrt(np.pi / 2.0) * np.mean(C ** 2) - (self._c_half * np.mean(C)) ** 2, 0.0)))
 
     def J(self):
-        C = self.values()
-        if not np.all(np.isfinite(C)):
-            raise RuntimeError(f"E[C] undefined: {int(np.sum(~np.isfinite(C)))} of {len(C)} realizations "
+        v = self.values()
+        if not np.all(np.isfinite(v)):
+            raise RuntimeError(f"E[C] undefined: {int(np.sum(~np.isfinite(v)))} of {len(v)} directions "
                                f"have no real split")
-        return float(np.mean(C))
+        return float(np.mean(v))
 
     @derivative_dec
     def dJ(self):
-        K, out = self._solve()
-        n = len(out)
+        out = self._solve()[4]
         if any(xi is None for _, xi in out):
-            raise RuntimeError("E[C] undefined (a realization has no real split); dJ is undefined.")
+            raise RuntimeError("E[C] undefined (a direction has no real split); dJ is undefined.")
+        a = self._c_half / len(out)
+        # E[C] = a * sum over theta of C, C = 2 |xi|: dE/dxi = 2 a xi / |xi|
+        return self._adjoint_xi(np.array([2.0 * a * xi / np.linalg.norm(xi) for _, xi in out]))
+
+    def _adjoint_xi(self, q):
+        """Derivative (simsopt Derivative) of a scalar whose partial derivatives w.r.t. the split
+        directions xi(theta) at phi = 0 are q, of shape (n_theta, 2): through xi(K, D = S u)."""
+        import jax.numpy as jnp
+        K, M, Sigma, S, out = self._solve()
         cK = np.zeros((2, 2, 2))
-        dJ = None
-        W = []
-        for (_, xi), ds in zip(out, self.dsigmas):
-            # IFT on F(xi) = 0.5 K[xi, xi] + D_sigma = 0, as SnowflakeUnfolding.dC
-            xihat = xi / np.linalg.norm(xi)
+        dS = np.zeros((2, 2))
+        for (_, xi), u, qk in zip(out, self._u, q):
+            # IFT on 0.5 K[xi, xi] + D = 0 (as SnowflakeUnfolding.dC): d(q . xi) = lam . dD
+            # + 0.5 lam_i xi_a xi_b dK_iab with lam = -(K[., xi])^-T q; here D = S u
             Jmat = np.einsum('icb,b->ic', K, xi)
-            w = -2.0 * np.linalg.solve(Jmat.T, xihat)
-            cK += self.nfp * 0.5 * np.einsum('i,a,b->iab', w, xi, xi) / n
-            if self.adjoint == 'grouped':
-                W.append(w / n)
-            else:
-                term = ds.d_sigma_vjp(w / n)
-                dJ = term if dJ is None else dJ + term
-        if self.adjoint == 'grouped':
-            W = np.array(W)                       # (realization, 2): the cotangents of the D_sigma's
-            for i in range(2):
-                self._weighted.set_weights(W[:, i])
-                term = self._dsigma_weighted.d_sigma_vjp(np.eye(2)[i])
-                dJ = term if dJ is None else dJ + term
+            lam = -np.linalg.solve(Jmat.T, qk)
+            cK += self.nfp * 0.5 * np.einsum('i,a,b->iab', lam, xi, xi)
+            dS += np.outer(lam, u)
+        Q = self._chol_vjp(Sigma, dS)                            # dE = sum_ik Q_ik dSigma_ik
+        # dSigma_ik = dM_i . M_k + M_i . dM_k and dM = dG L_s: dE = sum_i dG_i . delta_i with the
+        # displacement delta_i = [(Q + Q^T)_ik M_k] L_s^T held fixed, i.e. d(e_i . D_sigma[delta_i])
+        R = np.einsum('ik,kcbj->icbj', Q + Q.T, M)
+        delta = np.einsum('icbj,ab->icaj', R, self._Ls)
+        nq = self._weighted._d_all.shape[2]
+        dJ = None
+        for i in range(2):
+            self._weighted._d = jnp.asarray(delta[i][:, :nq])
+            self._weighted._dp = jnp.asarray(delta[i][:, nq:2 * nq])
+            term = self._dsigma_weighted.d_sigma_vjp(np.eye(2)[i])
+            dJ = term if dJ is None else dJ + term
         return dJ + self.disc.jet_cotangent_vjp(cK)
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class PhiMeanUnfoldingC(Optimizable):
+    r"""Mean over the toroidal sections of E[C], the exact mean unfolding constant of a
+    snowflake (ExactMeanUnfoldingC gives it in the section at phi = 0).
+
+    The two X-points born from the snowflake are field lines, so their half-separation xi in the
+    (R, Z) section through the point t of the snowflake field line is the one at t = 0
+    transported by the flow: xi(t) = T(t) xi(0), with T(t) the 2x2 section-to-section tangent
+    map (utils/tangent_map.py, monodromy_pure, at every node of the full-torus Chebyshev grid of
+    DSigma; T = I after a full turn since the monodromy of a snowflake is the identity). Hence
+
+        E[C](t) = E[sqrt(r)] * mean over theta of 2 |T(t) xi(0; theta)|,
+
+    with xi(0; theta) the split directions of ExactMeanUnfoldingC, and nothing is solved per
+    section. J() is the mean of E[C](t) over the field-line parameter t in [0, 1] (Clenshaw-
+    Curtis weights; t / (2 pi) is close to the toroidal angle), profile() gives (t, E[C](t)).
+    dJ(): through xi(0) (ExactMeanUnfoldingC._adjoint_xi) and through T (the coil-dof adjoint of
+    DSigma, run on the scalar sum over nodes of <G, T> instead of v . D_sigma)."""
+
+    def __init__(self, ec):
+        import jax
+        import jax.numpy as jnp
+        from star_lite_design.utils.tangent_map import cheb, monodromy_pure
+        self.ec = ec
+        ds = ec._dsigma_weighted
+        frame = ds.frame
+        D = jnp.asarray(ds.D_full)
+        _, t, w = cheb(ds.D_full.shape[0], 0.0, 1.0)
+        self._t, self._w = np.asarray(t), np.asarray(w) / np.sum(w)
+
+        def T_all(B, gradB_ss, L, gamma):          # (node, 2, 2), gradB in SIMSOPT convention
+            return monodromy_pure(B, jnp.transpose(gradB_ss, (0, 2, 1)), L, gamma, D, frame)
+
+        self._T_all = jax.jit(T_all)
+        # a DSigma of its own, on the same grid, whose scalar is sum(v * T) (v of shape
+        # (node, 2, 2)) instead of v . D_sigma: its d_sigma_vjp then is the adjoint of T
+        self._ds_T = DSigma(ec.fieldline, ec._weighted, frame=frame, biotsavart=ds.biotsavart, phi0=ds.phi0)
+        self._ds_T._dsig_grad = jax.jit(jax.grad(
+            lambda B, gB, dB, L, g, v: jnp.sum(v * T_all(B, gB, L, g)), argnums=(0, 1, 2, 3, 4)))
+        self._solution = None
+        super().__init__(depends_on=[ec, self._ds_T])
+
+    def recompute_bell(self, parent=None):
+        self._solution = None
+
+    def _solve(self):
+        """T at the nodes, xi(0; theta), xi at every (node, theta) and its norm."""
+        if self._solution is None:
+            import jax.numpy as jnp
+            out = self.ec._solve()[4]
+            if any(xi is None for _, xi in out):
+                raise RuntimeError("E[C] undefined (a direction has no real split)")
+            xi0 = np.array([xi for _, xi in out])                       # (theta, 2)
+            pts, B, gradB, _, L = self._ds_T._field_data()
+            T = np.asarray(self._T_all(jnp.asarray(B), jnp.asarray(gradB), L, jnp.asarray(pts)))
+            xi = np.einsum('sab,tb->sta', T, xi0)                       # (node, theta, 2)
+            self._solution = (T, xi0, xi, np.linalg.norm(xi, axis=-1))
+        return self._solution
+
+    def profile(self):
+        """(t, E[C](t)) at the nodes of the grid."""
+        nrm = self._solve()[3]
+        return self._t, self.ec._c_half * 2.0 * np.mean(nrm, axis=1)
+
+    def J(self):
+        return float(np.sum(self._w * self.profile()[1]))
+
+    @derivative_dec
+    def dJ(self):
+        T, xi0, xi, nrm = self._solve()
+        a = 2.0 * self.ec._c_half / xi0.shape[0]
+        xihat = xi / nrm[:, :, None]
+        G = a * self._w[:, None, None] * np.einsum('sta,tb->sab', xihat, xi0)   # cotangent of T
+        q = a * np.einsum('s,sab,sta->tb', self._w, T, xihat)                   # cotangent of xi(0)
+        return self.ec._adjoint_xi(q) + self._ds_T.d_sigma_vjp(G)
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -318,14 +483,13 @@ parser.add_argument("design_json",
 parser.add_argument("--ec-max", type=float, required=True,
                     help="upper bound on E[C], the mean unfolding constant of the snowflake at phi = 0 "
                          "[m^(1/2)]")
-parser.add_argument("--risk-samples", type=int, default=16,
-                    help="number of GP realizations of the coil perturbation in the mean (seeds 0, 1, ...; "
-                         "default 16)")
 parser.add_argument("--risk-length-scale", type=float, default=0.5,
                     help="GP correlation length of the coil perturbation (default 0.5)")
-parser.add_argument("--ec-adjoint", choices=("grouped", "persample"), default="grouped",
-                    help="adjoint of E[C]: grouped = two adjoints for all the realizations (default), "
-                         "persample = one adjoint per realization (same gradient, slower)")
+parser.add_argument("--ec-section", default=None, metavar="mean|T",
+                    help="which E[C] the bound --ec-max applies to: 'mean' for the mean of E[C] over the "
+                         "toroidal sections, or a number T in [0, 1) for E[C] in the section through the "
+                         "point of the snowflake field line at the fraction T of its full turn (default: the "
+                         "yaml's EC_SECTION if a previous run wrote it, else 0, the section at phi = 0)")
 parser.add_argument("--check-gradient", action="store_true",
                     help="compare the gradient of E[C] with finite differences, then stop")
 parser.add_argument("--out-dir", default=None,
@@ -362,7 +526,6 @@ discriminant = int(args.discriminant if args.discriminant is not None else confi
 config['DISCRIMINANT'] = discriminant  # record it in the (output) yaml
 EC_MAX = float(args.ec_max)
 config['EC_MAX'] = EC_MAX
-config['RISK_SAMPLES'] = int(args.risk_samples)
 config['RISK_LENGTH_SCALE'] = float(args.risk_length_scale)
 # N_DEP_CURRENTS (number of dependent aux currents = number of monodromy constraints
 # solved for) is chosen after the X-point stellsym-defect check below: a stellsym
@@ -598,18 +761,53 @@ else:
     ELONGATION_WEIGHT, ELONGATION_LIST, J_elongation = Weight(0.0), [], None
 
 # Risk-neutral bound on the unfolding of the snowflake: E[C] <= EC_MAX, with E[C] the mean of
-# the unfolding constant C over RISK_SAMPLES fixed GP realizations of the perturbation of the
-# modular coils (seeds 0, 1, ...), in the (R, Z) section at phi = 0. One-sided quadratic
-# penalty with its own escalating weight, like the other inequality constraints.
-RISK_SEEDS = list(range(int(args.risk_samples)))
+# the unfolding constant C over the Gaussian-process perturbations of the modular coils, in the
+# (R, Z) section at phi = 0, computed exactly (ExactMeanUnfoldingC: no realizations). One-sided
+# quadratic penalty with its own escalating weight, like the other inequality constraints.
 EC_WEIGHT = Weight(config.setdefault('EC_WEIGHT', 1.0))
-EC = MeanUnfoldingC(sing_fls[0], sing_fls[0].biotsavart, RISK_SEEDS,
-                    length_scale=float(args.risk_length_scale), frame='RZ', phi0=0.0,
-                    adjoint=args.ec_adjoint)
-J_EC = QuadraticPenalty(EC, EC_MAX, 'max')
+# --ec-section: the bound applies to E[C] in ONE section (the fraction T of the full turn of the
+# snowflake field line, default 0: phi = 0) or to its MEAN over the sections. Recorded in the
+# yaml, so that a restart keeps the choice.
+_sec = args.ec_section if args.ec_section is not None else config.get('EC_SECTION', 0.0)
+EC_USE_MEAN = str(_sec).strip().lower() == 'mean'
+EC_T = 0.0 if EC_USE_MEAN else float(_sec)
+if not 0.0 <= EC_T < 1.0:
+    raise SystemExit(f"ERROR: --ec-section must be 'mean' or a number in [0, 1), got {_sec!r}")
+config['EC_SECTION'] = 'mean' if EC_USE_MEAN else EC_T
+EC_LABEL = 'mean over the sections' if EC_USE_MEAN else f'section t = {EC_T:g}'
+# EC: E[C] in the section at t = EC_T; EC_PHI: its profile over the sections and their mean
+# (transported from that section); EC_OBJ: the one of the two that is bounded.
+EC = ExactMeanUnfoldingC(sing_fls[0], sing_fls[0].biotsavart,
+                         length_scale=float(args.risk_length_scale), frame='RZ', phi0=EC_T)
+EC_PHI = PhiMeanUnfoldingC(EC)
+EC_OBJ = EC_PHI if EC_USE_MEAN else EC
+J_EC = QuadraticPenalty(EC_OBJ, EC_MAX, 'max')
 _C0 = EC.values()
-print(f"E[C] over {len(RISK_SEEDS)} GP realizations (L = {args.risk_length_scale}) at the start: "
-      f"{np.nanmean(_C0):.5f} (bound: <= {EC_MAX}); per realization: " + ' '.join(f'{v:.3f}' for v in _C0))
+print(f"E[C], exact expectation over the GP perturbations (L = {args.risk_length_scale}), in the section "
+      f"t = {EC_T:g} at the start: {np.nanmean(_C0):.6f}; std[C] = {EC.std():.5f}; "
+      f"covariance of D_sigma = {EC.sigma().ravel()}; "
+      f"{int(np.isfinite(_C0).sum())} of {len(_C0)} directions with a real split")
+print(f"bound E[C] <= {EC_MAX} applied to: {EC_LABEL}")
+
+
+def ec_phi_stats():
+    """(mean, min, max) over the sections of E[C], or nans when it is undefined."""
+    try:
+        _p = EC_PHI.profile()[1]
+        return EC_PHI.J(), float(np.min(_p)), float(np.max(_p))
+    except Exception:
+        return float('nan'), float('nan'), float('nan')
+
+
+def ec_bounded_value():
+    """The bounded E[C] (EC_OBJ: one section or the mean), or nan when it is undefined."""
+    try:
+        return float(EC_OBJ.J())
+    except Exception:
+        return float('nan')
+
+
+print("E[C] over the toroidal sections at the start: mean %.6f, min %.6f, max %.6f" % ec_phi_stats())
 if args.check_gradient:
     # --check-gradient: central finite differences of E[C] along a random direction of its
     # dofs (modular-coil dofs and free aux dofs) against dJ, then stop.
@@ -619,18 +817,11 @@ if args.check_gradient:
     _t = _time.time(); _g = EC.dJ(); _tg = _time.time() - _t
     _h = np.random.default_rng(1).standard_normal(_x0.size); _h /= np.linalg.norm(_h)
     print(f"gradient check of E[C]: {_x0.size} dofs, J = {_J0:.8f} ({_tJ:.1f} s), dJ.h = {_g @ _h:.10e} ({_tg:.1f} s)")
-    # the two adjoints of E[C] (grouped / one per realization) must give the same gradient;
-    # each is timed on a second call, once its functions are compiled
-    _adj0, _gs, _ts = EC.adjoint, {}, {}
-    for _a in ('grouped', 'persample'):
-        EC.adjoint = _a
-        EC.dJ()
-        _t = _time.time(); _gs[_a] = EC.dJ(); _ts[_a] = _time.time() - _t
-    EC.adjoint = _adj0
-    _dg = np.abs(_gs['grouped'] - _gs['persample']).max()
-    print(f"   adjoints, {len(RISK_SEEDS)} realizations: max |grouped - persample| = {_dg:.3e} "
-          f"(relative to max |dJ|: {_dg / np.abs(_gs['persample']).max():.3e}); "
-          f"time grouped {_ts['grouped']:.2f} s, persample {_ts['persample']:.2f} s")
+    # timing of a value and of a gradient, once their functions are compiled
+    EC._solution = None
+    _t = _time.time(); EC.J(); _tv = _time.time() - _t
+    _t = _time.time(); EC.dJ(); _tg2 = _time.time() - _t
+    print(f"   exact E[C]: value {_tv:.2f} s, gradient {_tg2:.2f} s (after compilation)")
     # small steps only: the snowflake solution moves by ~4e3 per unit step of the dofs, so
     # larger steps are not in the linear regime (and the Newton solve may fail)
     for _eps in (1e-9, 2e-9, 5e-9, 1e-8, 2e-8):
@@ -647,6 +838,35 @@ if args.check_gradient:
               f"real splits {_vals[0][1]}/{_vals[1][1]} of {len(_Cs)}, snowflake solved {_vals[0][2]}/{_vals[1][2]}, "
               f"|M - I| {_vals[0][3]:.1e}/{_vals[1][3]:.1e}")
     EC.x = _x0
+    # ---- the same for the mean over the toroidal sections (PhiMeanUnfoldingC)
+    _xp = EC_PHI.x.copy()
+    _hp = np.random.default_rng(2).standard_normal(_xp.size); _hp /= np.linalg.norm(_hp)
+    EC_PHI.J(); EC_PHI.dJ()                                   # compilation
+    EC_PHI._solution = None; EC._solution = None
+    _t = _time.time(); _Jp = EC_PHI.J(); _tJp = _time.time() - _t
+    _t = _time.time(); _gp = EC_PHI.dJ(); _tgp = _time.time() - _t
+    _tt, _prof = EC_PHI.profile()
+    print(f"gradient check of the mean over the sections of E[C]: {_xp.size} dofs, J = {_Jp:.8f} ({_tJp:.2f} s), "
+          f"dJ.h = {_gp @ _hp:.10e} ({_tgp:.2f} s); profile: {len(_tt)} nodes, min {_prof.min():.6f}, "
+          f"max {_prof.max():.6f}, at the first node {_prof[0]:.6f} and the last {_prof[-1]:.6f} (E[C] at phi = 0: {_J0:.6f})")
+    for _eps in (1e-9, 2e-9, 5e-9, 1e-8, 2e-8):
+        _vp = []
+        for _s in (+1.0, -1.0):
+            EC_PHI.x = _xp; EC_PHI.J()                        # start from the nominal snowflake solution
+            EC_PHI.x = _xp + _s * _eps * _hp
+            _vp.append(EC_PHI.J())
+        _fd = (_vp[0] - _vp[1]) / (2 * _eps)
+        print(f"   eps = {_eps:.0e}: FD = {_fd:.10e}, relative error = {abs(_fd - _gp @ _hp) / abs(_gp @ _hp):.2e}")
+    EC_PHI.x = _xp
+    # the transported profile against E[C] computed directly in a few sections (an
+    # ExactMeanUnfoldingC with its own phi0: jet and covariance of that section)
+    _tt, _prof = EC_PHI.profile()
+    for _k in sorted({len(_tt) // 8, len(_tt) // 4, len(_tt) // 2, (3 * len(_tt)) // 4}):
+        _phi0 = (EC_T + float(_tt[_k])) % 1.0     # the nodes are counted from the section of EC
+        _direct = ExactMeanUnfoldingC(sing_fls[0], sing_fls[0].biotsavart,
+                                      length_scale=float(args.risk_length_scale), frame='RZ', phi0=_phi0).J()
+        print(f"   section at t = {_phi0:.5f} (node {_k}): transported E[C] = {_prof[_k]:.8f}, direct = {_direct:.8f}, "
+              f"difference {abs(_prof[_k] - _direct):.2e}")
     raise SystemExit(0)
 nonQS_list = [NonQuasiSymmetricRatio(boozer_surface, mk()) for boozer_surface, mk in zip(boozer_surfaces, FIELDS)]
 print([J.J()**0.5 for J in nonQS_list])
@@ -1070,8 +1290,12 @@ def callback(dofs):
         table2.add_row('axis elongation max', ' '.join([f'{max(_el[k:k+N_ELONGATION]):.4f}' for k in range(0, len(_el), N_ELONGATION)])
                        + f'  (bound: <= {ELONGATION_MAX})')
     _Cs = EC.values()
-    table2.add_row('E[C] unfolding (phi=0)', f'{np.nanmean(_Cs):.5f}  min {np.nanmin(_Cs):.4f}  max {np.nanmax(_Cs):.4f}  '
-                   f'({int(np.isfinite(_Cs).sum())} of {len(_Cs)} real splits; bound: <= {EC_MAX})')
+    _bnd = f'bound: <= {EC_MAX}'
+    table2.add_row(f'E[C] unfolding (t={EC_T:g})', f'{np.nanmean(_Cs):.5f}  min {np.nanmin(_Cs):.4f}  max {np.nanmax(_Cs):.4f}  '
+                   f'({int(np.isfinite(_Cs).sum())} of {len(_Cs)} directions with a real split; '
+                   f'{"not bounded" if EC_USE_MEAN else _bnd})')
+    table2.add_row('E[C] over the sections', 'mean %.5f  min %.4f  max %.4f' % ec_phi_stats()
+                   + f'  ({"mean " + _bnd if EC_USE_MEAN else "not bounded"})')
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
     # auxiliary-coil parameters, per fl: summarize the currents (scaled to
     # Amperes) by min/max, separated into DEPENDENT (solved, bounded to
@@ -1337,10 +1561,10 @@ for j in range(N_POLISH_STAGES):
     # near-axis elongation bound: relative excess of the largest elongation (both configurations)
     elongation_max = max(e.J() for e in ELONGATION_LIST) if elongation_enabled else None
     elongation_err = max(elongation_max - ELONGATION_MAX, 0.)/ELONGATION_MAX if elongation_enabled else 0.0
-    # risk-neutral bound: relative excess of E[C] (a realization without a real split counts as
-    # a full violation, so that such a design is never reported in spec)
-    _Cs = EC.values()
-    ec_value = float(np.mean(_Cs)) if np.all(np.isfinite(_Cs)) else float('nan')
+    # risk-neutral bound: relative excess of the bounded E[C] (one section or the mean over the
+    # sections, --ec-section; a direction without a real split makes it undefined and counts
+    # as a full violation, so that such a design is never reported in spec)
+    ec_value = ec_bounded_value()
     ec_err = max(ec_value - EC_MAX, 0.)/EC_MAX if np.isfinite(ec_value) else 1.0
     mr_err =max(np.abs(mr.J()-MR_TARGET)/MR_TARGET for mr in mrs)
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
@@ -1651,10 +1875,25 @@ final_metrics['xpoint_trace'] = (xpoint_trace(), TRACE_MIN, trace_err if MONODRO
 # over the N_ELONGATION angles of both configurations; its relative excess feeds the 0.1% gate.
 if elongation_enabled:
     final_metrics['elongation_bound'] = (elongation_max, ELONGATION_MAX, elongation_err if ELONGATION_WEIGHT.value != 0. else 0.0)
-# Risk-neutral bound on the unfolding constant of the snowflake: E[C] over the RISK_SAMPLES
-# realizations against EC_MAX; its relative excess feeds the 0.1% gate.
+# Risk-neutral bound on the unfolding constant of the snowflake: the bounded E[C] (exact
+# expectation over the Gaussian-process perturbations; one section or the mean over the sections,
+# --ec-section) against EC_MAX; its relative excess feeds the 0.1% gate.
 final_metrics['unfolding_EC'] = (ec_value, EC_MAX, ec_err if EC_WEIGHT.value != 0. else 0.0)
-final_metrics['unfolding_EC_samples'] = (float(len(RISK_SEEDS)), None, None)
+# what the bound applied to: 1 = the mean over the sections, 0 = the section at unfolding_EC_section_t
+final_metrics['unfolding_EC_bound_on_mean'] = (1.0 if EC_USE_MEAN else 0.0, None, None)
+final_metrics['unfolding_EC_section_t'] = (EC_T, None, None)
+# E[C] in that section, and the exact standard deviation of C there (its own name:
+# mk_unfolding.py writes unfolding_C_std, over samples)
+try:
+    final_metrics['unfolding_EC_section'] = (float(EC.J()), None, None)
+except Exception:
+    final_metrics['unfolding_EC_section'] = (float('nan'), None, None)
+final_metrics['unfolding_EC_std'] = (EC.std(), None, None)
+# E[C] over the toroidal sections (PhiMeanUnfoldingC): mean, smallest and largest section
+_ecp_mean, _ecp_min, _ecp_max = ec_phi_stats()
+final_metrics['unfolding_EC_phi_mean'] = (_ecp_mean, None, None)
+final_metrics['unfolding_EC_phi_min'] = (_ecp_min, None, None)
+final_metrics['unfolding_EC_phi_max'] = (_ecp_max, None, None)
 for _k, (_bsurf, _nq, _io, _mrat) in enumerate(zip(boozer_surfaces, nonQS_list, IOTAS_LIST, mirror_ratios), start=1):
     final_metrics[f'nonQS_percent_config{_k}'] = (100. * _nq.J()**0.5, None, None)
     final_metrics[f'iota_config{_k}'] = (_io.J(), None, None)

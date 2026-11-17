@@ -172,6 +172,8 @@ SYNC_INCLUDES=(
   --include='elongation_profile.png'
   --include='unfolding_C*.txt'
   --include='unfolding_C_*.png'
+  --include='unfolding_EC_exact_profile.txt'
+  --include='unfolding_EC_exact_profile.png'
   --include='xs_*.png'
   --include='poincare*.txt'
   --include='xpoint.txt'
@@ -478,9 +480,9 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
         && env -u DISPLAY python mk_paraview.py "$DOUBLE_DIR" ) \
         || echo "WARNING: device views (scene_*.png) of the double failed"
       # Post-processing of the in-spec double (run_double_analysis.sh): (1) toroidal profile of
-      # the near-axis elongation, (3) unfolding constant C over 128 GP coil perturbations, with
-      # their figures. Best-effort, non-fatal (about 30 minutes). Step (2), the repair with the
-      # aux currents, is not run here.
+      # the near-axis elongation, (3) exact mean unfolding constant E[C] of the snowflake (at
+      # phi = 0, over the sections and their mean), with their figures. Best-effort, non-fatal
+      # (about 2 minutes). Step (2), the repair with the aux currents, is not run here.
       echo "=== analysis of the double (elongation profile, unfolding constant C): $DOUBLE_DIR ==="
       bash run_double_analysis.sh "$DOUBLE_DIR" \
         || echo "WARNING: $? analysis step(s) of the double failed"
