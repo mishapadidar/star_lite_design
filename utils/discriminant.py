@@ -42,6 +42,7 @@ from .singularperiodicfieldline import (
     _MU0_4PI,
     _B_aux, _dB_aux_by_dX, _d2B_aux_by_dXdX,
     _dB_aux_by_dmu, _dgradB_aux_by_dmu, _dgradgradB_aux_by_dmu,
+    _B_gradB_aux_vjp_mu, _B_gradB_gradgradB_aux_vjp_mu,
     _d3B_aux_by_dXdXdX,
 )
 
@@ -419,12 +420,10 @@ class SnowflakeDiscriminant(Optimizable):
                      + np.einsum('ikj,ikpj,ipm->m', dJ_dgB, gradgradB, dgamma_dc, optimize=True)
                      + np.einsum('iklj,iklpj,ipm->m', dJ_dggB, d3B, dgamma_dc, optimize=True)
                      + np.einsum('ij,ijm->m', dJ_dgamma, dgamma_dc, optimize=True))
-        dB_aux_dmu = np.asarray(_dB_aux_by_dmu(pts, mu, stellsym=stell))
-        dgB_aux_dmu = np.asarray(_dgradB_aux_by_dmu(pts, mu, stellsym=stell))
-        dggB_aux_dmu = np.asarray(_dgradgradB_aux_by_dmu(pts, mu, stellsym=stell))
-        dJ_dmu = (np.einsum('ij,ijl->l', dJ_dB, dB_aux_dmu, optimize=True)
-                  + np.einsum('ikj,ikjl->l', dJ_dgB, dgB_aux_dmu, optimize=True)
-                  + np.einsum('iklj,ikljq->q', dJ_dggB, dggB_aux_dmu, optimize=True))
+        # (dJ/dB, dJ/dgradB, dJ/dgradgradB) . d(aux field, its gradient, its Hessian)/dmu, (nmu,):
+        # one reverse-mode pass instead of the three Jacobians wrt mu and their contractions
+        dJ_dmu = np.asarray(_B_gradB_gradgradB_aux_vjp_mu(
+            pts, mu, np.asarray(dJ_dB), np.asarray(dJ_dgB), np.asarray(dJ_dggB), stellsym=stell))
 
         col_mask = np.asarray(res['mask'], dtype=bool)             # over [curve, length, mu]
         full_dJ_dx = np.concatenate([res_curve, [float(dJ_dL)], dJ_dmu])
@@ -743,10 +742,9 @@ class DSigma(Optimizable):
                      + np.einsum('ikj,ikpj,ipm->m', dsgB, gradgradB, dgamma_dc, optimize=True)
                      + np.einsum('ij,ikj,ikm->m', dsdB, dgradB_pert, dgamma_dc, optimize=True)
                      + np.einsum('ij,ijm->m', dsg, dgamma_dc, optimize=True))
-        dB_aux_dmu = np.asarray(_dB_aux_by_dmu(pts, mu, stellsym=stell))
-        dgradB_aux_dmu = np.asarray(_dgradB_aux_by_dmu(pts, mu, stellsym=stell))
-        d_mu = (np.einsum('ij,ijl->l', dsB, dB_aux_dmu, optimize=True)
-                + np.einsum('ikj,ikjl->l', dsgB, dgradB_aux_dmu, optimize=True))
+        # (dsB, dsgB) . d(aux field, its gradient)/dmu, (nmu,): one reverse-mode pass instead of
+        # the two Jacobians wrt mu and their contractions
+        d_mu = np.asarray(_B_gradB_aux_vjp_mu(pts, mu, dsB, dsgB, stellsym=stell))
 
         col_mask = np.asarray(res['mask'], dtype=bool)
         full_dJ_dx = np.concatenate([res_curve, [dsL], d_mu])

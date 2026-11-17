@@ -188,9 +188,9 @@ if null_type == 'SN':
 #xpoints = [xpoints[1]]
 
 for ii, (boozer_surface, axis, xpoint) in enumerate(zip(boozer_surfaces, axes, xpoints)):
-    axis.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
-    xpoint.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':True}
-    boozer_surface.options = {'newton_tol':1e-16 if null_type == 'DN' else 1e-14, 'newton_maxiter':20, 'verbose':True}
+    axis.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':False}
+    xpoint.options = {'newton_tol':1e-15, 'newton_maxiter':20, 'verbose':False}
+    boozer_surface.options = {'newton_tol':1e-16 if null_type == 'DN' else 1e-14, 'newton_maxiter':20, 'verbose':False}
     axis.run_code(CurveLength(axis.curve).J())
     xpoint.run_code(CurveLength(xpoint.curve).J())
     boozer_surface.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
@@ -873,8 +873,11 @@ xpoints_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['leng
 # later gradient (modB->0). Empty for DN (bottom_xpoints is None).
 bottom_res_list = [{'xdofs': bx.curve.x.copy(), 'length': bx.res['length']} for bx in (bottom_xpoints or [])]
 dat_dict = {'iter':0, 'J': JF.J(), 'dJ': JF.dJ().copy(), 'x': JF.x.copy()}
+# last successful evaluation of fun(): its point and its gradient, so that callback() does not
+# recompute the gradient at that same point
+_last_eval = {}
 
-def callback(dofs):
+def callback(dofs, full=False):
     for res, boozer_surface in zip(res_list, boozer_surfaces):
         res['sdofs'] = boozer_surface.surface.x.copy()
         res['iota'] =  boozer_surface.res['iota']
@@ -893,8 +896,14 @@ def callback(dofs):
 
     dat_dict['x'] = JF.x.copy()
     dat_dict['J'] = JF.J()
-    dat_dict['dJ'] = JF.dJ().copy()
-    
+    # same point AND same objective value: the weights may have changed since fun() ran (the
+    # pre-scaling, an escalation, a dropped penalty), and its gradient is then stale
+    if ('x' in _last_eval and _last_eval['J'] == dat_dict['J']
+            and np.array_equal(_last_eval['x'], dat_dict['x'])):
+        dat_dict['dJ'] = _last_eval['grad'].copy()     # the gradient fun() computed at this point
+    else:
+        dat_dict['dJ'] = JF.dJ().copy()
+
     currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     kappas = [np.max(c.kappa()) for c in base_curves]
     
@@ -904,6 +913,14 @@ def callback(dofs):
     table1.add_row(*[f'{dat_dict["iter"]}', f'{dat_dict["J"]:.2e}', f'{np.max(np.abs(dat_dict["dJ"])):.2e}', f'{dist:.2e}'])
     console.print(table1)
 
+    # The two full tables (every penalty, every state) are printed every 10 iterations, with
+    # the saves of _callback_end(), and when asked (full=True). In between, only the line above.
+    if full or dat_dict["iter"] % 10 == 0:
+        _full_tables(currents_list, kappas)
+    _callback_end()
+
+
+def _full_tables(currents_list, kappas):
     console = Console(width=250)
     # Split the penalties over two stacked tables so the many columns don't get
     # truncated ("…") to fit the console width.
@@ -975,7 +992,11 @@ def callback(dofs):
     table2.add_row('fieldline mean distance', f'{max_fieldline_mean_distance:.3e}')
  
     console.print(table2)
-    
+
+
+def _callback_end():
+    """End of callback(), at every iteration: the saves every 10 iterations, the iteration
+    counter, and the test of the bottom X-point-to-surface penalty."""
     if dat_dict["iter"] % 10 == 0:
         sdf.to_vtk(OUT_DIR + 'vessel_tmp')
         curves_to_vtk(curves, OUT_DIR + "curves_tmp")
@@ -1100,6 +1121,9 @@ def fun(dofs):
         K = max(abs(gdx) / (BARRIER_RETREAT * nrm2), 1.0)
         return f0 + gdx + 0.5 * K * nrm2, g0 + K * dx
 
+    _last_eval['x'] = np.array(dofs, copy=True)
+    _last_eval['J'] = J
+    _last_eval['grad'] = np.array(grad, copy=True)
     return J, grad
 
 #print("""
@@ -1177,7 +1201,7 @@ dofs = JF.x.copy()
 # X-point-surface constraint is ALREADY satisfied at initialization; handle it
 # the same way as inside the loop instead of crashing the whole task.
 try:
-    callback(dofs)
+    callback(dofs, full=True)
 except _XpointSurfaceSatisfied:
     _drop_bottom_penalties()
     dofs = dat_dict['x'].copy()
@@ -1324,7 +1348,7 @@ for j in range(15):
     # the post-minimize state (e.g. BFGS stopped for its own reasons on an
     # iterate that satisfies the constraint).
     try:
-        callback(dofs)
+        callback(dofs, full=True)
     except _XpointSurfaceSatisfied:
         _drop_bottom_penalties()
         print('XpointSurfaceDistance reached 0 at post-minimize callback: dropped '

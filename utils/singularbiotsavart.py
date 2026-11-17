@@ -113,7 +113,7 @@ from simsopt.geo import CurveLength, CurveXYZFourier
 # aux circles (built once, dofs synced from mu) for speed; only the mu-ADJOINT
 # keeps the jax aux derivatives (_dB_aux_by_dmu, _dgradB_aux_by_dmu).
 from star_lite_design.utils.singularperiodicfieldline import (
-    _dB_aux_by_dmu, _dgradB_aux_by_dmu, _mu_names, _CURRENT_SCALE, _N_QUAD_AUX)
+    _dB_aux_by_dmu, _dgradB_aux_by_dmu, _B_aux_vjp_mu, _mu_names, _CURRENT_SCALE, _N_QUAD_AUX)
 
 __all__ = ['SingularBiotSavart']
 
@@ -302,9 +302,9 @@ class SingularBiotSavart(MagneticField):
         pts = self._prepare()
         fl = self.fl
         vv = np.ascontiguousarray(np.asarray(v).reshape((-1, 3)))
-        # aux sensitivity wrt mu at the evaluation points
-        dBaux_dmu = np.asarray(_dB_aux_by_dmu(pts, fl.mu, stellsym=fl.stellsym_aux))  # (N,3,nmu)
-        a = np.einsum('ij,ijk->k', vv, dBaux_dmu, optimize=True)
+        # v . (aux sensitivity wrt mu) at the evaluation points, (nmu,): one reverse-mode pass,
+        # about 3 times cheaper than forming dB_aux/dmu (N,3,nmu) and contracting it with v
+        a = np.asarray(_B_aux_vjp_mu(pts, fl.mu, vv, stellsym=fl.stellsym_aux))
         # modular part FIRST (modular points are the eval points here); the mu
         # term below calls dmu_dep_by_ddesign, which re-points the modular field.
         deriv = self.modular.B_vjp(vv)

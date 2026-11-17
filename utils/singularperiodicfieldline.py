@@ -240,6 +240,18 @@ def _dB_aux_by_dmu(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
 
 
 @partial(jax.jit, static_argnames=("n_quad", "stellsym"))
+def _B_aux_vjp_mu(pts, mu, v, n_quad=_N_QUAD_AUX, stellsym=True):
+    """
+    Vector-Jacobian product of B wrt mu: sum_ij v[i, j] dB_j/dmu_k at point i, (len(mu),).
+
+    Equal to np.einsum('ij,ijk->k', v, _dB_aux_by_dmu(pts, mu)), by ONE reverse-mode pass
+    (about 2.5 field evaluations) instead of the full Jacobian (one forward pass per component
+    of mu, about 8 field evaluations for 4 aux coils).
+    """
+    return jax.grad(lambda m: jnp.sum(v * _B_aux(pts, m, n_quad=n_quad, stellsym=stellsym)))(mu)
+
+
+@partial(jax.jit, static_argnames=("n_quad", "stellsym"))
 def _dB_aux_by_dX(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     """
     Spatial gradient of B in simsopt convention.
@@ -344,6 +356,34 @@ def _dgradgradB_aux_by_dmu(pts, mu, n_quad=_N_QUAD_AUX, stellsym=True):
     outer = jax.jacfwd(hess, argnums=1)                           # -> [j, k1, k2, l]
     H = jax.vmap(outer, in_axes=(0, None, None))(pts, mu, n_quad)  # [i, j, k1, k2, l]
     return H.transpose(0, 2, 3, 1, 4)  # -> [i, k1, k2, j, l]
+
+
+@partial(jax.jit, static_argnames=("n_quad", "stellsym"))
+def _B_gradB_aux_vjp_mu(pts, mu, v, vg, n_quad=_N_QUAD_AUX, stellsym=True):
+    """
+    Vector-Jacobian product wrt mu of the aux field and of its spatial gradient, (len(mu),):
+        einsum('ij,ijl->l', v, _dB_aux_by_dmu) + einsum('ikj,ikjl->l', vg, _dgradB_aux_by_dmu)
+    by ONE reverse-mode pass, without forming those Jacobians (v, vg in the layouts of _B_aux
+    and _dB_aux_by_dX).
+    """
+    def scalar(m):
+        return (jnp.sum(v * _B_aux(pts, m, n_quad=n_quad, stellsym=stellsym))
+                + jnp.sum(vg * _dB_aux_by_dX(pts, m, n_quad=n_quad, stellsym=stellsym)))
+    return jax.grad(scalar)(mu)
+
+
+@partial(jax.jit, static_argnames=("n_quad", "stellsym"))
+def _B_gradB_gradgradB_aux_vjp_mu(pts, mu, v, vg, vgg, n_quad=_N_QUAD_AUX, stellsym=True):
+    """
+    As _B_gradB_aux_vjp_mu, with the spatial Hessian too:
+        ... + einsum('iklj,ikljq->q', vgg, _dgradgradB_aux_by_dmu)
+    (vgg in the layout of _d2B_aux_by_dXdX).
+    """
+    def scalar(m):
+        return (jnp.sum(v * _B_aux(pts, m, n_quad=n_quad, stellsym=stellsym))
+                + jnp.sum(vg * _dB_aux_by_dX(pts, m, n_quad=n_quad, stellsym=stellsym))
+                + jnp.sum(vgg * _d2B_aux_by_dXdX(pts, m, n_quad=n_quad, stellsym=stellsym)))
+    return jax.grad(scalar)(mu)
 
 
 # -----------------------------------------------------------------------------

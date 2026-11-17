@@ -12,7 +12,7 @@ set -uo pipefail
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
 #                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt] [force] [mono_thr] [step] \
-#                    [elongation] [trace_min]
+#                    [elongation] [trace_min] [ec_max] [target] [pf_max]
 #
 # elongation (16th): upper bound on the near-axis elongation, or OFF (default); a field of the
 # device name. trace_min (17th, step=double only): lower bound on tr M of the config 1 X-point;
@@ -91,8 +91,27 @@ elong="${16:-OFF}"
 # <num_aux=N name>_double name. Otherwise the task is named <num_aux=N name>_trmin=<bound>_double,
 # so that the doubles of one device at several bounds run side by side.
 trace_min="${17:-}"
-DOUBLE_SUFFIX="_double"
-[ -n "$trace_min" ] && DOUBLE_SUFFIX="_trmin=${trace_min}_double"
+# step=double only: upper bound on E[C], the mean unfolding constant of the snowflake
+# (boozer_risk_opt.py --ec-max), or OFF for no bound. Empty (default): no bound and no field
+# in the name. Otherwise the field _ec=<bound> follows the trace field of the name:
+# <num_aux=N name>_trmin=<bound>_ec=<bound>_double. The bound applies to the E[C] chosen by
+# EC_SECTION (environment; default mean: the mean of E[C] over the toroidal sections).
+ec_max="${18:-}"
+# step=double only: what is optimized (boozer_risk_opt.py --target): double (default: config 1
+# X-point with the aux coils off + config 2 snowflake) or snowflake (the snowflake
+# configuration alone; the trace bound then has no effect). A snowflake task gets the field
+# _target=snowflake before _double; the name of a double is unchanged.
+target="${19:-double}"
+case "$target" in
+  double|snowflake) ;;
+  *) echo "ERROR: target must be double or snowflake (got '$target')"; exit 1 ;;
+esac
+TARGET_FIELD=""; [ "$target" = "snowflake" ] && TARGET_FIELD="_target=snowflake"
+# step=double only: bound on the current of each auxiliary (PF) coil, in amperes
+# (boozer_risk_opt.py --aux-current-max). Empty (default): the script's own 5000 A and no
+# field in the name. Otherwise the field _pf=<amperes> follows the E[C] field.
+pf_max="${20:-}"
+DOUBLE_SUFFIX="${trace_min:+_trmin=${trace_min}}${ec_max:+_ec=${ec_max}}${pf_max:+_pf=${pf_max}}${TARGET_FIELD}_double"
 
 # polish and double start from a device already on ceph instead of running boozer_all
 FROM_CEPH=0
@@ -440,9 +459,18 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
   cp "$INIT_YAML" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
 
   DISC=0; [ "$MONO_CONSTRAINT" = "identity" ] && DISC=1
-  # trace_min (17th argument), when given, becomes boozer_double_opt.py's --trace-min, added
-  # to whatever DOUBLE_OPT_ARGS the environment already carries.
-  DOUBLE_OPT_ARGS="${DOUBLE_OPT_ARGS:-}${trace_min:+ --trace-min $trace_min}" \
+  # trace_min (17th argument), when given, becomes boozer_risk_opt.py's --trace-min, and
+  # ec_max (18th), when given and not OFF, its --ec-max on the E[C] of EC_SECTION; both are
+  # added to whatever DOUBLE_OPT_ARGS the environment already carries.
+  EC_ARGS=""
+  if [ -n "$ec_max" ] && [ "$ec_max" != "OFF" ]; then
+    EC_ARGS=" --ec-max $ec_max --ec-section ${EC_SECTION:-mean}"
+  fi
+  # target (19th argument): snowflake = the snowflake configuration alone
+  [ "$target" = "snowflake" ] && EC_ARGS="${EC_ARGS} --target snowflake"
+  # pf_max (20th argument): bound on the aux (PF) coil currents, in amperes
+  [ -n "$pf_max" ] && EC_ARGS="${EC_ARGS} --aux-current-max $pf_max"
+  DOUBLE_OPT_ARGS="${DOUBLE_OPT_ARGS:-}${trace_min:+ --trace-min $trace_min}${EC_ARGS}" \
     bash run_double.sh "$DOUBLE_DIR/$INIT_JSON_BASE" "$num_aux" "$DISC" || true
   rm -f "$DOUBLE_DIR/$INIT_JSON_BASE" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
 
@@ -465,6 +493,8 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
       # render scripts write next to their input. A failed render is a warning only: the
       # device is still copied to ceph.
       for cfg in config1 config2; do
+        # target=snowflake wrote config2/ only
+        [ -d "$DOUBLE_DIR/$cfg" ] || continue
         CFG_JSON="$(ls "$DOUBLE_DIR/$cfg"/design_double_final_*.json 2>/dev/null | head -1)"
         echo "=== rendering double device, $cfg: $DOUBLE_DIR/$cfg ==="
         if [ -z "$CFG_JSON" ] || ! bash run_render.sh "$CFG_JSON" "$DOUBLE_DIR/$cfg" noviews; then

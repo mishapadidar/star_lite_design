@@ -1,7 +1,28 @@
 #!/usr/bin/env python3
 """boozer_risk_opt.py
 
-The E[C] that the bound --ec-max applies to is chosen with --ec-section: E[C] in ONE toroidal
+THE two-configuration (double) optimization of the designB pipeline: config 1 = X-point with
+the aux coils off, config 2 = snowflake with the aux coils. It replaces boozer_double_opt.py
+(archive/old_scripts), whose docstring follows below. Two possible inputs, told apart from
+the design json itself:
+
+  * a boozer_all design (design_opt_final_<ID>.json, one configuration): the aux coils are
+    placed (--num-aux), the snowflake is made by the singular polish and the current
+    continuation, then both configurations are optimized. Without --ec-max this is exactly
+    what boozer_double_opt.py did;
+  * a FINISHED double (design_double_final_<TAG>.json): both configurations, the aux coils
+    and the weights (the escalated ones of the double) are loaded from it and its yaml, and
+    the optimization goes on.
+
+In both cases the outputs keep the names of a double (design_double_final_<TAG>.json,
+config1/, config2/, summary.txt), written next to the input or in --out-dir.
+
+--ec-max adds one more inequality constraint (risk-neutral bound); without it E[C] is only
+reported (start lines, tables, summary.txt) and nothing of it enters the objective:
+
+    E[C] <= --ec-max,
+
+The E[C] that the bound applies to is chosen with --ec-section: E[C] in ONE toroidal
 section, given by the fraction T in [0, 1) of the full turn of the snowflake field line
 (default 0, the section at phi = 0), or the MEAN of E[C] over the sections ('mean'). E[C] in a
 section is ExactMeanUnfoldingC with its phi0; the profile over the sections and their mean are
@@ -9,28 +30,16 @@ PhiMeanUnfoldingC, transported from that section. Both are always reported (star
 summary.txt: unfolding_EC = the bounded one, unfolding_EC_section, unfolding_EC_phi_mean / _min /
 _max) and checked by --check-gradient.
 
-Risk-neutral continuation of a FINISHED double device (boozer_double_opt.py): the same
-two-configuration optimization, started from the double's final design
-(design_double_final_<TAG>.json: config 1 X-point with the aux coils off, config 2 snowflake),
-with one more inequality constraint,
-
-    E[C] <= --ec-max,
-
-where C is the unfolding constant of the snowflake under a Gaussian-process perturbation of
+Here C is the unfolding constant of the snowflake under a Gaussian-process perturbation of
 the modular coils (utils/discriminant.py: the two X-points born from the snowflake separate by
 C * sqrt(sigma) for a perturbation of amplitude sigma; the aux coils are not perturbed),
 measured in the (R, Z) section at phi = 0, and E[.] is the expectation over the Gaussian
 process, computed exactly (ExactMeanUnfoldingC: the response of the return map is a Gaussian
 2-vector, so the expectation is a one-dimensional integral; no realizations are drawn). The
 constraint is a one-sided quadratic penalty with its own escalating weight, and its relative
-excess enters the 0.1% gate (summary.txt: unfolding_EC). mk_unfolding.py measures the mean of
-C over 128 realizations of the same process, as an independent check.
+excess enters the 0.1% gate (summary.txt: unfolding_EC).
 
-Everything after the start-up is boozer_double_opt.py, of which this file is a copy; its
-docstring follows. Here the snowflake is NOT generated from a boozer_all device: both
-configurations, the aux coils and the weights (the escalated ones of the double) are loaded
-from the double and its yaml, and the outputs keep the names of a double
-(design_double_final_<TAG>.json, config1/, config2/, summary.txt), written in --out-dir.
+The docstring of boozer_double_opt.py follows.
 
 Continue a boozer_all.py optimization as an "all-in-one" optimization of TWO configurations
 that share the modular-coil GEOMETRY and the vessel SDF, with their own modular currents
@@ -268,7 +277,7 @@ class ExactMeanUnfoldingC(Optimizable):
     displacements, i.e. two adjoints of D_sigma for those displacements (_WeightedPerturbation).
     values() returns E[sqrt(r)] * C(theta): its mean is E[C]."""
 
-    def __init__(self, fieldline, biotsavart, length_scale=0.5, frame='RZ', phi0=0.0, n_theta=1024):
+    def __init__(self, fieldline, biotsavart, length_scale=0.5, frame='RZ', phi0=0.0, n_theta=256):
         import jax
         import jax.numpy as jnp
         from math import gamma
@@ -478,11 +487,14 @@ parser = argparse.ArgumentParser(
                 "design. Reads all run parameters from the design json's sibling "
                 ".yaml; writes its outputs next to the input.")
 parser.add_argument("design_json",
-                    help="path to the design_double_final_<TAG>.json of a finished double (the matching "
-                         ".yaml in the same directory supplies all parameters)")
-parser.add_argument("--ec-max", type=float, required=True,
-                    help="upper bound on E[C], the mean unfolding constant of the snowflake at phi = 0 "
-                         "[m^(1/2)]")
+                    help="path to a boozer_all design_opt_final_<ID>.json (the aux coils are placed and the "
+                         "snowflake is made by the singular polish, then both configurations are optimized) "
+                         "or to the design_double_final_<TAG>.json of a finished double (it is reloaded and "
+                         "optimized further); the matching .yaml in the same directory supplies all parameters")
+parser.add_argument("--ec-max", type=float, default=None,
+                    help="upper bound on E[C], the mean unfolding constant of the snowflake [m^(1/2)], in the "
+                         "section or averaged over the sections (--ec-section). Default: no bound (E[C] is "
+                         "then only reported, and the optimization is the plain double optimization)")
 parser.add_argument("--risk-length-scale", type=float, default=0.5,
                     help="GP correlation length of the coil perturbation (default 0.5)")
 parser.add_argument("--ec-section", default=None, metavar="mean|T",
@@ -495,11 +507,13 @@ parser.add_argument("--check-gradient", action="store_true",
 parser.add_argument("--out-dir", default=None,
                     help="directory of the outputs (default: next to the input design json)")
 parser.add_argument("--num-aux", type=int, default=None,
-                    help="ignored: the number of auxiliary coils is that of the loaded double")
+                    help=f"number of planar circular auxiliary coils, for a start from a boozer_all design "
+                         f"(default {NUM_AUX_DEFAULT}); ignored for a finished double, which keeps its own")
 parser.add_argument("--discriminant", type=int, default=None, choices=(0, 1),
-                    help="1 to keep the snowflake-discriminant inequality constraint "
-                         "Delta > DISCRIMINANT_THRESHOLD, 0 off (default: as in the loaded double, "
-                         "its yaml's DISCRIMINANT). Recorded in the output filename (_disc1 suffix when on).")
+                    help="1 for the snowflake-discriminant inequality constraint "
+                         "Delta > DISCRIMINANT_THRESHOLD, 0 off (default: 0 for a start from a boozer_all "
+                         "design; as in the loaded double, its yaml's DISCRIMINANT, for a finished double). "
+                         "Recorded in the output filename (_disc1 suffix when on).")
 parser.add_argument("--stages", type=int, default=10,
                     help="number of outer BFGS stages (default 10; lower it for a quick end-to-end test)")
 parser.add_argument("--maxiter", type=int, default=1000,
@@ -507,7 +521,17 @@ parser.add_argument("--maxiter", type=int, default=1000,
 parser.add_argument("--trace-min", type=float, default=None,
                     help="lower bound on tr M of the config 1 X-point (default: 2 + the yaml's "
                          "MONODROMY_THRESHOLD, i.e. boozer_all's --mono-thr)")
+parser.add_argument("--target", default="double", choices=("double", "snowflake"),
+                    help="what is optimized: 'double' (default) = both configurations, config 1 X-point "
+                         "with the aux coils off and config 2 snowflake; 'snowflake' = the snowflake "
+                         "configuration alone (no config 1, no bound on the trace of its X-point). The "
+                         "outputs keep the names of a double, with config2/ only")
+parser.add_argument("--aux-current-max", type=float, default=None,
+                    help="bound on the current of each auxiliary (planar circular, PF) coil, in amperes: "
+                         "|I| <= this (default: the yaml's AUX_CURRENT_EPS if a previous run wrote it, "
+                         "else 5000)")
 args = parser.parse_args()
+SNOW_ONLY = args.target == "snowflake"
 
 _in = os.path.abspath(args.design_json)
 _yaml_path = os.path.splitext(_in)[0] + '.yaml'
@@ -520,12 +544,33 @@ mon_constraint = config['MONODROMY_CONSTRAINT']
 if mon_constraint not in ('trace', 'identity'):
     raise SystemExit(f"config MONODROMY_CONSTRAINT must be 'trace' or 'identity', "
                      f"got {mon_constraint!r}")
-num_aux = int(config['NUM_AUX'])   # the loaded double's (checked against its snowflake below)
-# 1 = keep the snowflake-discriminant constraint: as in the loaded double unless --discriminant
-discriminant = int(args.discriminant if args.discriminant is not None else config.get('DISCRIMINANT', 0))
+# The input is either a FINISHED double (two configurations, the second one with its snowflake:
+# it is reloaded) or a boozer_all design (one configuration, no aux coils: the snowflake is
+# built by the singular polish, as boozer_double_opt.py did).
+IS_RESTART = len(data[0]) == 2 and isinstance(data[3][1], SingularPeriodicFieldline)
+if not IS_RESTART and len(data[0]) != 1:
+    raise SystemExit(f"expected a boozer_all design (one configuration) or a finished double (X-point + "
+                     f"snowflake), got {len(data[0])} configuration(s) in {_in}")
+if not IS_RESTART and isinstance(data[3][0], SingularPeriodicFieldline):
+    raise SystemExit(f"{_in} is a finished snowflake-only design (--target snowflake): restarting from "
+                     f"one is not supported; start from the boozer_all design or from a finished double")
+config['TARGET'] = args.target         # 'double' or 'snowflake', recorded in the (output) yaml
+if IS_RESTART:
+    num_aux = int(config['NUM_AUX'])   # the loaded double's (checked against its snowflake below)
+    # 1 = keep the snowflake-discriminant constraint: as in the loaded double unless --discriminant
+    discriminant = int(args.discriminant if args.discriminant is not None else config.get('DISCRIMINANT', 0))
+else:
+    num_aux = int(args.num_aux if args.num_aux is not None else NUM_AUX_DEFAULT)
+    discriminant = int(args.discriminant if args.discriminant is not None else 0)
+config['NUM_AUX'] = num_aux            # record it in the (output) yaml
 config['DISCRIMINANT'] = discriminant  # record it in the (output) yaml
-EC_MAX = float(args.ec_max)
-config['EC_MAX'] = EC_MAX
+# bound on E[C]: --ec-max, or none (E[C] is then reported but not part of the objective)
+EC_ENABLED = args.ec_max is not None
+EC_MAX = float(args.ec_max) if EC_ENABLED else None
+if EC_ENABLED:
+    config['EC_MAX'] = EC_MAX
+else:
+    config.pop('EC_MAX', None)
 config['RISK_LENGTH_SCALE'] = float(args.risk_length_scale)
 # N_DEP_CURRENTS (number of dependent aux currents = number of monodromy constraints
 # solved for) is chosen after the X-point stellsym-defect check below: a stellsym
@@ -546,70 +591,144 @@ print(f"Input: {_in}")
 print(f"Output dir: {OUT_DIR}")
 print(f"constraint={mon_constraint}  num_aux={num_aux}  discriminant={discriminant}  config_id={config_id}")
 
-print("Running RISK-NEUTRAL double optimization (restart from a double design)")
-print("================================")
-# The input is a FINISHED double: design_double_final_<TAG>.json, with its two configurations
-#   boozer surfaces [config 1 on its modular coils, config 2 on explicit modular + aux coils],
-#   axes            [config 1, config 2 (explicit coils)],
-#   x-points        [config 1 PeriodicFieldLine, config 2 SingularPeriodicFieldline (snowflake)].
-# The optimization below works, as boozer_double_opt.py does, with the snowflake configuration
-# on SingularBiotSavart(field line): its Boozer surface and axis are rebuilt on that field here.
-if len(data[0]) != 2 or not isinstance(data[3][1], SingularPeriodicFieldline):
-    raise SystemExit(f"expected a two-configuration double design (X-point + snowflake), got "
-                     f"{len(data[0])} configuration(s) in {_in}")
-(bs_x, _bs2), _iota_Gs_in, (axis_x, _ax2), (xp_x, _fl), sdf = data
+def _copy_curve(xc):
+    c = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, xc.stellsym, ntor=xc.ntor)
+    c.set_dofs(xc.get_dofs())
+    return c
 
-# ---- config 1: hyperbolic X-point, aux coils off, its own modular currents ----------------
-coils_x = bs_x.biotsavart.coils
-axis_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': True}
-xp_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': True}
-bs_x.options = {'newton_tol': 1e-16 if bs_x.surface.stellsym else 1e-14, 'newton_maxiter': 20, 'verbose': True}
-_res_ax = axis_x.run_code(CurveLength(axis_x.curve).J())
-_res_xp = xp_x.run_code(CurveLength(xp_x.curve).J())
-_res_bs = bs_x.run_code(_iota_Gs_in[0][0], _iota_Gs_in[0][1])
-print(f"config 1 (X-point, aux off): Boozer surface success={_res_bs['success']} iota={_res_bs['iota']:+.8f}, "
-      f"axis success={_res_ax['success']}, X-point success={_res_xp['success']}")
-if not (_res_bs['success'] and _res_ax['success'] and _res_xp['success']):
-    raise SystemExit("ERROR: could not re-solve configuration 1 of the double")
 
-# ---- config 2: the snowflake, modular coils with the SAME curves as config 1 ---------------
-coils = _fl.biotsavart.coils
-curves = [c.curve for c in coils]
-if len(coils) != len(coils_x) or any(a.curve is not b.curve for a, b in zip(coils_x, coils)):
-    raise SystemExit("ERROR: the two configurations of the loaded double do not share their coil curves")
-# designB (4 coils). DN (stellsym surface): 2 independent base coils -> [0, 2].
-# SN (rebuilt by sn_setup from bases 0 and 2): 2 -> [0, 1].
-base_curve_idx = [0, 2] if bs_x.surface.stellsym else [0, 1]
-base_curves = [curves[i] for i in base_curve_idx]
+def _leaf_currents(cur):
+    """ids of the plain Current objects a (possibly scaled) coil current is built on."""
+    return frozenset(id(o) for o in [cur] + list(cur.ancestors) if type(o).__name__ == 'Current')
 
-num_aux = (len(np.asarray(_fl.mu)) - 1) // 2   # from the design itself: mu = (I_1..I_N, r_1..r_N, Z)
-config['NUM_AUX'] = num_aux
-# The snowflake field line keeps the dependent / independent partition of its mu saved with the
-# design; it is re-solved (square Newton solve) so that its adjoint data is available.
-# (update, not replace: the constructor filled in the other options, e.g. target_monodromy)
-_fl.options.update({'newton_tol': 1e-12, 'newton_maxiter': 10, 'verbose': True,
-                    'monodromy_constraint': mon_constraint})
-_fl.need_to_run_code = True
-_res_fl = _fl.run_code(_fl.length if _fl.length is not None else CurveLength(_fl.curve).J())
-print(f"config 2 snowflake field line: success={_res_fl['success']} square={_res_fl['square']} iter={_res_fl['iter']} "
-      f"||r||_inf={np.linalg.norm(_res_fl['residual'], ord=np.inf):.3e}")
-if not (_res_fl['success'] and _res_fl['square']):
-    raise SystemExit("ERROR: could not re-solve the snowflake field line of the double (square solve)")
-_surf2 = _bs2.surface
-bs_s = BoozerSurface(SingularBiotSavart(_fl), _surf2, Volume(_surf2), bs_x.targetlabel,
-                     constraint_weight=bs_x.constraint_weight, options=dict(bs_x.options))
-_res_bs2 = bs_s.run_code(_iota_Gs_in[1][0], _iota_Gs_in[1][1])
-ax_s = PeriodicFieldLine(SingularBiotSavart(_fl), _ax2.curve, options=dict(axis_x.options))
-_res_ax2 = ax_s.run_code(CurveLength(_ax2.curve).J())
-print(f"config 2 (snowflake, {num_aux} aux coils) on SingularBiotSavart: Boozer surface success={_res_bs2['success']} "
-      f"iota={_res_bs2['iota']:+.8f}, axis success={_res_ax2['success']}")
-if not (_res_bs2['success'] and _res_ax2['success']) or _surf2.is_self_intersecting():
-    raise SystemExit("ERROR: could not rebuild the snowflake configuration on SingularBiotSavart")
 
-sing_fls = [_fl]
-boozer_surfaces = [bs_x, bs_s]
-axes = [axis_x, ax_s]
-xpoints = [xp_x, _fl]
+if IS_RESTART:
+    print("Running RISK-NEUTRAL double optimization (restart from a double design)")
+    print("================================")
+    # The input is a FINISHED double: design_double_final_<TAG>.json, with its two configurations
+    #   boozer surfaces [config 1 on its modular coils, config 2 on explicit modular + aux coils],
+    #   axes            [config 1, config 2 (explicit coils)],
+    #   x-points        [config 1 PeriodicFieldLine, config 2 SingularPeriodicFieldline (snowflake)].
+    # The optimization below works with the snowflake configuration on
+    # SingularBiotSavart(field line): its Boozer surface and axis are rebuilt on that field here.
+    (bs_x, _bs2), _iota_Gs_in, (axis_x, _ax2), (xp_x, _fl), sdf = data
+
+    # ---- config 1: hyperbolic X-point, aux coils off, its own modular currents ----------------
+    coils_x = bs_x.biotsavart.coils
+    axis_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+    xp_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+    bs_x.options = {'newton_tol': 1e-16 if bs_x.surface.stellsym else 1e-14, 'newton_maxiter': 20, 'verbose': False}
+    _res_ax = axis_x.run_code(CurveLength(axis_x.curve).J())
+    _res_xp = xp_x.run_code(CurveLength(xp_x.curve).J())
+    _res_bs = bs_x.run_code(_iota_Gs_in[0][0], _iota_Gs_in[0][1])
+    print(f"config 1 (X-point, aux off): Boozer surface success={_res_bs['success']} iota={_res_bs['iota']:+.8f}, "
+          f"axis success={_res_ax['success']}, X-point success={_res_xp['success']}")
+    if not (_res_bs['success'] and _res_ax['success'] and _res_xp['success']):
+        raise SystemExit("ERROR: could not re-solve configuration 1 of the double")
+
+    # ---- config 2: the snowflake, modular coils with the SAME curves as config 1 ---------------
+    coils = _fl.biotsavart.coils
+    curves = [c.curve for c in coils]
+    if len(coils) != len(coils_x) or any(a.curve is not b.curve for a, b in zip(coils_x, coils)):
+        raise SystemExit("ERROR: the two configurations of the loaded double do not share their coil curves")
+    # designB (4 coils). DN (stellsym surface): 2 independent base coils -> [0, 2].
+    # SN (rebuilt by sn_setup from bases 0 and 2): 2 -> [0, 1].
+    base_curve_idx = [0, 2] if bs_x.surface.stellsym else [0, 1]
+    base_curves = [curves[i] for i in base_curve_idx]
+
+    num_aux = (len(np.asarray(_fl.mu)) - 1) // 2   # from the design itself: mu = (I_1..I_N, r_1..r_N, Z)
+    config['NUM_AUX'] = num_aux
+    # The snowflake field line keeps the dependent / independent partition of its mu saved with the
+    # design; it is re-solved (square Newton solve) so that its adjoint data is available.
+    # (update, not replace: the constructor filled in the other options, e.g. target_monodromy)
+    _fl.options.update({'newton_tol': 1e-12, 'newton_maxiter': 10, 'verbose': False,
+                        'monodromy_constraint': mon_constraint})
+    _fl.need_to_run_code = True
+    _res_fl = _fl.run_code(_fl.length if _fl.length is not None else CurveLength(_fl.curve).J())
+    print(f"config 2 snowflake field line: success={_res_fl['success']} square={_res_fl['square']} iter={_res_fl['iter']} "
+          f"||r||_inf={np.linalg.norm(_res_fl['residual'], ord=np.inf):.3e}")
+    if not (_res_fl['success'] and _res_fl['square']):
+        raise SystemExit("ERROR: could not re-solve the snowflake field line of the double (square solve)")
+    _surf2 = _bs2.surface
+    bs_s = BoozerSurface(SingularBiotSavart(_fl), _surf2, Volume(_surf2), bs_x.targetlabel,
+                         constraint_weight=bs_x.constraint_weight, options=dict(bs_x.options))
+    _res_bs2 = bs_s.run_code(_iota_Gs_in[1][0], _iota_Gs_in[1][1])
+    ax_s = PeriodicFieldLine(SingularBiotSavart(_fl), _ax2.curve, options=dict(axis_x.options))
+    _res_ax2 = ax_s.run_code(CurveLength(_ax2.curve).J())
+    print(f"config 2 (snowflake, {num_aux} aux coils) on SingularBiotSavart: Boozer surface success={_res_bs2['success']} "
+          f"iota={_res_bs2['iota']:+.8f}, axis success={_res_ax2['success']}")
+    if not (_res_bs2['success'] and _res_ax2['success']) or _surf2.is_self_intersecting():
+        raise SystemExit("ERROR: could not rebuild the snowflake configuration on SingularBiotSavart")
+
+    sing_fls = [_fl]
+    if SNOW_ONLY:      # the snowflake configuration alone: config 1 of the double is left out
+        boozer_surfaces, axes, xpoints = [bs_s], [ax_s], [_fl]
+    else:
+        boozer_surfaces = [bs_x, bs_s]
+        axes = [axis_x, ax_s]
+        xpoints = [xp_x, _fl]
+else:
+    print("Running SINGULAR-POLISH Optimization")
+    print("================================")
+    boozer_surfaces = data[0]   # BoozerSurfaces
+    iota_Gs = data[1]           # (iota, G) pairs
+    axes = data[2]              # magnetic axis field lines
+    xpoints = data[3]           # X-point field lines
+    sdf = data[4]               # vessel signed-distance function
+
+    for ii, (boozer_surface, axis, xpoint) in enumerate(zip(boozer_surfaces, axes, xpoints)):
+        axis.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+        xpoint.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+        boozer_surface.options = {'newton_tol': 1e-16 if boozer_surface.surface.stellsym else 1e-14,
+                                  'newton_maxiter': 20, 'verbose': False}
+        axis.run_code(CurveLength(axis.curve).J())
+        xpoint.run_code(CurveLength(xpoint.curve).J())
+        boozer_surface.run_code(iota_Gs[ii][0], iota_Gs[ii][1])
+
+    # get the base curves
+    biotsavart = boozer_surfaces[0].biotsavart
+    coils = biotsavart.coils
+    curves = [c.curve for c in coils]
+    # designB (4 coils). DN (stellsym surface): 2 independent base coils -> [0, 2].
+    # SN (rebuilt by sn_setup from bases 0 and 2): 2 -> [0, 1].
+    base_curve_idx = [0, 2] if boozer_surfaces[0].surface.stellsym else [0, 1]
+    base_curves = [curves[i] for i in base_curve_idx]
+
+    # ---- config 1: the boozer_all device itself (hyperbolic X-point, aux coils off) ------------
+    # Same coil CURVES as the loaded device, but its OWN modular currents (independent design
+    # variables, started at the loaded values), and its own copies of the Boozer surface, the
+    # axis and the X-point, solved on those coils. The loaded objects are left untouched: the
+    # snowflake (config 2) is generated from them below, as in boozer_singular_opt.py.
+
+    # one own current per base coil; a symmetry partner takes its base coil's, with the same ratio
+    _own_currents = {}
+    for i in base_curve_idx:
+        _cur = coils[i].current
+        _own_currents[i] = ScaledCurrent(Current(float(_cur.get_value()) / float(_cur.scale)), float(_cur.scale))
+    coils_x = []
+    for j, c in enumerate(coils):
+        _match = [i for i in base_curve_idx if _leaf_currents(coils[i].current) == _leaf_currents(c.current)]
+        if len(_match) != 1:
+            raise SystemExit(f"cannot tell which base coil the current of modular coil {j} comes from")
+        _ratio = float(c.current.get_value()) / float(coils[_match[0]].current.get_value())
+        coils_x.append(Coil(c.curve, _own_currents[_match[0]] if _ratio == 1.0
+                            else ScaledCurrent(_own_currents[_match[0]], _ratio)))
+
+    _bs0, _s0 = boozer_surfaces[0], boozer_surfaces[0].surface
+    surf_x = SurfaceXYZTensorFourier(mpol=_s0.mpol, ntor=_s0.ntor, nfp=_s0.nfp, stellsym=_s0.stellsym,
+                                     quadpoints_phi=_s0.quadpoints_phi, quadpoints_theta=_s0.quadpoints_theta)
+    surf_x.x = _s0.x.copy()
+    bs_x = BoozerSurface(BiotSavart(coils_x), surf_x, Volume(surf_x), _bs0.targetlabel,
+                         constraint_weight=_bs0.constraint_weight, options=dict(_bs0.options))
+    _res_bs = bs_x.run_code(iota_Gs[0][0], iota_Gs[0][1])
+    axis_x = PeriodicFieldLine(BiotSavart(coils_x), _copy_curve(axes[0].curve), options=dict(axes[0].options))
+    _res_ax = axis_x.run_code(axes[0].res['length'])
+    xp_x = PeriodicFieldLine(BiotSavart(coils_x), _copy_curve(xpoints[0].curve), options=dict(xpoints[0].options))
+    _res_xp = xp_x.run_code(xpoints[0].res['length'])
+    print(f"config 1 (X-point, aux off): Boozer surface success={_res_bs['success']} iota={_res_bs['iota']:+.8f}, "
+          f"axis success={_res_ax['success']}, X-point success={_res_xp['success']}")
+    if not (_res_bs['success'] and _res_ax['success'] and _res_xp['success']):
+        raise SystemExit("ERROR: could not re-solve the boozer_all device on its own copy of the coils")
 
 # ALL thresholds AND weights are read STRAIGHT from the config yaml (boozer_all
 # wrote them); the polish does not set its own values. This includes the well
@@ -674,19 +793,301 @@ ARCLENGTH_WEIGHT = Weight(config['ARCLENGTH_WEIGHT'])
 # Aux-coil clearance threshold (an existing yaml may override it).
 config.setdefault('AUX_COIL_DISTANCE_THRESHOLD', 0.15)
 AUX_COIL_DISTANCE_THRESHOLD = config['AUX_COIL_DISTANCE_THRESHOLD']
+# Initial aux-coil radii, tried IN ORDER until the singular polish (stages 1-2) and the
+# total-field current continuation both succeed (see the placement loop below):
+#   'near_xpoint': radii centred on the X-point's mean major radius R_X, spaced by the
+#                  aux-to-aux clearance (so that constraint holds from the start), >= 0.1 m;
+#   'default':     linspace(0.5, 1.2), the original placement brought inside AUX_RADIUS_MAX.
+# On the 60 accepted devices of campaign 7456743, 'near_xpoint' brought 19 to the
+# optimization against 9 for 'default', and the two together 21.
+AUX_PLACEMENTS = ('near_xpoint', 'default')
+
+
+def _aux_radii0(placement, xpoint):
+    if placement == 'near_xpoint':
+        g = xpoint.curve.gamma()
+        R_X = float(np.mean(np.sqrt(g[:, 0] ** 2 + g[:, 1] ** 2)))
+        return np.maximum(R_X + AUX_COIL_DISTANCE_THRESHOLD * (np.arange(num_aux) - (num_aux - 1) / 2), 0.1)
+    return np.linspace(0.5, 1.2, num_aux)
+
+
 MU_NAMES = _mu_names(2 * num_aux + 1)
-# Number of dependent aux currents = number of monodromy constraints solved for: a stellsym
-# singular field line has one fewer identity constraint (M[0,0] == M[1,1]).
-SING_STELLSYM = bool(_fl.curve.stellsym)
+
+# A loaded X-point is always parametrized stellsym=False, but it may in fact be
+# stellarator symmetric, i.e. gamma(t) = diag(1, -1, -1) gamma(-t) for all t. If
+# so we project it onto a stellsym=True curve below so the singular field line is
+# exactly stellarator symmetric. STELLSYM_TOL is the defect threshold (relative
+# to the curve scale); the separation between a truly symmetric X-point (defect
+# ~ machine eps) and a single-null one (defect ~ O(0.1 m)) is enormous, so the
+# exact value is not delicate.
+STELLSYM_TOL = 1e-9
+
+
+def _stellsym_defect(curve):
+    """max_t | gamma(t) - diag(1, -1, -1) gamma(-t) |, which is ~0 iff the curve
+    is stellarator symmetric. gamma is 1-periodic in the parametrization, so
+    gamma(-t) is evaluated on a copy of the curve at the reflected quadpoints."""
+    qp = np.asarray(curve.quadpoints)
+    refl = CurveXYZFourierSymmetries(np.mod(-qp, 1.0), curve.order, curve.nfp,
+                                     curve.stellsym, ntor=curve.ntor)
+    refl.set_dofs(curve.get_dofs())
+    flip = np.array([1.0, -1.0, -1.0])
+    return float(np.max(np.abs(curve.gamma() - flip * refl.gamma())))
+
+
+# Number of dependent aux currents = number of monodromy constraints solved for:
+# 1 for 'trace'; for 'identity', 3 in general but only 2 when the singular field line
+# is stellarator symmetric (stellsym forces M[0,0] == M[1,1], so SingularPeriodicFieldline
+# drops the redundant second diagonal equation). From a stage-1 device, decide from the
+# X-points' stellsym defect -- the SAME test used per-X-point in the loop below -- assuming
+# (and enforcing) that all X-points share the same stellsym; from a finished double, read
+# it from the snowflake field line.
+def _is_stellsym(curve):
+    return _stellsym_defect(curve) <= STELLSYM_TOL * float(np.max(np.abs(curve.gamma())))
+
+
+if IS_RESTART:
+    SING_STELLSYM = bool(_fl.curve.stellsym)
+else:
+    _xp_stellsym = [_is_stellsym(xp.curve) for xp in xpoints]
+    if len(set(_xp_stellsym)) > 1:
+        raise SystemExit(f"X-points have mixed stellsym {_xp_stellsym}; N_DEP_CURRENTS "
+                         f"assumes a single value across all field lines.")
+    SING_STELLSYM = bool(_xp_stellsym[0])
 N_DEP_CURRENTS = 1 if mon_constraint == 'trace' else (2 if SING_STELLSYM else 3)
+if num_aux < N_DEP_CURRENTS:
+    raise SystemExit(f"NUM_AUX must be >= {N_DEP_CURRENTS} for the {mon_constraint!r} "
+                     f"constraint (stellsym={SING_STELLSYM}), got {num_aux}")
 DEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS)]
 INDEP_CURRENT_NAMES = [f'I{k+1}' for k in range(N_DEP_CURRENTS, num_aux)]
-_fixed = [nm for nm, free in zip(MU_NAMES, _fl.mu_free_status()) if not free]
-print(f"snowflake mu: dependent (fixed) {_fixed}; expected {DEP_CURRENT_NAMES}")
-if _fixed != DEP_CURRENT_NAMES:
-    raise SystemExit("ERROR: the dependent aux currents of the loaded snowflake are not the expected ones")
 
-FIELDS = [lambda: BiotSavart(coils_x)] + [(lambda fl=fl: SingularBiotSavart(fl)) for fl in sing_fls]
+
+def _singular_polish(idx, xpoint, boozer_surface, radii0):
+    """Singular polish (stages 1-2) of one X-point with the aux coils started at radii0:
+    returns the polished SingularPeriodicFieldline, or None if stage 1 or 2 fails."""
+    mu0 = np.concatenate([np.zeros(num_aux), radii0, [max_Z + AUX_COIL_DISTANCE_THRESHOLD]])
+    # The polish gets its OWN copy of the X-point curve: the plain `xpoint`
+    # field line keeps re-solving its curve every objective evaluation, so
+    # sharing dofs would have the two Newton solvers fight each other.
+    #
+    # The loaded X-point is always stellsym=False. If it is in fact stellarator
+    # symmetric, project it onto a stellsym=True curve so the singular field line
+    # is exactly stellarator symmetric: the stellsym=True parametrization keeps
+    # only the symmetric Fourier coefficients (xc, ys, zs); copying those by name
+    # drops the antisymmetric ones (xs, yc, zc), which are zero up to `defect`.
+    xc = xpoint.curve
+    defect = _stellsym_defect(xc)
+    scale = float(np.max(np.abs(xc.gamma())))
+    if defect <= STELLSYM_TOL * scale:
+        fl_curve = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, True, ntor=xc.ntor)
+        sym_names = ([f'xc({i})' for i in range(xc.order + 1)]
+                     + [f'ys({i})' for i in range(1, xc.order + 1)]
+                     + [f'zs({i})' for i in range(1, xc.order + 1)])
+        for nm in sym_names:
+            fl_curve.set(nm, xc.get(nm))
+        print(f"[idx={idx}] X-point IS stellarator symmetric "
+              f"(defect={defect:.2e} <= {STELLSYM_TOL:.0e}*scale={STELLSYM_TOL * scale:.2e}); "
+              f"projected onto a stellsym=True singular field line")
+    else:
+        fl_curve = CurveXYZFourierSymmetries(xc.quadpoints, xc.order, xc.nfp, xc.stellsym, ntor=xc.ntor)
+        fl_curve.set_dofs(xc.get_dofs())
+        print(f"[idx={idx}] X-point is NOT stellarator symmetric "
+              f"(defect={defect:.2e} > {STELLSYM_TOL:.0e}*scale={STELLSYM_TOL * scale:.2e}); "
+              f"keeping the stellsym=False parametrization")
+    fl = SingularPeriodicFieldline(
+        BiotSavart(boozer_surface.biotsavart.coils), fl_curve, mu0,
+        options={'newton_tol': 1e-12, 'newton_maxiter': 10, 'verbose': False,
+                 'monodromy_constraint': mon_constraint},
+        stellsym_aux=boozer_surface.surface.stellsym)
+
+    # (1) initial polish: ALL aux currents and radii are DEPENDENT (fixed),
+    # z is independent (held at max_Z + AUX_COIL_DISTANCE_THRESHOLD). Under-determined -> pinv Newton.
+    for k in range(num_aux):
+        fl.fix(f'I{k+1}')
+        fl.fix(f'r{k+1}')
+    # Stage 1 starts far from the polished state: give it 40 Newton iterations (was 10)
+    # and the damped (line-search) step, so full steps cannot throw the field line away;
+    # both options are restored right after, for stage 2 and the optimization.
+    _maxiter0 = fl.options['newton_maxiter']
+    fl.options['newton_maxiter'] = 40
+    fl.options['newton_linesearch'] = True
+    res = fl.run_code(CurveLength(fl_curve).J())
+    fl.options['newton_maxiter'] = _maxiter0
+    fl.options.pop('newton_linesearch', None)
+    print(f"[idx={idx}] stage-1 polish (all I, r dependent; pinv): success={res['success']}  "
+          f"iter={res['iter']}  square={res['square']}  "
+          f"||r||_inf={np.linalg.norm(res['residual'], ord=np.inf):.3e}")
+    if not res['success']:
+        print(f"[idx={idx}] stage-1 singular polish failed", flush=True)
+        return None
+
+    # (2) re-partition: unfix the currents, radii and z, then fix only the
+    # dependent currents (1 for trace, 3 for identity). Square -> LU Newton.
+    fl.unfix_all()
+    for name in DEP_CURRENT_NAMES:
+        fl.fix(name)
+    fl.need_to_run_code = True
+    res = fl.run_code(res['length'])
+    print(f"[idx={idx}] stage-2 polish (dependent: {DEP_CURRENT_NAMES}; LU): success={res['success']}  "
+          f"iter={res['iter']}  square={res['square']}  "
+          f"||r||_inf={np.linalg.norm(res['residual'], ord=np.inf):.3e}")
+    if not (res['success'] and res['square']):
+        print(f"[idx={idx}] stage-2 (square) singular polish failed", flush=True)
+        return None
+    print(f"[idx={idx}] mu: " + '  '.join(
+        f"{nm}={v * _CURRENT_SCALE:+.4e}A" if k < num_aux else f"{nm}={v:+.4f}"
+        for k, (nm, v) in enumerate(zip(MU_NAMES, fl.mu))))
+    return fl
+
+
+# Recompute the Boozer surfaces and magnetic axes in the TOTAL field (modular +
+# auxiliary): wrap each polished singular field line in a SingularBiotSavart and
+# REPLACE the loaded (modular-field) boozer_surfaces / axes with ones solved on
+# the total field. Every field-dependent objective below is then built against the
+# total field too. Each object that drives its own set_points gets its OWN
+# SingularBiotSavart(fl) wrapper (all sharing fl), mirroring the original
+# per-objective BiotSavart(coils) so their point caches stay independent.
+#
+# CURRENT CONTINUATION: instead of one Newton solve from the modular-field surface
+# straight into the full aux field, ramp the aux currents s*I_k, s: 0 -> 1, re-solving
+# the Boozer surface (target volume) and the magnetic axis at each step from the
+# previous converged state. Adaptive step (x1.5 on success, up to S_CONT_DSMAX; halve
+# and restore on failure). A step is accepted only if the surface converges, does not
+# self-intersect (checked at phi = 0) and the axis converges. If the step falls below
+# S_CONT_DSMIN the target-volume surface is lost: report s* and stop.
+S_CONT_DS0, S_CONT_DSMAX, S_CONT_DSMIN = 0.05, 0.25, 1e-4
+
+
+def _self_intersecting(surf):
+    try:
+        return surf.is_self_intersecting()
+    except Exception:   # raised when a cross section folds back on itself
+        return True
+
+
+def _scaled_aux_field(fl, s):
+    """Modular + s * aux field: the aux coils of SingularBiotSavart(fl) (same curves
+    and currents, synced from fl.mu, stellsym partners included), each current
+    scaled by s."""
+    sbs = SingularBiotSavart(fl)
+    aux = [Coil(c.curve, ScaledCurrent(c.current, s)) for c in sbs._aux_bs.coils]
+    return BiotSavart(list(fl.biotsavart.coils) + aux)
+
+
+def _current_continuation(idx, boozer_surface, axis, fl):
+    """Current continuation of the Boozer surface and magnetic axis into the total field
+    of the polished field line fl: returns (BoozerSurface, PeriodicFieldLine) solved on
+    SingularBiotSavart(fl), or None if the target-volume surface is lost."""
+    surf = boozer_surface.surface
+    # state = (surface dofs, iota, G, axis dofs, axis length) at the last accepted s
+    state = (surf.get_dofs().copy(), boozer_surface.res['iota'], boozer_surface.res['G'],
+             axis.curve.get_dofs().copy(), axis.res['length'])
+    s, ds = 0.0, S_CONT_DS0
+    print(f"[idx={idx}] current continuation: s=0  iota={state[1]:+.8f}  G={state[2]:.8e}", flush=True)
+    while s < 1.0:
+        st = min(s + ds, 1.0)
+        surf.set_dofs(state[0])
+        axis.curve.set_dofs(state[3])
+        # the final step (s = 1) uses SingularBiotSavart itself
+        field = SingularBiotSavart(fl) if st == 1.0 else _scaled_aux_field(fl, st)
+        nbs = BoozerSurface(field, surf, boozer_surface.label, boozer_surface.targetlabel,
+                            constraint_weight=boozer_surface.constraint_weight,
+                            options=dict(boozer_surface.options))
+        bs_res = nbs.run_code(state[1], state[2])
+        surf_ok = bool(bs_res['success']) and not _self_intersecting(surf)
+        ax_ok = False
+        if surf_ok:
+            nax = PeriodicFieldLine(SingularBiotSavart(fl) if st == 1.0 else _scaled_aux_field(fl, st),
+                                    axis.curve, options=axis.options)
+            ax_res = nax.run_code(state[4])
+            ax_ok = bool(ax_res['success'])
+        if surf_ok and ax_ok:
+            s = st
+            state = (surf.get_dofs().copy(), bs_res['iota'], bs_res['G'],
+                     axis.curve.get_dofs().copy(), ax_res['length'])
+            print(f"[idx={idx}]   s={s:.5f} ok    it={bs_res['iter']:2d}  iota={bs_res['iota']:+.8f}  "
+                  f"G={bs_res['G']:.8e}", flush=True)
+            ds = min(1.5 * ds, S_CONT_DSMAX)
+        else:
+            ds /= 2
+            why = 'axis did not converge' if surf_ok else (
+                'surface self-intersecting' if bs_res['success'] else 'surface did not converge')
+            print(f"[idx={idx}]   s={st:.5f} FAIL  ({why}); ds -> {ds:.2e}", flush=True)
+            if ds < S_CONT_DSMIN:
+                surf.set_dofs(state[0])
+                axis.curve.set_dofs(state[3])
+                print(f"[idx={idx}] total-field BoozerSurface lost at s*={s:.5f} "
+                      f"(last converged iota={state[1]:+.8f})", flush=True)
+                return None
+    # s = 1 reached: the last accepted solves are on SingularBiotSavart(fl)
+    print(f"[idx={idx}] current continuation reached s=1: iota={state[1]:+.8f}", flush=True)
+    return nbs, nax
+
+
+if IS_RESTART:
+    _fixed = [nm for nm, free in zip(MU_NAMES, _fl.mu_free_status()) if not free]
+    print(f"snowflake mu: dependent (fixed) {_fixed}; expected {DEP_CURRENT_NAMES}")
+    if _fixed != DEP_CURRENT_NAMES:
+        raise SystemExit("ERROR: the dependent aux currents of the loaded snowflake are not the expected ones")
+else:
+    print("""
+################################################################################
+### Singular polish: SingularPeriodicFieldline per X-point ###############
+################################################################################
+""")
+    # Auxiliary-coil parameters mu = (I_1..I_N, r_1..r_N, Z) become local dofs of
+    # the SingularPeriodicFieldline. FIXED mu dofs are DEPENDENT (solved by
+    # the Newton polish), FREE mu dofs are INDEPENDENT design variables.
+    max_Z = np.max([np.abs(c.curve.gamma()[:, 2]) for c in boozer_surfaces[0].biotsavart.coils])
+    # Aux-coil placement loop: for each X-point, try AUX_PLACEMENTS in order and keep the
+    # first one whose singular polish (stages 1-2) AND current continuation both succeed.
+    # The Boozer surface and the axis are put back in their modular-field state before
+    # every attempt (a failed continuation leaves them at its last accepted s).
+    sing_fls, new_boozer_surfaces, new_axes, aux_placements = [], [], [], []
+    for idx, (xpoint, boozer_surface, axis) in enumerate(zip(xpoints, boozer_surfaces, axes)):
+        surf_dofs0 = boozer_surface.surface.get_dofs().copy()
+        axis_dofs0 = axis.curve.get_dofs().copy()
+        for placement in AUX_PLACEMENTS:
+            boozer_surface.surface.set_dofs(surf_dofs0)
+            axis.curve.set_dofs(axis_dofs0)
+            radii0 = _aux_radii0(placement, xpoint)
+            print(f"[idx={idx}] aux placement '{placement}': initial radii = "
+                  + ", ".join(f"{r:.3f}" for r in radii0), flush=True)
+            fl = _singular_polish(idx, xpoint, boozer_surface, radii0)
+            if fl is None:
+                print(f"[idx={idx}] aux placement '{placement}' failed (singular polish)", flush=True)
+                continue
+            solved = _current_continuation(idx, boozer_surface, axis, fl)
+            if solved is None:
+                print(f"[idx={idx}] aux placement '{placement}' failed (surface lost)", flush=True)
+                continue
+            print(f"[idx={idx}] aux placement '{placement}' kept", flush=True)
+            break
+        else:
+            print(f"ERROR: idx={idx}: no aux placement in {AUX_PLACEMENTS} gave a polished X-point "
+                  f"with a total-field Boozer surface")
+            raise SystemExit(1)
+        sing_fls.append(fl)
+        new_boozer_surfaces.append(solved[0])
+        new_axes.append(solved[1])
+        aux_placements.append(placement)
+    boozer_surfaces, axes = new_boozer_surfaces, new_axes
+    config['AUX_PLACEMENT'] = aux_placements   # recorded in the output yaml
+
+    # ---- the two configurations: config 1 (X-point, aux off) then config 2 (snowflake) ---------
+    # From here on the POLISHED singular field lines stand in for the X-points of config 2
+    # (vessel penalties, meanZ, tangent maps, callback, snapshots/restores, VTK dumps and
+    # saves). boozer_surfaces / axes / xpoints hold both configurations; sing_fls keeps the
+    # singular field line(s) of config 2 only (aux-coil penalties, discriminant).
+    # --target snowflake: the snowflake configuration alone (config 1, built above, is left out)
+    if SNOW_ONLY:
+        xpoints = sing_fls
+    else:
+        boozer_surfaces = [bs_x] + boozer_surfaces
+        axes = [axis_x] + axes
+        xpoints = [xp_x] + sing_fls
+
+FIELDS = ([] if SNOW_ONLY else [lambda: BiotSavart(coils_x)]) + [(lambda fl=fl: SingularBiotSavart(fl)) for fl in sing_fls]
 iota_Gs = [[bs.res['iota'], bs.res['G']] for bs in boozer_surfaces]
 IOTAS_TARGET = list(IOTAS_TARGET) * len(boozer_surfaces)   # the yaml target, for each configuration
 # config 1: tr M >= TRACE_MIN; --trace-min, else the bound recorded by a previous run of this
@@ -695,8 +1096,12 @@ IOTAS_TARGET = list(IOTAS_TARGET) * len(boozer_surfaces)   # the yaml target, fo
 TRACE_MIN = (args.trace_min if args.trace_min is not None
              else float(config.get('TRACE_MIN', 2.0 + float(config['MONODROMY_THRESHOLD']))))
 config['TRACE_MIN'] = float(TRACE_MIN)
-print(f"two configurations: config 1 X-point (aux off, tr M >= {TRACE_MIN}), config 2 snowflake "
-      f"({num_aux} aux coils); iota targets {IOTAS_TARGET}")
+if SNOW_ONLY:
+    print(f"--target snowflake: ONE configuration, the snowflake ({num_aux} aux coils); "
+          f"iota targets {IOTAS_TARGET}")
+else:
+    print(f"two configurations: config 1 X-point (aux off, tr M >= {TRACE_MIN}), config 2 snowflake "
+          f"({num_aux} aux coils); iota targets {IOTAS_TARGET}")
 
 # Snapshot the INITIAL device WITH the auxiliary coils, BEFORE any design polishing.
 # This device carries the aux coils but has not been optimized, so it may not satisfy
@@ -764,7 +1169,9 @@ else:
 # the unfolding constant C over the Gaussian-process perturbations of the modular coils, in the
 # (R, Z) section at phi = 0, computed exactly (ExactMeanUnfoldingC: no realizations). One-sided
 # quadratic penalty with its own escalating weight, like the other inequality constraints.
-EC_WEIGHT = Weight(config.setdefault('EC_WEIGHT', 1.0))
+# Without --ec-max there is no bound: E[C] is only reported (tables, summary), the penalty is
+# not built and nothing of it enters the objective.
+EC_WEIGHT = Weight(config.setdefault('EC_WEIGHT', 10.0)) if EC_ENABLED else Weight(0.0)
 # --ec-section: the bound applies to E[C] in ONE section (the fraction T of the full turn of the
 # snowflake field line, default 0: phi = 0) or to its MEAN over the sections. Recorded in the
 # yaml, so that a restart keeps the choice.
@@ -781,13 +1188,16 @@ EC = ExactMeanUnfoldingC(sing_fls[0], sing_fls[0].biotsavart,
                          length_scale=float(args.risk_length_scale), frame='RZ', phi0=EC_T)
 EC_PHI = PhiMeanUnfoldingC(EC)
 EC_OBJ = EC_PHI if EC_USE_MEAN else EC
-J_EC = QuadraticPenalty(EC_OBJ, EC_MAX, 'max')
+J_EC = QuadraticPenalty(EC_OBJ, EC_MAX, 'max') if EC_ENABLED else None
 _C0 = EC.values()
 print(f"E[C], exact expectation over the GP perturbations (L = {args.risk_length_scale}), in the section "
       f"t = {EC_T:g} at the start: {np.nanmean(_C0):.6f}; std[C] = {EC.std():.5f}; "
       f"covariance of D_sigma = {EC.sigma().ravel()}; "
       f"{int(np.isfinite(_C0).sum())} of {len(_C0)} directions with a real split")
-print(f"bound E[C] <= {EC_MAX} applied to: {EC_LABEL}")
+if EC_ENABLED:
+    print(f"bound E[C] <= {EC_MAX} applied to: {EC_LABEL}")
+else:
+    print("no bound on E[C] (--ec-max not given): E[C] is reported only")
 
 
 def ec_phi_stats():
@@ -929,12 +1339,15 @@ _force_reg = regularization_circ(COIL_MINOR_RADIUS)
 force_targets_x = [RegularizedCoil(coils_x[i].curve, coils_x[i].current, _force_reg) for i in base_curve_idx]
 force_sources_x = [c for j, c in enumerate(coils_x) if j not in base_curve_idx]
 J_force_x = LpCurveForce(force_targets_x, force_sources_x, p=2, threshold=FORCE_THRESHOLD / 1e6)
-J_force = J_force_x + sum(force_objs)
+J_force = sum(force_objs) if SNOW_ONLY else J_force_x + sum(force_objs)
 
 
 def max_coil_force():
     """Largest modular-coil Lorentz force per unit length |dF/dl| (N/m) over both
-    configurations (config 2: total field; config 1: modular field)."""
+    configurations (config 2: total field; config 1: modular field), or over the snowflake
+    configuration alone (--target snowflake)."""
+    if SNOW_ONLY:
+        return max(fo.max_force() for fo in force_objs)
     f_x = max(float(np.max(np.linalg.norm(t.force([c for j, c in enumerate(coils_x) if j != i]), axis=1)))
               for t, i in zip(force_targets_x, base_curve_idx))
     return max(f_x, max(fo.max_force() for fo in force_objs))
@@ -946,6 +1359,8 @@ def max_coil_force():
 # through DependentMu (their value is an implicit function of the design vars, so
 # the gradient must flow through the adjoint); independent currents are free mu
 # dofs handled directly by MuBound. (mu units: EPS/_CURRENT_SCALE; EPS is in A.)
+if args.aux_current_max is not None:       # --aux-current-max wins over the yaml
+    config['AUX_CURRENT_EPS'] = float(args.aux_current_max)
 config.setdefault('AUX_CURRENT_EPS', 5e3)  # Amperes
 config.setdefault('AUX_CURRENT_WEIGHT', 1e2)
 AUX_CURRENT_EPS = config['AUX_CURRENT_EPS']
@@ -1064,13 +1479,19 @@ else:
 # X-point field line, weight MONODROMY_WEIGHT read from the yaml and escalated below), here
 # with mtype='trace_min': penalty max(TRACE_MIN - tr M, 0)**2, zero once the bound holds.
 config.setdefault('MONODROMY_WEIGHT', 1e-2)
-MONODROMY_WEIGHT = Weight(config['MONODROMY_WEIGHT'])
-trace_tmo = TangentMap(xp_x, BiotSavart(coils_x), TRACE_MIN, mtype='trace_min')
-J_trace = Monodromy(trace_tmo)
+if SNOW_ONLY:     # no config 1: no X-point trace, and no weight to escalate
+    MONODROMY_WEIGHT = Weight(0.0)
+    trace_tmo, J_trace = None, None
+else:
+    MONODROMY_WEIGHT = Weight(config['MONODROMY_WEIGHT'])
+    trace_tmo = TangentMap(xp_x, BiotSavart(coils_x), TRACE_MIN, mtype='trace_min')
+    J_trace = Monodromy(trace_tmo)
 
 
 def xpoint_trace():
-    """tr M of config 1's X-point."""
+    """tr M of config 1's X-point (nan with --target snowflake: there is no config 1)."""
+    if SNOW_ONLY:
+        return float('nan')
     return float(np.trace(np.asarray(trace_tmo.matrix)))
 
 
@@ -1098,16 +1519,19 @@ JF = (J_nonQSRatio
     + AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance
     + AUX_RADIUS_WEIGHT * J_aux_radius
     + FORCE_WEIGHT * J_force
-    + MONODROMY_WEIGHT * J_trace
     )
+# config 1 X-point trace bound (not with --target snowflake: there is no config 1)
+if not SNOW_ONLY:
+    JF = JF + MONODROMY_WEIGHT * J_trace
 # On-axis iota constraint (only for --AR 1/2 devices).
 if axis_iota_enabled:
     JF = JF + AXIS_IOTA_WEIGHT * J_axis_iota
 # Near-axis elongation bound of both configurations (only when the yaml sets ELONGATION_MAX).
 if elongation_enabled:
     JF = JF + ELONGATION_WEIGHT * J_elongation
-# Risk-neutral bound E[C] <= EC_MAX on the unfolding constant of the snowflake.
-JF = JF + EC_WEIGHT * J_EC
+# Risk-neutral bound E[C] <= EC_MAX on the unfolding constant of the snowflake (--ec-max).
+if EC_ENABLED:
+    JF = JF + EC_WEIGHT * J_EC
 
 # Snowflake discriminant constraint Delta > DISCRIMINANT_THRESHOLD (--discriminant 1, identity only).
 if discriminant_enabled:
@@ -1136,7 +1560,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'aux coil distance': AUX_COIL_DISTANCE_WEIGHT * J_aux_coil_distance,
         'aux radius': AUX_RADIUS_WEIGHT * J_aux_radius,
         'max force': FORCE_WEIGHT * J_force,
-        'xpoint trace': MONODROMY_WEIGHT * J_trace,
+        **({} if SNOW_ONLY else {'xpoint trace': MONODROMY_WEIGHT * J_trace}),
         }
 
 # Weight object backing each penalty above, keyed identically. 'nonQS' has an
@@ -1164,7 +1588,7 @@ penalty_weights = {
         'aux coil distance': AUX_COIL_DISTANCE_WEIGHT,
         'aux radius': AUX_RADIUS_WEIGHT,
         'max force': FORCE_WEIGHT,
-        'xpoint trace': MONODROMY_WEIGHT,
+        **({} if SNOW_ONLY else {'xpoint trace': MONODROMY_WEIGHT}),
         }
 
 states = {
@@ -1188,8 +1612,9 @@ if elongation_enabled:
     penalties['elongation'] = ELONGATION_WEIGHT * J_elongation
     penalty_weights['elongation'] = ELONGATION_WEIGHT
 # the risk-neutral bound on E[C] (its value is printed in the callback table, see below)
-penalties['E[C]'] = EC_WEIGHT * J_EC
-penalty_weights['E[C]'] = EC_WEIGHT
+if EC_ENABLED:
+    penalties['E[C]'] = EC_WEIGHT * J_EC
+    penalty_weights['E[C]'] = EC_WEIGHT
 
 # Snowflake discriminant constraint enters the objective / escalation / weight-scaling
 # tables ONLY when enabled (--discriminant 1, identity polish). Its VALUE is still
@@ -1237,8 +1662,24 @@ xpoints_res_list = [{'xdofs': xpoint.curve.x.copy() , 'length': xpoint.res['leng
 # dependent mu each evaluation; snapshot/restore them like the axis/x-point.
 sing_res_list = [{'xdofs': fl.curve.x.copy(), 'mu': fl.mu.copy(), 'length': fl.res['length']} for fl in sing_fls]
 dat_dict = {'iter':0, 'J': JF.J(), 'dJ': JF.dJ().copy(), 'x': JF.x.copy()}
+# last successful evaluation of fun(): its point and its gradient, so that callback() does not
+# recompute the gradient at that same point
+_last_eval = {}
 
-def callback(dofs):
+
+def _add_ec_rows(table):
+    """Rows of E[C] of the per-iteration tables: E[C] in the section when it carries the bound,
+    and always its mean, minimum and maximum over the sections."""
+    _bnd = f'bound: <= {EC_MAX}' if EC_ENABLED else 'not bounded'
+    if EC_ENABLED and not EC_USE_MEAN:    # with the bound on the mean, only the row of the sections is shown
+        _Cs = EC.values()
+        table.add_row(f'E[C] unfolding (t={EC_T:g})', f'{np.nanmean(_Cs):.5f}  min {np.nanmin(_Cs):.4f}  max {np.nanmax(_Cs):.4f}  '
+                      f'({int(np.isfinite(_Cs).sum())} of {len(_Cs)} directions with a real split; {_bnd})')
+    table.add_row('E[C] over the sections', 'mean %.5f  min %.4f  max %.4f' % ec_phi_stats()
+                  + f'  ({"mean " + _bnd if EC_USE_MEAN and EC_ENABLED else "not bounded"})')
+
+
+def callback(dofs, full=False):
     for res, boozer_surface in zip(res_list, boozer_surfaces):
         res['sdofs'] = boozer_surface.surface.x.copy()
         res['iota'] =  boozer_surface.res['iota']
@@ -1258,7 +1699,13 @@ def callback(dofs):
 
     dat_dict['x'] = JF.x.copy()
     dat_dict['J'] = JF.J()
-    dat_dict['dJ'] = JF.dJ().copy()
+    # same point AND same objective value: the weights may have changed since fun() ran (the
+    # pre-scaling, an escalation), and its gradient is then stale
+    if ('x' in _last_eval and _last_eval['J'] == dat_dict['J']
+            and np.array_equal(_last_eval['x'], dat_dict['x'])):
+        dat_dict['dJ'] = _last_eval['grad'].copy()     # the gradient fun() computed at this point
+    else:
+        dat_dict['dJ'] = JF.dJ().copy()
 
     currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
     kappas = [np.max(c.kappa()) for c in base_curves]
@@ -1268,6 +1715,16 @@ def callback(dofs):
     table1.add_row(*['iter', 'J', 'dJ', 'dist'])
     table1.add_row(*[f'{dat_dict["iter"]}', f'{dat_dict["J"]:.2e}', f'{np.max(np.abs(dat_dict["dJ"])):.2e}', f'{dist:.2e}'])
     console.print(table1)
+
+    # The two full tables (every penalty, every state) are printed every 10 iterations, with
+    # the saves at the end of this function, and when asked (full=True). In between, only the
+    # line above and the rows of E[C].
+    if not full and dat_dict["iter"] % 10 != 0:
+        table2 = Table(expand=False, show_header=False)
+        _add_ec_rows(table2)
+        console.print(table2)
+        dat_dict["iter"] += 1
+        return
 
     console = Console(width=250)
     # Split the penalties over two stacked tables so the many columns don't get
@@ -1289,13 +1746,7 @@ def callback(dofs):
         _el = [e.J() for e in ELONGATION_LIST]
         table2.add_row('axis elongation max', ' '.join([f'{max(_el[k:k+N_ELONGATION]):.4f}' for k in range(0, len(_el), N_ELONGATION)])
                        + f'  (bound: <= {ELONGATION_MAX})')
-    _Cs = EC.values()
-    _bnd = f'bound: <= {EC_MAX}'
-    if not EC_USE_MEAN:      # with the bound on the mean, only the row of the sections is shown
-        table2.add_row(f'E[C] unfolding (t={EC_T:g})', f'{np.nanmean(_Cs):.5f}  min {np.nanmin(_Cs):.4f}  max {np.nanmax(_Cs):.4f}  '
-                       f'({int(np.isfinite(_Cs).sum())} of {len(_Cs)} directions with a real split; {_bnd})')
-    table2.add_row('E[C] over the sections', 'mean %.5f  min %.4f  max %.4f' % ec_phi_stats()
-                   + f'  ({"mean " + _bnd if EC_USE_MEAN else "not bounded"})')
+    _add_ec_rows(table2)
     table2.add_row('xpoint_top(0)', ' '.join([f'{np.array2string(xpoint.curve.gamma()[0])}' for xpoint in xpoints]))
     # auxiliary-coil parameters, per fl: summarize the currents (scaled to
     # Amperes) by min/max, separated into DEPENDENT (solved, bounded to
@@ -1315,7 +1766,8 @@ def callback(dofs):
                        '  '.join([f'r{k+1}={radii[k]:+.4f}' for k in range(num_aux)] + [f'z={z:+.4f}']))
     table2.add_row('singular polish monodromy', ' '.join(
         [f'{np.array2string(np.asarray(fl.res["monodromy_matrix"]))}' for fl in sing_fls]))
-    table2.add_row('config 1 X-point tr M', f'{xpoint_trace():.6f}  (bound: >= {TRACE_MIN})')
+    if not SNOW_ONLY:
+        table2.add_row('config 1 X-point tr M', f'{xpoint_trace():.6f}  (bound: >= {TRACE_MIN})')
     # snowflake discriminant Delta per singular field line (value only; constrained
     # to Delta > DISCRIMINANT_THRESHOLD in the identity polish).
     table2.add_row('snowflake discriminant', ' '.join([f'{d.value():.4e}' for d in discriminants]))
@@ -1467,6 +1919,9 @@ def fun(dofs):
         K = max(abs(gdx) / (BARRIER_RETREAT * nrm2), 1.0)
         return f0 + gdx + 0.5 * K * nrm2, g0 + K * dx
 
+    _last_eval['x'] = np.array(dofs, copy=True)
+    _last_eval['J'] = J
+    _last_eval['grad'] = np.array(grad, copy=True)
     return J, grad
 
 print("""
@@ -1517,7 +1972,7 @@ MAXITER = int(args.maxiter)   # --maxiter, default 1000
 N_POLISH_STAGES = int(args.stages)   # --stages, default 10
 
 dofs = JF.x.copy()
-callback(dofs)
+callback(dofs, full=True)
 
 for j in range(N_POLISH_STAGES):
     dat_dict["iter"] = 0
@@ -1541,7 +1996,7 @@ for j in range(N_POLISH_STAGES):
 
     print(msg)
     J0, dJ0 = fun(dofs)
-    callback(dofs)
+    callback(dofs, full=True)
 
     # MODULAR coil currents (A): bounded by CURRENT_THRESHOLD; weight CURRENT_WEIGHT.
     modular_currents = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value())
@@ -1565,7 +2020,10 @@ for j in range(N_POLISH_STAGES):
     # sections, --ec-section; a direction without a real split makes it undefined and counts
     # as a full violation, so that such a design is never reported in spec)
     ec_value = ec_bounded_value()
-    ec_err = max(ec_value - EC_MAX, 0.)/EC_MAX if np.isfinite(ec_value) else 1.0
+    if not EC_ENABLED:
+        ec_err = 0.0      # no bound: E[C] is reported only
+    else:
+        ec_err = max(ec_value - EC_MAX, 0.)/EC_MAX if np.isfinite(ec_value) else 1.0
     mr_err =max(np.abs(mr.J()-MR_TARGET)/MR_TARGET for mr in mrs)
     clen_err = max([max(Jl.J() - LENGTH_THRESHOLD, 0)/np.abs(LENGTH_THRESHOLD) for Jl in Jls])
 
@@ -1733,7 +2191,7 @@ for j in range(N_POLISH_STAGES):
             DISCRIMINANT_WEIGHT *= 10
             print("SNOWFLAKE DISCRIMINANT ERROR", discriminant_err)
     # config 1 X-point must stay hyperbolic: relative shortfall of tr M below TRACE_MIN
-    trace_err = max(TRACE_MIN - xpoint_trace(), 0.) / TRACE_MIN
+    trace_err = 0.0 if SNOW_ONLY else max(TRACE_MIN - xpoint_trace(), 0.) / TRACE_MIN
     if trace_err > 0.001 and MONODROMY_WEIGHT.value != 0.:
         MONODROMY_WEIGHT *= 10
         print("XPOINT TRACE ERROR", trace_err)
@@ -1785,7 +2243,8 @@ for j in range(N_POLISH_STAGES):
     if elongation_enabled:
         config['ELONGATION_WEIGHT'] = ELONGATION_WEIGHT.value
     # escalated weight of the bound on E[C] (the bound itself, EC_MAX, is recorded at start-up)
-    config['EC_WEIGHT'] = EC_WEIGHT.value
+    if EC_ENABLED:
+        config['EC_WEIGHT'] = EC_WEIGHT.value
     config['MONODROMY_WEIGHT'] = MONODROMY_WEIGHT.value
     config['MAJOR_RADIUS_WEIGHT'] = MAJOR_RADIUS_WEIGHT.value
     config['BOOZER_RESIDUAL_WEIGHT'] = BOOZER_RESIDUAL_WEIGHT.value
@@ -1870,7 +2329,8 @@ final_metrics = {
 # (or config 1's value for the descriptive aspect_ratio). Added here: the trace bound of
 # config 1's X-point, which is gated, and descriptive per-configuration values
 # (config 1 = X-point, aux off; config 2 = snowflake).
-final_metrics['xpoint_trace'] = (xpoint_trace(), TRACE_MIN, trace_err if MONODROMY_WEIGHT.value != 0. else 0.0)
+if not SNOW_ONLY:
+    final_metrics['xpoint_trace'] = (xpoint_trace(), TRACE_MIN, trace_err if MONODROMY_WEIGHT.value != 0. else 0.0)
 # Near-axis elongation bound (only when the yaml sets ELONGATION_MAX): the largest elongation
 # over the N_ELONGATION angles of both configurations; its relative excess feeds the 0.1% gate.
 if elongation_enabled:
@@ -1878,7 +2338,10 @@ if elongation_enabled:
 # Risk-neutral bound on the unfolding constant of the snowflake: the bounded E[C] (exact
 # expectation over the Gaussian-process perturbations; one section or the mean over the sections,
 # --ec-section) against EC_MAX; its relative excess feeds the 0.1% gate.
-final_metrics['unfolding_EC'] = (ec_value, EC_MAX, ec_err if EC_WEIGHT.value != 0. else 0.0)
+if EC_ENABLED:
+    final_metrics['unfolding_EC'] = (ec_value, EC_MAX, ec_err if EC_WEIGHT.value != 0. else 0.0)
+else:
+    final_metrics['unfolding_EC'] = (ec_value, None, None)   # no bound: reported only
 # what the bound applied to: 1 = the mean over the sections, 0 = the section at unfolding_EC_section_t
 final_metrics['unfolding_EC_bound_on_mean'] = (1.0 if EC_USE_MEAN else 0.0, None, None)
 final_metrics['unfolding_EC_section_t'] = (EC_T, None, None)
@@ -1894,7 +2357,7 @@ _ecp_mean, _ecp_min, _ecp_max = ec_phi_stats()
 final_metrics['unfolding_EC_phi_mean'] = (_ecp_mean, None, None)
 final_metrics['unfolding_EC_phi_min'] = (_ecp_min, None, None)
 final_metrics['unfolding_EC_phi_max'] = (_ecp_max, None, None)
-for _k, (_bsurf, _nq, _io, _mrat) in enumerate(zip(boozer_surfaces, nonQS_list, IOTAS_LIST, mirror_ratios), start=1):
+for _k, (_bsurf, _nq, _io, _mrat) in enumerate(zip(boozer_surfaces, nonQS_list, IOTAS_LIST, mirror_ratios), start=2 if SNOW_ONLY else 1):
     final_metrics[f'nonQS_percent_config{_k}'] = (100. * _nq.J()**0.5, None, None)
     final_metrics[f'iota_config{_k}'] = (_io.J(), None, None)
     final_metrics[f'aspect_ratio_config{_k}'] = (_bsurf.surface.aspect_ratio(), None, None)
@@ -1987,7 +2450,8 @@ out_iota_Gs = []
 out_axes = []
 # Only config 2 (the snowflake, entries 1.. of boozer_surfaces / axes) has aux coils to
 # rebuild; config 1 (entry 0) already lives on plain modular coils and is saved as it is.
-for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces[1:], axes[1:]), start=1):
+_c2 = 0 if SNOW_ONLY else 1     # position of the snowflake configuration in the lists
+for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces[_c2:], axes[_c2:]), start=1):
     mu_sol = fl.mu
     Naux = (len(mu_sol) - 1) // 2
     Zc = float(mu_sol[-1])
@@ -2043,9 +2507,11 @@ for idx, (fl, boozer_surface, ax) in enumerate(zip(sing_fls, boozer_surfaces[1:]
 # Both configurations: config 1 (X-point, its own modular currents) then config 2 (snowflake,
 # combined modular + aux coils); the fixed points are config 1's X-point and config 2's
 # singular field line.
-out_boozer_surfaces = [boozer_surfaces[0]] + out_boozer_surfaces
-out_iota_Gs = [[boozer_surfaces[0].res['iota'], boozer_surfaces[0].res['G']]] + out_iota_Gs
-out_axes = [axes[0]] + out_axes
+# (--target snowflake: the snowflake configuration alone, in the same layout)
+if not SNOW_ONLY:
+    out_boozer_surfaces = [boozer_surfaces[0]] + out_boozer_surfaces
+    out_iota_Gs = [[boozer_surfaces[0].res['iota'], boozer_surfaces[0].res['G']]] + out_iota_Gs
+    out_axes = [axes[0]] + out_axes
 save([out_boozer_surfaces, out_iota_Gs, out_axes, xpoints, sdf], OUT_DIR + f'design_double_final_{DEVICE_TAG}.json')
 print(f"wrote {OUT_DIR}design_double_final_{DEVICE_TAG}.json (combined modular+aux coil set)")
 
@@ -2053,7 +2519,7 @@ print(f"wrote {OUT_DIR}design_double_final_{DEVICE_TAG}.json (combined modular+a
 # its own sub-directory, so that the render scripts (run_render.sh: mk_manifolds.py,
 # plot_manifolds.py), which take ONE configuration and write next to their input, can be
 # run on each: config1/ = X-point (aux off), config2/ = snowflake (combined coils).
-for _k, _name in enumerate(('config1', 'config2')):
+for _k, _name in enumerate(('config2',) if SNOW_ONLY else ('config1', 'config2')):
     os.makedirs(OUT_DIR + _name, exist_ok=True)
     save([[out_boozer_surfaces[_k]], [out_iota_Gs[_k]], [out_axes[_k]], [xpoints[_k]], sdf],
          OUT_DIR + f'{_name}/design_double_final_{DEVICE_TAG}.json')

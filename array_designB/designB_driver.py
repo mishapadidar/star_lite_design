@@ -34,6 +34,7 @@ import csv
 import glob
 import hashlib
 import os
+import random
 import time
 
 # prefix.sh positional arguments, 0-based here:
@@ -62,14 +63,32 @@ TAIL_BYTES = 1 << 16
 # A double task run with its own bound on tr M of the config 1 X-point (--trace-min) is the
 # step "double@<bound>", e.g. "double@2.2": prefix.sh gets step=double and the bound as its
 # 17th argument, and names the task <num_aux=N name>_trmin=<bound>_double.
+# With a bound on E[C] as well (--ec-max, a number or OFF) the step is "double@<bound>@<ec>",
+# e.g. "double@2.05@0.8": the E[C] bound is prefix.sh's 18th argument and the task is named
+# <num_aux=N name>_trmin=<bound>_ec=<ec>_double.
 def step_base(step):
     return step.partition("@")[0]
 
 
+# With a target as well (--target double | snowflake) the step is "double@<bound>@<ec>@<target>":
+# the target is prefix.sh's 19th argument, and a snowflake task (the snowflake configuration
+# alone) gets the field _target=snowflake before _double; the name of a double is unchanged.
+# With a bound on the aux (PF) coil currents as well (--pf-max, amperes) the step is
+# "double@<bound>@<ec>@<target>@<pf>": the bound is prefix.sh's 20th argument and the name gets
+# the field _pf=<amperes> after the E[C] field.
+def step_parts(step):
+    """(base, trace bound or '', E[C] bound or '', target or '', PF current bound or '') of a step."""
+    p = step.split("@") + ["", "", "", ""]
+    return p[0], p[1], p[2], p[3], p[4]
+
+
 def step_suffix(step):
     """What prefix.sh appends to the num_aux=N name of the task (scratch dir, log)."""
-    base, _, tmin = step.partition("@")
-    return "_trmin=%s_double" % tmin if tmin else POST_STEPS[base][0]
+    base, tmin, ec, target, pf = step_parts(step)
+    if not tmin:
+        return POST_STEPS[base][0]
+    return "_trmin=%s%s%s%s_double" % (tmin, "_ec=%s" % ec if ec else "", "_pf=%s" % pf if pf else "",
+                                       "_target=snowflake" if target == "snowflake" else "")
 
 
 def log(msg):
@@ -93,10 +112,11 @@ def split_cmd(cmd):
 
 
 def make_cmd(head, args, num_aux, step):
-    base, _, tmin = step.partition("@")
+    base, tmin, ec, target, pf = step_parts(step)
     a = list(args)
     a[NUM_AUX], a[STEP] = str(num_aux), base
-    return " ".join(head + a + ([tmin] if tmin else []))
+    return " ".join(head + a + ([tmin] if tmin else []) + ([ec] if ec else []) + ([target] if target else [])
+                    + ([pf] if pf else []))
 
 
 def well_str(w):
@@ -144,7 +164,11 @@ def accepted_on_ceph(args):
 def post_tasks(head, args, num_aux_list, steps):
     """(step, head, args, num_aux) of the tasks that follow an accepted boozer task: for each
     num_aux, one task per step (polish, double), so that they run side by side."""
-    return [(step, head, args, n) for n in num_aux_list for step in steps]
+    tasks = [(step, head, args, n) for n in num_aux_list for step in steps]
+    # random order, so that the cores free at a given time are shared between every N, bound
+    # and target instead of going to the first combinations of the list
+    random.shuffle(tasks)
+    return tasks
 
 
 def initial_tasks(devices, num_aux_list, steps, resume):
@@ -183,6 +207,19 @@ def main():
                          "double task per bound (boozer_double_opt.py --trace-min), named "
                          "..._trmin=<bound>_double (default: one double with the script's own "
                          "bound, named ..._double)")
+    ap.add_argument("--ec-max", nargs="+", default=[], metavar="BOUND",
+                    help="upper bounds on E[C], the mean unfolding constant of the snowflake, for "
+                         "the double step: one double task per trace bound and per E[C] bound "
+                         "(boozer_risk_opt.py --ec-max; OFF = no bound), named "
+                         "..._trmin=<bound>_ec=<bound>_double. Needs --trace-min")
+    ap.add_argument("--target", nargs="+", default=[], choices=["double", "snowflake"],
+                    help="what the double step optimizes (boozer_risk_opt.py --target): double = both "
+                         "configurations, snowflake = the snowflake configuration alone, named "
+                         "..._target=snowflake_double; one task per target given. Needs --ec-max")
+    ap.add_argument("--pf-max", nargs="+", default=[], metavar="AMPERES",
+                    help="bounds on the current of each auxiliary (PF) coil, in amperes, for the double "
+                         "step (boozer_risk_opt.py --aux-current-max): one task per bound, named with "
+                         "the field _pf=<amperes>. Needs --target")
     ap.add_argument("--resume", action="store_true",
                     help="skip the work whose logs/outputs show it is done (see the module doc)")
     ap.add_argument("--dry-run", action="store_true",
@@ -206,9 +243,30 @@ def main():
     # with --trace-min, the double step becomes one "double@<bound>" step per bound
     for b in opts.trace_min:
         float(b)   # a number, kept as typed: it goes into the task name
+    # with --ec-max as well, one "double@<bound>@<ec>" step per (trace bound, E[C] bound)
+    for e in opts.ec_max:
+        if e != "OFF":
+            float(e)   # a number or OFF, kept as typed: it goes into the task name
+    if opts.ec_max and not opts.trace_min:
+        raise SystemExit("--ec-max needs --trace-min (the E[C] bound follows the trace bound "
+                         "in prefix.sh's arguments)")
+    # with --target as well, one "double@<bound>@<ec>@<target>" step per target
+    if opts.target and not opts.ec_max:
+        raise SystemExit("--target needs --ec-max (the target follows the E[C] bound in "
+                         "prefix.sh's arguments; use --ec-max OFF for no bound)")
+    # with --pf-max as well, one "double@<bound>@<ec>@<target>@<pf>" step per PF current bound
+    for a in opts.pf_max:
+        float(a)   # amperes, kept as typed: it goes into the task name
+    if opts.pf_max and not opts.target:
+        raise SystemExit("--pf-max needs --target (the PF bound follows the target in prefix.sh's "
+                         "arguments; use --target double for the two-configuration optimization)")
     if opts.trace_min and "double" in steps:
         k = steps.index("double")
-        steps[k:k + 1] = ["double@" + b for b in dict.fromkeys(opts.trace_min)]
+        steps[k:k + 1] = ["double@" + b + ("@" + e if e else "") + ("@" + t if t else "") + ("@" + a if a else "")
+                          for b in dict.fromkeys(opts.trace_min)
+                          for e in (dict.fromkeys(opts.ec_max) or [""])
+                          for t in (dict.fromkeys(opts.target) or [""])
+                          for a in (dict.fromkeys(opts.pf_max) or [""])]
     start, skipped = initial_tasks(devices, num_aux_list, steps, opts.resume)
     n_boozer = sum(1 for t in start if t[0] == "boozer")
     log("%d devices in %s: %d boozer tasks and %d %s tasks to submit now, %d devices "

@@ -324,6 +324,12 @@ class TangentMap(Optimizable):
         self.iota_dL     = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=2)(B, gradB, L, gamma)
         self.iota_dgamma = lambda B, gradB, L, gamma: grad(self.iota_jax, argnums=3)(B, gradB, L, gamma)
 
+        # value and the four partials in ONE jitted reverse pass (as for the elongation below):
+        # compute() and compute_iota() use these instead of the value and the four separate,
+        # uncompiled grad calls above (kept for callers outside this class)
+        self.monodromy_and_partials = jit(jax.value_and_grad(self.monodromy_jax, argnums=(0, 1, 2, 3)))
+        self.iota_and_partials = jit(jax.value_and_grad(self.iota_jax, argnums=(0, 1, 2, 3)))
+
         # near-axis elongation at phi and its partials w.r.t. (B, gradB, L, gamma), from the
         # same return map (one jitted call returns the value and the four partials).
         self.elongation_jax = lambda B, gradB, L, gamma: elongation_pure(B, gradB, L, gamma, self.D, self.frame)
@@ -388,12 +394,8 @@ class TangentMap(Optimizable):
         gradgradB = biotsavart.d2B_by_dXdX()
         L = axis.res['length']
         gamma = curve.gamma()
-        self._monodromy = self.monodromy_jax(B, gradB, L, gamma)
-
-        dmonodromy_dB = self.monodromy_dB(B, gradB, L, gamma)
-        dmonodromy_dgradB = self.monodromy_dgradB(B, gradB, L, gamma)
-        dmonodromy_dL = self.monodromy_dL(B, gradB, L, gamma)
-        dmonodromy_dgamma_partial = self.monodromy_dgamma(B, gradB, L, gamma)
+        self._monodromy, partials = self.monodromy_and_partials(B, gradB, L, gamma)
+        dmonodromy_dB, dmonodromy_dgradB, dmonodromy_dL, dmonodromy_dgamma_partial = [np.asarray(p) for p in partials]
 
         Pc, Lc, Uc = axis.res['PLU']
         dmonodromy_dcoils = sum(biotsavart.B_and_dB_vjp(dmonodromy_dB, dmonodromy_dgradB))
@@ -440,12 +442,9 @@ class TangentMap(Optimizable):
         gradgradB = biotsavart.d2B_by_dXdX()
         L = axis.res['length']
         gamma = curve.gamma()
-        self._iota = float(self.iota_jax(B, gradB, L, gamma))
-
-        diota_dB = self.iota_dB(B, gradB, L, gamma)
-        diota_dgradB = self.iota_dgradB(B, gradB, L, gamma)
-        diota_dL = self.iota_dL(B, gradB, L, gamma)
-        diota_dgamma_partial = self.iota_dgamma(B, gradB, L, gamma)
+        iota, partials = self.iota_and_partials(B, gradB, L, gamma)
+        self._iota = float(iota)
+        diota_dB, diota_dgradB, diota_dL, diota_dgamma_partial = [np.asarray(p) for p in partials]
 
         Pc, Lc, Uc = axis.res['PLU']
         diota_dcoils = sum(biotsavart.B_and_dB_vjp(diota_dB, diota_dgradB))
