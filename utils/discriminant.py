@@ -289,6 +289,25 @@ def tangent_map_jet2(tm, frame='RZ'):
 # =============================================================================
 # Optimizable: control the snowflake discriminant w.r.t. the coil dofs
 # =============================================================================
+def _aux_cpp(obj, pts):
+    """The aux coils of obj.fieldline as a C++ BiotSavart, synced with the current mu of the
+    field line and pointed at pts: returns (sbs, aux), with aux = sbs._aux_bs. The field of the
+    aux coils and its space derivatives (aux.B(), aux.dB_by_dX(), ...) and its vjps with
+    respect to mu (sbs._aux_B_vjp_mu) then come from simsopt's C++ instead of jax: same
+    discretization of the coils, hence the same values to round-off, 13 to 66 times faster.
+    The SingularBiotSavart is only a holder of those coils here: it is kept on obj, its
+    _prepare() is never called and the modular field is not touched."""
+    sbs = getattr(obj, '_aux_sbs', None)
+    if sbs is None:
+        from .singularbiotsavart import SingularBiotSavart
+        sbs = obj._aux_sbs = SingularBiotSavart(obj.fieldline)
+    sbs._aux_dirty = True          # mu may have been re-solved since the last call
+    sbs._sync_aux()
+    aux = sbs._aux_bs
+    aux.set_points(np.ascontiguousarray(np.asarray(pts, dtype=float).reshape((-1, 3))))
+    return sbs, aux
+
+
 class SnowflakeDiscriminant(Optimizable):
     r"""Discriminant Delta of the reduced return-map quadratic jet, controllable
     w.r.t. the modular-coil dofs through a :class:`SingularPeriodicFieldline`.
@@ -392,9 +411,16 @@ class SnowflakeDiscriminant(Optimizable):
         stell = self.stellsym_aux
         bs = self.biotsavart
         bs.set_points(pts.reshape((-1, 3)))
-        B = bs.B() + np.asarray(_B_aux(pts, mu, stellsym=stell))
-        gradB = bs.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stell))
-        gradgradB = bs.d2B_by_dXdX() + np.asarray(_d2B_aux_by_dXdX(pts, mu, stellsym=stell))
+        if getattr(self, 'jax_aux_field', False):
+            # former computation of the aux field, by jax; kept for checks only
+            B = bs.B() + np.asarray(_B_aux(pts, mu, stellsym=stell))
+            gradB = bs.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stell))
+            gradgradB = bs.d2B_by_dXdX() + np.asarray(_d2B_aux_by_dXdX(pts, mu, stellsym=stell))
+        else:
+            _, aux = _aux_cpp(self, pts)
+            B = bs.B() + aux.B()
+            gradB = bs.dB_by_dX() + aux.dB_by_dX()
+            gradgradB = bs.d2B_by_dXdX() + aux.d2B_by_dXdX()
         return B, gradB, gradgradB
 
     def _partials_to_coils(self, dJ_dB, dJ_dgB, dJ_dggB, dJ_dL, dJ_dgamma):
@@ -412,7 +438,12 @@ class SnowflakeDiscriminant(Optimizable):
         mu = np.asarray(res['mu']); nmu = mu.size; stell = self.stellsym_aux
         pts = self._sec_curve.gamma()
         _, gradB, gradgradB = self._field_data(pts, mu)             # sets bs points to pts
-        d3B = bs.d3B_by_dXdXdX() + np.asarray(_d3B_aux_by_dXdXdX(pts, mu, stellsym=stell))
+        jax_aux = getattr(self, 'jax_aux_field', False)
+        if jax_aux:
+            d3B = bs.d3B_by_dXdXdX() + np.asarray(_d3B_aux_by_dXdXdX(pts, mu, stellsym=stell))
+        else:
+            sbs, aux = _aux_cpp(self, pts)
+            d3B = bs.d3B_by_dXdXdX() + aux.d3B_by_dXdXdX()
         coil_direct = sum(bs.B_and_dB_and_d2B_vjp(dJ_dB, dJ_dgB, dJ_dggB))
 
         dgamma_dc = self._sec_curve.dgamma_by_dcoeff()             # (N,3,n_c)
@@ -422,8 +453,13 @@ class SnowflakeDiscriminant(Optimizable):
                      + np.einsum('ij,ijm->m', dJ_dgamma, dgamma_dc, optimize=True))
         # (dJ/dB, dJ/dgradB, dJ/dgradgradB) . d(aux field, its gradient, its Hessian)/dmu, (nmu,):
         # one reverse-mode pass instead of the three Jacobians wrt mu and their contractions
-        dJ_dmu = np.asarray(_B_gradB_gradgradB_aux_vjp_mu(
-            pts, mu, np.asarray(dJ_dB), np.asarray(dJ_dgB), np.asarray(dJ_dggB), stellsym=stell))
+        if jax_aux:
+            dJ_dmu = np.asarray(_B_gradB_gradgradB_aux_vjp_mu(
+                pts, mu, np.asarray(dJ_dB), np.asarray(dJ_dgB), np.asarray(dJ_dggB), stellsym=stell))
+        else:       # the same contraction by the C++ vjp of the aux coils
+            dJ_dmu = sbs._aux_B_vjp_mu(np.ascontiguousarray(np.asarray(dJ_dB, dtype=float)),
+                                       np.ascontiguousarray(np.asarray(dJ_dgB, dtype=float)),
+                                       np.ascontiguousarray(np.asarray(dJ_dggB, dtype=float)))
 
         col_mask = np.asarray(res['mask'], dtype=bool)             # over [curve, length, mu]
         full_dJ_dx = np.concatenate([res_curve, [float(dJ_dL)], dJ_dmu])
@@ -684,8 +720,14 @@ class DSigma(Optimizable):
         pts = self.curve_full.gamma()
         bs = self.biotsavart
         bs.set_points(pts.reshape((-1, 3)))
-        B = bs.B() + np.asarray(_B_aux(pts, mu, stellsym=stell))
-        gradB = bs.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stell))
+        if getattr(self, 'jax_aux_field', False):
+            # former computation of the aux field, by jax; kept for checks only
+            B = bs.B() + np.asarray(_B_aux(pts, mu, stellsym=stell))
+            gradB = bs.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stell))
+        else:
+            _, aux = _aux_cpp(self, pts)
+            B = bs.B() + aux.B()
+            gradB = bs.dB_by_dX() + aux.dB_by_dX()
         dB = self.perturbation.dB_by_dsigma(pts)
         return pts, B, gradB, dB, L
 
@@ -719,8 +761,15 @@ class DSigma(Optimizable):
         pts = self.curve_full.gamma()
         bs = self.biotsavart
         bs.set_points(pts.reshape((-1, 3)))
-        B = bs.B() + np.asarray(_B_aux(pts, mu, stellsym=stell))
-        gradB = bs.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stell))
+        jax_aux = getattr(self, 'jax_aux_field', False)
+        if jax_aux:
+            # former computation of the aux field, by jax; kept for checks only
+            B = bs.B() + np.asarray(_B_aux(pts, mu, stellsym=stell))
+            gradB = bs.dB_by_dX() + np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stell))
+        else:
+            sbs, aux = _aux_cpp(self, pts)
+            B = bs.B() + aux.B()
+            gradB = bs.dB_by_dX() + aux.dB_by_dX()
         dB = self.perturbation.dB_by_dsigma(pts)
 
         v = np.asarray(v, dtype=float)
@@ -735,7 +784,10 @@ class DSigma(Optimizable):
         dB_direct = self.perturbation.dB_by_dsigma_vjp(pts, dsdB)
 
         # --- state adjoint over x = [curve dofs, length, mu] ---
-        gradgradB = bs.d2B_by_dXdX() + np.asarray(_d2B_aux_by_dXdX(pts, mu, stellsym=stell))
+        if jax_aux:
+            gradgradB = bs.d2B_by_dXdX() + np.asarray(_d2B_aux_by_dXdX(pts, mu, stellsym=stell))
+        else:
+            gradgradB = bs.d2B_by_dXdX() + aux.d2B_by_dXdX()
         dgradB_pert = self.perturbation.dgradB_by_dsigma(pts)          # delta(gradB) (N,3,3)
         dgamma_dc = self.curve_full.dgamma_by_dcoeff()                 # (N,3,n_c)
         res_curve = (np.einsum('ij,ikj,ikm->m', dsB, gradB, dgamma_dc, optimize=True)
@@ -744,7 +796,10 @@ class DSigma(Optimizable):
                      + np.einsum('ij,ijm->m', dsg, dgamma_dc, optimize=True))
         # (dsB, dsgB) . d(aux field, its gradient)/dmu, (nmu,): one reverse-mode pass instead of
         # the two Jacobians wrt mu and their contractions
-        d_mu = np.asarray(_B_gradB_aux_vjp_mu(pts, mu, dsB, dsgB, stellsym=stell))
+        if jax_aux:
+            d_mu = np.asarray(_B_gradB_aux_vjp_mu(pts, mu, dsB, dsgB, stellsym=stell))
+        else:       # the same contraction by the C++ vjp of the aux coils
+            d_mu = sbs._aux_B_vjp_mu(np.ascontiguousarray(dsB), np.ascontiguousarray(dsgB))
 
         col_mask = np.asarray(res['mask'], dtype=bool)
         full_dJ_dx = np.concatenate([res_curve, [dsL], d_mu])

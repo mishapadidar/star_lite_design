@@ -298,7 +298,7 @@ class SingularBiotSavart(MagneticField):
                     deriv = deriv + float(a[q]) * dmu[name]
         return deriv
 
-    def _aux_B_vjp_mu(self, vv, vg=None):
+    def _aux_B_vjp_mu(self, vv, vg=None, vgg=None):
         """v . dB_aux/dmu (plus vg . d(gradB_aux)/dmu when vg is given, with the index convention
         of BiotSavart.B_and_dB_vjp), (nmu,), with the C++ vjp of the aux BiotSavart (the coils that give
         the forward aux field, already synced from mu and pointed at the evaluation points by
@@ -308,9 +308,11 @@ class SingularBiotSavart(MagneticField):
         depend on the same base curves and currents, so they are included."""
         if vg is None:
             d = self._aux_bs.B_vjp(vv)
-        else:
+        elif vgg is None:
             d0, d1 = self._aux_bs.B_and_dB_vjp(vv, vg)
             d = d0 + d1
+        else:       # third seed: vgg . d(gradgradB_aux)/dmu, convention of B_and_dB_and_d2B_vjp
+            d = sum(self._aux_bs.B_and_dB_and_d2B_vjp(vv, vg, vgg))
         N = self._naux
         if getattr(self, '_aux_dof_idx', None) is None:
             names = list(self._aux_base_curves[0].local_dof_names)
