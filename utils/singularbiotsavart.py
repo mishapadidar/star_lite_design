@@ -298,13 +298,38 @@ class SingularBiotSavart(MagneticField):
                     deriv = deriv + float(a[q]) * dmu[name]
         return deriv
 
+    def _aux_B_vjp_mu(self, vv):
+        """v . dB_aux/dmu, (nmu,), with the C++ vjp of the aux BiotSavart (the coils that give
+        the forward aux field, already synced from mu and pointed at the evaluation points by
+        _prepare()) instead of a reverse-mode pass of jax: mu = (I_1..I_N, r_1..r_N, Z), where
+        I_k is the inner Current of aux coil k, r_k sets the dofs xc(1) and ys(1) of its base
+        curve and Z the dof zc(0) of every base curve (_sync_aux). The stellsym partners
+        depend on the same base curves and currents, so they are included."""
+        d = self._aux_bs.B_vjp(vv)
+        N = self._naux
+        if getattr(self, '_aux_dof_idx', None) is None:
+            names = list(self._aux_base_curves[0].local_dof_names)
+            self._aux_dof_idx = (names.index('xc(1)'), names.index('ys(1)'), names.index('zc(0)'))
+        ixc, iys, izc = self._aux_dof_idx
+        a = np.zeros(2 * N + 1)
+        for k in range(N):
+            a[k] = float(np.asarray(d(self._aux_currents[k])).ravel()[0])
+            g = np.asarray(d(self._aux_base_curves[k]), dtype=float)
+            a[N + k] = g[ixc] + g[iys]
+            a[-1] += g[izc]
+        return a
+
     def B_vjp(self, v):
         pts = self._prepare()
         fl = self.fl
         vv = np.ascontiguousarray(np.asarray(v).reshape((-1, 3)))
-        # v . (aux sensitivity wrt mu) at the evaluation points, (nmu,): one reverse-mode pass,
-        # about 3 times cheaper than forming dB_aux/dmu (N,3,nmu) and contracting it with v
-        a = np.asarray(_B_aux_vjp_mu(pts, fl.mu, vv, stellsym=fl.stellsym_aux))
+        # v . (aux sensitivity wrt mu) at the evaluation points, (nmu,)
+        if getattr(self, 'jax_aux_vjp', False):
+            # former computation, kept for checks only (set self.jax_aux_vjp = True): one
+            # reverse-mode pass of jax through the aux field
+            a = np.asarray(_B_aux_vjp_mu(pts, fl.mu, vv, stellsym=fl.stellsym_aux))
+        else:
+            a = self._aux_B_vjp_mu(vv)
         # modular part FIRST (modular points are the eval points here); the mu
         # term below calls dmu_dep_by_ddesign, which re-points the modular field.
         deriv = self.modular.B_vjp(vv)

@@ -82,24 +82,67 @@ class BoozerResidual(Optimizable):
         surface = self.surface
         iota = self.boozer_surface.res['iota']
         G = self.boozer_surface.res['G']
-        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True)
-        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
+        label_err = self.boozer_surface.label.J()-self.boozer_surface.targetlabel
+        dlabel_dsurface = self.boozer_surface.label.dJ_by_dsurfacecoefficients()
+        if getattr(self, 'full_jacobian', False) or G is None:
+            # former computation, kept for checks only (set self.full_jacobian = True): the full
+            # Jacobian of the residual with respect to the surface dofs, iota and G is built on
+            # the oversampled grid, then contracted with the residual
+            r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True)
+            rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*label_err]))
+            # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
+            dl = np.zeros((J.shape[1],))
+            dl[:dlabel_dsurface.size] = dlabel_dsurface
+            Jtil = np.concatenate((J/np.sqrt(num_points), np.sqrt(self.constraint_weight) * dl[None, :]), axis=0)
+            dJ_ds = Jtil.T@rtil
+        else:
+            # the same product J^T r without the Jacobian: the residual is r = w (G B - |B|^2 t),
+            # w = 1/|B|, t = x_phi + iota x_theta, and with v = r / num_points
+            #   d(v.r) = aB . dB + at . dt,
+            #   aB = -(v.R) B / |B|^3 + w (G v - 2 (v.t) B),   R = G B - |B|^2 t,
+            #   at = -w |B|^2 v,
+            # brought back to the surface dofs with the vjps of the surface (B depends on them
+            # through the points: dB = dB_by_dX dx), to iota with at . x_theta and to G with w v . B
+            # ONE evaluation of the field (B and dB_by_dX) at the points set above; the residual
+            # is formed here with the operations of simsopt's boozer_surface_residual
+            # (weight_inv_modB=True), and aB is also dJ_by_dB, so that neither that function
+            # nor dJ_by_dB() (one more field evaluation each) is called
+            self.biotsavart.compute(1)
+            B = self.biotsavart.B().reshape((nphi, ntheta, 3))
+            dB_by_dX = self.biotsavart.dB_by_dX().reshape((nphi, ntheta, 3, 3))
+            xtheta = surface.gammadash2()
+            tang = surface.gammadash1() + iota * xtheta
+            B2 = np.sum(B**2, axis=2)
+            residual = G*B - B2[..., None] * tang
+            w = 1./np.sqrt(B2)
+            r = (w[:, :, None] * residual).reshape((nphi*ntheta*3, ))
+            rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*label_err]))
+            v = r.reshape((nphi, ntheta, 3)) / num_points
+            vR = np.sum(v * residual, axis=2)
+            vt = np.sum(v * tang, axis=2)
+            aB = -(vR * w**3)[..., None] * B + w[..., None] * (G*v - 2.*vt[..., None]*B)
+            at = -(w*B2)[..., None] * v
+            # dB_l/dc = sum_k dB_by_dX[k, l] dx_k/dc
+            ax = np.einsum('ijkl,ijl->ijk', dB_by_dX, aB)
+            dJ_dsurf = (surface.dgamma_by_dcoeff_vjp(ax) + surface.dgammadash1_by_dcoeff_vjp(at)
+                        + iota * surface.dgammadash2_by_dcoeff_vjp(at))
+            dJ_ds = np.concatenate((np.asarray(dJ_dsurf, dtype=float),
+                                    [np.sum(at * xtheta), np.sum(w[..., None] * v * B)]))
+            dJ_ds[:dlabel_dsurface.size] += self.constraint_weight * label_err * dlabel_dsurface
         self._J = 0.5*np.sum(rtil**2)
-        
+        self._dJ_ds = dJ_ds      # kept for checks
+
         booz_surf = self.boozer_surface
         P, L, U = booz_surf.res['PLU']
         dconstraint_dcoils_vjp = booz_surf.res['vjp']
 
-        dJ_by_dB = self.dJ_by_dB()
+        if getattr(self, 'full_jacobian', False) or G is None:
+            dJ_by_dB = self.dJ_by_dB()
+        else:
+            dJ_by_dB = aB.reshape((-1, 3))     # d(v.r)/dB with v = r / num_points, see above
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
-        # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
-        dl = np.zeros((J.shape[1],))
-        dlabel_dsurface = self.boozer_surface.label.dJ_by_dsurfacecoefficients()
-        dl[:dlabel_dsurface.size] = dlabel_dsurface
-        Jtil = np.concatenate((J/np.sqrt(num_points), np.sqrt(self.constraint_weight) * dl[None, :]), axis=0)
-        dJ_ds = Jtil.T@rtil
-        
+
         adj = forward_backward(P, L, U, dJ_ds)
         
         adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
