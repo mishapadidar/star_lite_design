@@ -298,14 +298,19 @@ class SingularBiotSavart(MagneticField):
                     deriv = deriv + float(a[q]) * dmu[name]
         return deriv
 
-    def _aux_B_vjp_mu(self, vv):
-        """v . dB_aux/dmu, (nmu,), with the C++ vjp of the aux BiotSavart (the coils that give
+    def _aux_B_vjp_mu(self, vv, vg=None):
+        """v . dB_aux/dmu (plus vg . d(gradB_aux)/dmu when vg is given, with the index convention
+        of BiotSavart.B_and_dB_vjp), (nmu,), with the C++ vjp of the aux BiotSavart (the coils that give
         the forward aux field, already synced from mu and pointed at the evaluation points by
         _prepare()) instead of a reverse-mode pass of jax: mu = (I_1..I_N, r_1..r_N, Z), where
         I_k is the inner Current of aux coil k, r_k sets the dofs xc(1) and ys(1) of its base
         curve and Z the dof zc(0) of every base curve (_sync_aux). The stellsym partners
         depend on the same base curves and currents, so they are included."""
-        d = self._aux_bs.B_vjp(vv)
+        if vg is None:
+            d = self._aux_bs.B_vjp(vv)
+        else:
+            d0, d1 = self._aux_bs.B_and_dB_vjp(vv, vg)
+            d = d0 + d1
         N = self._naux
         if getattr(self, '_aux_dof_idx', None) is None:
             names = list(self._aux_base_curves[0].local_dof_names)
@@ -341,10 +346,15 @@ class SingularBiotSavart(MagneticField):
         fl = self.fl
         vv = np.ascontiguousarray(np.asarray(v).reshape((-1, 3)))
         vg = np.ascontiguousarray(np.asarray(vgrad).reshape((-1, 3, 3)))
-        dBaux_dmu = np.asarray(_dB_aux_by_dmu(pts, fl.mu, stellsym=fl.stellsym_aux))       # (N,3,nmu)
-        dgradBaux_dmu = np.asarray(_dgradB_aux_by_dmu(pts, fl.mu, stellsym=fl.stellsym_aux))  # (N,3,3,nmu) [i,k,j,l]
-        a = np.einsum('ij,ijk->k', vv, dBaux_dmu, optimize=True)
-        a = a + np.einsum('ikj,ikjl->l', vg, dgradBaux_dmu, optimize=True)
+        if getattr(self, 'jax_aux_vjp', False):
+            # former computation, kept for checks only (set self.jax_aux_vjp = True): the full
+            # Jacobians of B_aux and gradB_aux with respect to mu by jax, then their contraction
+            dBaux_dmu = np.asarray(_dB_aux_by_dmu(pts, fl.mu, stellsym=fl.stellsym_aux))       # (N,3,nmu)
+            dgradBaux_dmu = np.asarray(_dgradB_aux_by_dmu(pts, fl.mu, stellsym=fl.stellsym_aux))  # (N,3,3,nmu) [i,k,j,l]
+            a = np.einsum('ij,ijk->k', vv, dBaux_dmu, optimize=True)
+            a = a + np.einsum('ikj,ikjl->l', vg, dgradBaux_dmu, optimize=True)
+        else:
+            a = self._aux_B_vjp_mu(vv, vg)     # the same contraction by the C++ vjp of the aux coils
         mod0, mod1 = self.modular.B_and_dB_vjp(vv, vg)
         # consumers always sum the returned 2-tuple; lump the aux/implicit part
         # (covering both seeds) into the first element.

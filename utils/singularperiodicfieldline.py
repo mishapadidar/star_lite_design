@@ -576,11 +576,14 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     dBcoils_by_dX = field.dB_by_dX()
     #d2Bcoils_by_dXdX = field.d2B_by_dXdX()  # unused in the field-line block; skip the expensive Hessian
 
-    B_aux = _B_aux(pts, mu, stellsym=stellsym)
-    dB_aux_by_dX = _dB_aux_by_dX(pts, mu, stellsym=stellsym)
+    # the jax results are converted to numpy ONCE here: left as jax arrays they turn every sum
+    # with the coil field into a jax array, and each numpy operation and einsum below then
+    # converts its operands again
+    B_aux = np.asarray(_B_aux(pts, mu, stellsym=stellsym))
+    dB_aux_by_dX = np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stellsym))
     #d2B_aux_by_dXdX = _d2B_aux_by_dXdX(pts, mu, stellsym=stellsym)
 
-    dB_aux_by_dmu = _dB_aux_by_dmu(pts, mu, stellsym=stellsym)
+    dB_aux_by_dmu = np.asarray(_dB_aux_by_dmu(pts, mu, stellsym=stellsym))
     #dgradB_aux_by_dmu = _dgradB_aux_by_dmu(pts, mu, stellsym=stellsym)
 
     B = Bcoils + B_aux
@@ -631,12 +634,12 @@ def singular_field_line_residual(curve, curve_tm, length, field, mu, monodromy_f
     dBcoils_by_dX = field.dB_by_dX()
     d2Bcoils_by_dXdX = field.d2B_by_dXdX()
 
-    B_aux = _B_aux(pts, mu, stellsym=stellsym)
-    dB_aux_by_dX = _dB_aux_by_dX(pts, mu, stellsym=stellsym)
-    d2B_aux_by_dXdX = _d2B_aux_by_dXdX(pts, mu, stellsym=stellsym)
+    B_aux = np.asarray(_B_aux(pts, mu, stellsym=stellsym))
+    dB_aux_by_dX = np.asarray(_dB_aux_by_dX(pts, mu, stellsym=stellsym))
+    d2B_aux_by_dXdX = np.asarray(_d2B_aux_by_dXdX(pts, mu, stellsym=stellsym))
 
-    dB_aux_by_dmu = _dB_aux_by_dmu(pts, mu, stellsym=stellsym)
-    dgradB_aux_by_dmu = _dgradB_aux_by_dmu(pts, mu, stellsym=stellsym)
+    dB_aux_by_dmu = np.asarray(_dB_aux_by_dmu(pts, mu, stellsym=stellsym))
+    dgradB_aux_by_dmu = np.asarray(_dgradB_aux_by_dmu(pts, mu, stellsym=stellsym))
 
     B = Bcoils + B_aux
     dB_by_dX = dBcoils_by_dX + dB_aux_by_dX
