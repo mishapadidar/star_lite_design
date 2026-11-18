@@ -16,6 +16,10 @@ module load disBatch/beta
 # each for the two targets (double = X-point + snowflake, snowflake = the snowflake alone)
 # and the bounds 5, 10, 15 and 20 kA on the aux (PF) coil currents: 3 x 6 x 2 x 4 = 144 tasks
 # per accepted device; options given on the command line come after and win.
-sbatch -p ccm -N 30 -C icelake --ntasks-per-node=64 -c 1 -t 7-00:00:00 -J designB \
+# Started on FOUR icelake nodes in the gen partition (2026-11-17: the cluster is being drained
+# and 30 nodes at once do not come; gen is served before ccm, PriorityTier 20 against 10, but
+# allows only about 4 nodes per user); the other nodes are added one by one in ccm with the
+# dbUtil.sh of the run.
+sbatch -p gen -N 4 -C icelake --ntasks-per-node=64 -c 1 -t 7-00:00:00 -J designB \
        -o logs/designB_driver_%j.out \
        --wrap "python3 designB_driver.py tasks.jobs --steps double --num-aux 3 4 5 --trace-min 2.05 --ec-max 0.9 0.8 0.7 0.6 0.5 OFF --target double snowflake --pf-max 5000 10000 15000 20000 $*"

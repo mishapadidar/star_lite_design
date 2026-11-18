@@ -30,7 +30,24 @@ export PYTHONPATH="/mnt/home/agiuliani/ceph/STAR_LITE:${PYTHONPATH:-}"
 
 source /mnt/home/agiuliani/ceph/STAR_LITE/venv/bin/activate
 
-./boozer_all.py \
+# AVX-512 build of simsoptpp (same source, compiled on an icelake node with -march=native) on
+# the Intel nodes that have AVX-512: the script is then started through avx512_loader.py,
+# which loads that build first (the simsoptpp of the venv, built without AVX-512, also runs on
+# the AMD nodes; PYTHONPATH cannot select another build, the editable install comes first).
+# Used only once the file ENABLED is next to the build (created by hand after it was checked on
+# an icelake node; remove it to go back to the build of the venv), and only if it loads.
+AVX512_SO="$(ls /mnt/ceph/users/agiuliani/STAR_LITE/simsoptpp_avx512/simsopt/simsoptpp*.so 2> /dev/null | head -1)"
+RUN_PY=(python)
+if grep -q GenuineIntel /proc/cpuinfo && grep -q avx512f /proc/cpuinfo \
+   && [ -n "$AVX512_SO" ] && [ -f "$(dirname "$AVX512_SO")/ENABLED" ] \
+   && python ./avx512_loader.py "$AVX512_SO" --check > /dev/null 2>&1; then
+  RUN_PY=(python ./avx512_loader.py "$AVX512_SO")
+  echo "simsoptpp: AVX-512 build ($AVX512_SO)"
+else
+  echo "simsoptpp: build of the venv (no AVX-512 build used on $(hostname))"
+fi
+
+"${RUN_PY[@]}" ./boozer_all.py \
   --margin "$margin" \
   --well "$well" \
   --Z "$Z" \
