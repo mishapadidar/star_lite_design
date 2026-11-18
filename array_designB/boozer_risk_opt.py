@@ -128,6 +128,8 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
+from star_lite_design.utils.vertical_cylinder import VerticalCylinderSDF
+from star_lite_design.utils import extra_coils
 from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 from star_lite_design.utils.helicalcylindervessel import HelicalCylinderVesselSDF
 from star_lite_design.utils.singularperiodicfieldline import (
@@ -530,6 +532,13 @@ parser.add_argument("--aux-current-max", type=float, default=None,
                     help="bound on the current of each auxiliary (planar circular, PF) coil, in amperes: "
                          "|I| <= this (default: the yaml's AUX_CURRENT_EPS if a previous run wrote it, "
                          "else 5000)")
+parser.add_argument("--ec-continuation", default="", metavar="B1,B2,...",
+                    help="continuation of the bound on E[C]: comma-separated list of the NEXT bounds, e.g. "
+                         "0.9,0.8,0.7,0.6,0.5 after --ec-max 1.0. When this run ends in spec (every constraint "
+                         "within 0.1%%), the script restarts itself (same process, exec) on the design it has "
+                         "just written, with --ec-max B1 and the rest of the list, in the sibling directory "
+                         "whose name has _ec=<B1>_from=<this bound> in place of _ec=<this bound>; it stops at "
+                         "the first level that ends out of spec. Each level is a full device directory.")
 args = parser.parse_args()
 SNOW_ONLY = args.target == "snowflake"
 
@@ -547,13 +556,16 @@ if mon_constraint not in ('trace', 'identity'):
 # The input is either a FINISHED double (two configurations, the second one with its snowflake:
 # it is reloaded) or a boozer_all design (one configuration, no aux coils: the snowflake is
 # built by the singular polish, as boozer_double_opt.py did).
-IS_RESTART = len(data[0]) == 2 and isinstance(data[3][1], SingularPeriodicFieldline)
+# A finished SNOWFLAKE-ONLY design (--target snowflake: one configuration, the snowflake) is
+# reloaded too; it has no configuration 1, so it can only be continued with --target snowflake.
+IS_RESTART_SNOW = len(data[0]) == 1 and isinstance(data[3][0], SingularPeriodicFieldline)
+IS_RESTART = IS_RESTART_SNOW or (len(data[0]) == 2 and isinstance(data[3][1], SingularPeriodicFieldline))
 if not IS_RESTART and len(data[0]) != 1:
     raise SystemExit(f"expected a boozer_all design (one configuration) or a finished double (X-point + "
                      f"snowflake), got {len(data[0])} configuration(s) in {_in}")
-if not IS_RESTART and isinstance(data[3][0], SingularPeriodicFieldline):
-    raise SystemExit(f"{_in} is a finished snowflake-only design (--target snowflake): restarting from "
-                     f"one is not supported; start from the boozer_all design or from a finished double")
+if IS_RESTART_SNOW and not SNOW_ONLY:
+    raise SystemExit(f"{_in} is a finished snowflake-only design: it has no configuration 1 and can only "
+                     f"be continued with --target snowflake")
 config['TARGET'] = args.target         # 'double' or 'snowflake', recorded in the (output) yaml
 if IS_RESTART:
     num_aux = int(config['NUM_AUX'])   # the loaded double's (checked against its snowflake below)
@@ -602,6 +614,21 @@ def _leaf_currents(cur):
     return frozenset(id(o) for o in [cur] + list(cur.ancestors) if type(o).__name__ == 'Current')
 
 
+EXTRA_KIND = config.get('EXTRA_COILS', 'none')     # boozer_all.py --extra-coils (none, circ, T, L)
+
+
+def _extra_coil_bases(coils, curves):
+    """Extra coils of boozer_all.py --extra-coils: their base coils come after the 4 modular
+    coils, followed by their pi-rotated copies. They have their own current in each
+    configuration, like the modular coils, and a geometry shared by both. Returns their
+    indices and curves."""
+    n_extra = len(coils) - 4
+    if n_extra < 0 or n_extra % 2 or (EXTRA_KIND == 'none') != (n_extra == 0):
+        raise SystemExit(f"ERROR: {len(coils)} coils do not match EXTRA_COILS = {EXTRA_KIND} of the yaml")
+    idx = list(range(4, 4 + n_extra // 2))
+    return idx, [curves[i] for i in idx]
+
+
 if IS_RESTART:
     print("Running RISK-NEUTRAL double optimization (restart from a double design)")
     print("================================")
@@ -611,20 +638,36 @@ if IS_RESTART:
     #   x-points        [config 1 PeriodicFieldLine, config 2 SingularPeriodicFieldline (snowflake)].
     # The optimization below works with the snowflake configuration on
     # SingularBiotSavart(field line): its Boozer surface and axis are rebuilt on that field here.
-    (bs_x, _bs2), _iota_Gs_in, (axis_x, _ax2), (xp_x, _fl), sdf = data
+    if IS_RESTART_SNOW:
+        # a finished snowflake-only design: its single configuration is the snowflake (on explicit
+        # modular + aux coils); there is no configuration 1 to reload
+        (_bs2,), _iota_Gs_in, (_ax2,), (_fl,), sdf = data
+        _iG2 = _iota_Gs_in[0]
+        _stellsym_surf = bool(_bs2.surface.stellsym)
+        _bs_opts = {'newton_tol': 1e-16 if _stellsym_surf else 1e-14, 'newton_maxiter': 20, 'verbose': False}
+        _ax_opts = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+        _targetlabel, _cweight = _bs2.targetlabel, _bs2.constraint_weight
+        coils_x = _fl.biotsavart.coils     # placeholder only: configuration 1 is never used here
+        print("reloading a finished snowflake-only design (no configuration 1)")
+    else:
+        (bs_x, _bs2), _iota_Gs_in, (axis_x, _ax2), (xp_x, _fl), sdf = data
 
-    # ---- config 1: hyperbolic X-point, aux coils off, its own modular currents ----------------
-    coils_x = bs_x.biotsavart.coils
-    axis_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
-    xp_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
-    bs_x.options = {'newton_tol': 1e-16 if bs_x.surface.stellsym else 1e-14, 'newton_maxiter': 20, 'verbose': False}
-    _res_ax = axis_x.run_code(CurveLength(axis_x.curve).J())
-    _res_xp = xp_x.run_code(CurveLength(xp_x.curve).J())
-    _res_bs = bs_x.run_code(_iota_Gs_in[0][0], _iota_Gs_in[0][1])
-    print(f"config 1 (X-point, aux off): Boozer surface success={_res_bs['success']} iota={_res_bs['iota']:+.8f}, "
-          f"axis success={_res_ax['success']}, X-point success={_res_xp['success']}")
-    if not (_res_bs['success'] and _res_ax['success'] and _res_xp['success']):
-        raise SystemExit("ERROR: could not re-solve configuration 1 of the double")
+        # ---- config 1: hyperbolic X-point, aux coils off, its own modular currents ----------------
+        coils_x = bs_x.biotsavart.coils
+        axis_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+        xp_x.options = {'newton_tol': 1e-15, 'newton_maxiter': 20, 'verbose': False}
+        bs_x.options = {'newton_tol': 1e-16 if bs_x.surface.stellsym else 1e-14, 'newton_maxiter': 20, 'verbose': False}
+        _res_ax = axis_x.run_code(CurveLength(axis_x.curve).J())
+        _res_xp = xp_x.run_code(CurveLength(xp_x.curve).J())
+        _res_bs = bs_x.run_code(_iota_Gs_in[0][0], _iota_Gs_in[0][1])
+        print(f"config 1 (X-point, aux off): Boozer surface success={_res_bs['success']} iota={_res_bs['iota']:+.8f}, "
+              f"axis success={_res_ax['success']}, X-point success={_res_xp['success']}")
+        if not (_res_bs['success'] and _res_ax['success'] and _res_xp['success']):
+            raise SystemExit("ERROR: could not re-solve configuration 1 of the double")
+        _iG2 = _iota_Gs_in[1]
+        _stellsym_surf = bool(bs_x.surface.stellsym)
+        _bs_opts, _ax_opts = dict(bs_x.options), dict(axis_x.options)
+        _targetlabel, _cweight = bs_x.targetlabel, bs_x.constraint_weight
 
     # ---- config 2: the snowflake, modular coils with the SAME curves as config 1 ---------------
     coils = _fl.biotsavart.coils
@@ -633,10 +676,11 @@ if IS_RESTART:
         raise SystemExit("ERROR: the two configurations of the loaded double do not share their coil curves")
     # designB (4 coils). DN (stellsym surface): 2 independent base coils -> [0, 2].
     # SN (rebuilt by sn_setup from bases 0 and 2): 2 -> [0, 1].
-    base_curve_idx = [0, 2] if bs_x.surface.stellsym else [0, 1]
+    base_curve_idx = [0, 2] if _stellsym_surf else [0, 1]
     base_curves = [curves[i] for i in base_curve_idx]
+    extra_base_idx, extra_base_curves = _extra_coil_bases(coils, curves)
 
-    num_aux = (len(np.asarray(_fl.mu)) - 1) // 2   # from the design itself: mu = (I_1..I_N, r_1..r_N, Z)
+    num_aux = (len(np.asarray(_fl.mu)) - 1) // 2  # from the design itself: mu = (I_1..I_N, r_1..r_N, Z)
     config['NUM_AUX'] = num_aux
     # The snowflake field line keeps the dependent / independent partition of its mu saved with the
     # design; it is re-solved (square Newton solve) so that its adjoint data is available.
@@ -650,10 +694,10 @@ if IS_RESTART:
     if not (_res_fl['success'] and _res_fl['square']):
         raise SystemExit("ERROR: could not re-solve the snowflake field line of the double (square solve)")
     _surf2 = _bs2.surface
-    bs_s = BoozerSurface(SingularBiotSavart(_fl), _surf2, Volume(_surf2), bs_x.targetlabel,
-                         constraint_weight=bs_x.constraint_weight, options=dict(bs_x.options))
-    _res_bs2 = bs_s.run_code(_iota_Gs_in[1][0], _iota_Gs_in[1][1])
-    ax_s = PeriodicFieldLine(SingularBiotSavart(_fl), _ax2.curve, options=dict(axis_x.options))
+    bs_s = BoozerSurface(SingularBiotSavart(_fl), _surf2, Volume(_surf2), _targetlabel,
+                         constraint_weight=_cweight, options=dict(_bs_opts))
+    _res_bs2 = bs_s.run_code(_iG2[0], _iG2[1])
+    ax_s = PeriodicFieldLine(SingularBiotSavart(_fl), _ax2.curve, options=dict(_ax_opts))
     _res_ax2 = ax_s.run_code(CurveLength(_ax2.curve).J())
     print(f"config 2 (snowflake, {num_aux} aux coils) on SingularBiotSavart: Boozer surface success={_res_bs2['success']} "
           f"iota={_res_bs2['iota']:+.8f}, axis success={_res_ax2['success']}")
@@ -693,6 +737,7 @@ else:
     # SN (rebuilt by sn_setup from bases 0 and 2): 2 -> [0, 1].
     base_curve_idx = [0, 2] if boozer_surfaces[0].surface.stellsym else [0, 1]
     base_curves = [curves[i] for i in base_curve_idx]
+    extra_base_idx, extra_base_curves = _extra_coil_bases(coils, curves)
 
     # ---- config 1: the boozer_all device itself (hyperbolic X-point, aux coils off) ------------
     # Same coil CURVES as the loaded device, but its OWN modular currents (independent design
@@ -700,14 +745,15 @@ else:
     # axis and the X-point, solved on those coils. The loaded objects are left untouched: the
     # snowflake (config 2) is generated from them below, as in boozer_singular_opt.py.
 
-    # one own current per base coil; a symmetry partner takes its base coil's, with the same ratio
+    # one own current per base coil (modular and extra); a symmetry partner takes its base coil's,
+    # with the same ratio
     _own_currents = {}
-    for i in base_curve_idx:
+    for i in base_curve_idx + extra_base_idx:
         _cur = coils[i].current
         _own_currents[i] = ScaledCurrent(Current(float(_cur.get_value()) / float(_cur.scale)), float(_cur.scale))
     coils_x = []
     for j, c in enumerate(coils):
-        _match = [i for i in base_curve_idx if _leaf_currents(coils[i].current) == _leaf_currents(c.current)]
+        _match = [i for i in base_curve_idx + extra_base_idx if _leaf_currents(coils[i].current) == _leaf_currents(c.current)]
         if len(_match) != 1:
             raise SystemExit(f"cannot tell which base coil the current of modular coil {j} comes from")
         _ratio = float(c.current.get_value()) / float(coils[_match[0]].current.get_value())
@@ -738,6 +784,18 @@ COIL_ON_VESSEL_THRESHOLD = config['COIL_ON_VESSEL_THRESHOLD']
 COIL_CLEARANCE_THRESHOLD = config['COIL_CLEARANCE_THRESHOLD']
 COIL_ON_VESSEL_WEIGHT = Weight(config['COIL_ON_VESSEL_WEIGHT'])
 COIL_CLEARANCE_WEIGHT = Weight(config['COIL_CLEARANCE_WEIGHT'])
+# Keep-out cylinder (boozer_all.py): infinite vertical cylinder of radius CYLINDER_RADIUS that
+# the modular coils may not enter (the aux coils are not concerned); its axis is free and
+# continues from the position, and with the weight, recorded by the previous step (a device
+# made before the cylinder existed starts it at the origin, with the coil-to-vessel weight).
+config.setdefault('CYLINDER_RADIUS', 0.125)
+config.setdefault('CYLINDER_CLEARANCE', 0.0)
+config.setdefault('CYLINDER_X0', 0.0)
+config.setdefault('CYLINDER_Y0', 0.0)
+config.setdefault('CYLINDER_WEIGHT', config.get('COIL_TO_VESSEL_WEIGHT', 1.0))
+CYLINDER_RADIUS = float(config['CYLINDER_RADIUS'])
+CYLINDER_CLEARANCE = float(config['CYLINDER_CLEARANCE'])
+CYLINDER_WEIGHT = Weight(config['CYLINDER_WEIGHT'])
 
 PLASMA_VESSEL_MARGIN_THRESHOLD = config['PLASMA_VESSEL_MARGIN_THRESHOLD']
 
@@ -1310,7 +1368,7 @@ J_modB_ripple = sum(modB_ripples)
 
 J_curr = None
 for boozer_surface in boozer_surfaces:
-    for idx in base_curve_idx:
+    for idx in base_curve_idx + extra_base_idx:      # the extra coils have the same current bound
         curr = boozer_surface.biotsavart.coils[idx].current
         if J_curr is None:
             J_curr = CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
@@ -1329,15 +1387,17 @@ for boozer_surface in boozer_surfaces:
 # COIL_MINOR_RADIUS. Its threshold is in MN/m (as simsopt's LpCurveForce), hence the /1e6.
 FORCE_THRESHOLD = config['FORCE_THRESHOLD']
 FORCE_WEIGHT = Weight(config['FORCE_WEIGHT'])
-force_objs = [TotalFieldLpCurveForce([coils[i] for i in base_curve_idx], coils, fl,
+# the extra base coils (boozer_all.py --extra-coils) are force targets too, with the same bound
+force_idx = base_curve_idx + extra_base_idx
+force_objs = [TotalFieldLpCurveForce([coils[i] for i in force_idx], coils, fl,
                                      regularization_circ(COIL_MINOR_RADIUS), p=2,
                                      threshold=FORCE_THRESHOLD / 1e6)
               for fl in sing_fls]
 # Config 1 has no aux field: boozer_all.py's force objective (LpCurveForce on the base coils,
 # regularized self-force + the other modular coils), with config 1's own currents.
 _force_reg = regularization_circ(COIL_MINOR_RADIUS)
-force_targets_x = [RegularizedCoil(coils_x[i].curve, coils_x[i].current, _force_reg) for i in base_curve_idx]
-force_sources_x = [c for j, c in enumerate(coils_x) if j not in base_curve_idx]
+force_targets_x = [RegularizedCoil(coils_x[i].curve, coils_x[i].current, _force_reg) for i in force_idx]
+force_sources_x = [c for j, c in enumerate(coils_x) if j not in force_idx]
 J_force_x = LpCurveForce(force_targets_x, force_sources_x, p=2, threshold=FORCE_THRESHOLD / 1e6)
 J_force = sum(force_objs) if SNOW_ONLY else J_force_x + sum(force_objs)
 
@@ -1349,7 +1409,7 @@ def max_coil_force():
     if SNOW_ONLY:
         return max(fo.max_force() for fo in force_objs)
     f_x = max(float(np.max(np.linalg.norm(t.force([c for j, c in enumerate(coils_x) if j != i]), axis=1)))
-              for t, i in zip(force_targets_x, base_curve_idx))
+              for t, i in zip(force_targets_x, force_idx))
     return max(f_x, max(fo.max_force() for fo in force_objs))
 
 
@@ -1421,8 +1481,9 @@ J_coil_on_vessel = VesselDistance(
     COIL_ON_VESSEL_THRESHOLD,
 )
 
-coil_clearance_entities = base_curves
-coil_clearance_signs = np.array([1.0 for _ in base_curves])
+# the extra base coils keep the same clearance from the vessel as the modular coils
+coil_clearance_entities = base_curves + extra_base_curves
+coil_clearance_signs = np.array([1.0 for _ in coil_clearance_entities])
 J_coil_clearance = VesselDistance(
     sdf,
     coil_clearance_entities,
@@ -1430,7 +1491,23 @@ J_coil_clearance = VesselDistance(
     COIL_CLEARANCE_THRESHOLD,
 )
 
-magnetic_wells = [MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes, boozer_surfaces)]
+# keep-out cylinder: ALL the modular coils (shared by both configurations; the aux coils are
+# not concerned)
+cylinder = VerticalCylinderSDF(CYLINDER_RADIUS, config['CYLINDER_X0'], config['CYLINDER_Y0'])
+J_cylinder = VesselDistance(
+    cylinder,
+    list(curves),
+    np.array([1.0 for _ in curves]),
+    CYLINDER_CLEARANCE,
+)
+
+# circumference of the extra circular coils (boozer_all.py --extra-coils circ): <= CIRC_MAX, with
+# the (possibly escalated) weight of the boozer_all yaml
+CIRC_WEIGHT = Weight(config.get('CIRC_WEIGHT', config.get('COIL_TO_VESSEL_WEIGHT', 1.0)))
+circ_lengths = [CurveLength(c) for c in extra_base_curves] if EXTRA_KIND == 'circ' else []
+J_circ = sum(QuadraticPenalty(L, extra_coils.CIRC_MAX, 'max') for L in circ_lengths) if circ_lengths else None
+
+magnetic_wells =[MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes, boozer_surfaces)]
 J_wells = sum(magnetic_wells)
 
 meanzs = [FieldLineMeanZ(xpoint, FIELDLINE_MEANZ_THRESHOLD) for xpoint in xpoints]
@@ -1511,6 +1588,7 @@ JF = (J_nonQSRatio
     + PLASMA_VESSEL_MARGIN_WEIGHT * J_plasma_to_vessel_margin
     + COIL_ON_VESSEL_WEIGHT * J_coil_on_vessel
     + COIL_CLEARANCE_WEIGHT * J_coil_clearance
+    + CYLINDER_WEIGHT * J_cylinder
     + CURRENT_WEIGHT * J_curr
     + WELL_WEIGHT * J_wells
     + FIELDLINE_MEANZ_WEIGHT * J_meanz
@@ -1536,6 +1614,9 @@ if EC_ENABLED:
 # Snowflake discriminant constraint Delta > DISCRIMINANT_THRESHOLD (--discriminant 1, identity only).
 if discriminant_enabled:
     JF = JF + DISCRIMINANT_WEIGHT * J_discriminant
+# circumference bound of the extra circular coils (boozer_all.py --extra-coils circ)
+if J_circ is not None:
+    JF = JF + CIRC_WEIGHT * J_circ
 
 
 penalties = {'nonQS': J_nonQSRatio,
@@ -1551,6 +1632,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT * J_plasma_to_vessel_margin,
         'coil-on-vessel': COIL_ON_VESSEL_WEIGHT * J_coil_on_vessel,
         'coil-clearance': COIL_CLEARANCE_WEIGHT * J_coil_clearance,
+        'coil-cylinder': CYLINDER_WEIGHT * J_cylinder,
         'current':CURRENT_WEIGHT * J_curr,
         'well':WELL_WEIGHT * J_wells,
         'fieldline meanz': FIELDLINE_MEANZ_WEIGHT * J_meanz,
@@ -1579,6 +1661,7 @@ penalty_weights = {
         'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT,
         'coil-on-vessel': COIL_ON_VESSEL_WEIGHT,
         'coil-clearance': COIL_CLEARANCE_WEIGHT,
+        'coil-cylinder': CYLINDER_WEIGHT,
         'current': CURRENT_WEIGHT,
         'well': WELL_WEIGHT,
         'fieldline meanz': FIELDLINE_MEANZ_WEIGHT,
@@ -1622,6 +1705,9 @@ if EC_ENABLED:
 if discriminant_enabled:
     penalties['snowflake discriminant'] = DISCRIMINANT_WEIGHT * J_discriminant
     penalty_weights['snowflake discriminant'] = DISCRIMINANT_WEIGHT
+if J_circ is not None:
+    penalties['extra circumference'] = CIRC_WEIGHT * J_circ
+    penalty_weights['extra circumference'] = CIRC_WEIGHT
 
 # fix some currents
 for bbsurf in boozer_surfaces:
@@ -1707,7 +1793,7 @@ def callback(dofs, full=False):
     else:
         dat_dict['dJ'] = JF.dJ().copy()
 
-    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
+    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx + extra_base_idx]
     kappas = [np.max(c.kappa()) for c in base_curves]
 
     console = Console(width=250)
@@ -1715,6 +1801,12 @@ def callback(dofs, full=False):
     table1.add_row(*['iter', 'J', 'dJ', 'dist'])
     table1.add_row(*[f'{dat_dict["iter"]}', f'{dat_dict["J"]:.2e}', f'{np.max(np.abs(dat_dict["dJ"])):.2e}', f'{dist:.2e}'])
     console.print(table1)
+    # extra coils (boozer_all.py --extra-coils): the signed current of each base coil in each
+    # configuration, at every iteration
+    if extra_base_idx:
+        print(f'extra coil currents ({EXTRA_KIND}) [A]: ' + ' | '.join(
+            f'config {ci}: ' + '  '.join(f'{bsurf.biotsavart.coils[i].current.get_value():+.4e}' for i in extra_base_idx)
+            for ci, bsurf in zip(([2] if SNOW_ONLY else [1, 2]), boozer_surfaces)), flush=True)
 
     # The two full tables (every penalty, every state) are printed every 10 iterations, with
     # the saves at the end of this function, and when asked (full=True). In between, only the
@@ -1782,6 +1874,13 @@ def callback(dofs, full=False):
     min_coil_clearance_distance, _, _ = J_coil_clearance.shortest_distance()
     table2.add_row('minimum coil-on-vessel distance', f'{min_coil_on_vessel_distance:.3e}')
     table2.add_row('minimum coil-clearance distance', f'{min_coil_clearance_distance:.3e}')
+    _cx, _cy = cylinder.center()
+    table2.add_row('coil to keep-out cylinder', f'{J_cylinder.shortest_distance()[0]:.3e} m  (bound: >= {CYLINDER_CLEARANCE}; '
+                   f'r = {CYLINDER_RADIUS}, axis at x0 = {_cx:+.4f}, y0 = {_cy:+.4f})')
+    for k, (i, c) in enumerate(zip(extra_base_idx, extra_base_curves)):
+        table2.add_row(f'extra coil {k} ({EXTRA_KIND})',
+                       'I = ' + ' / '.join(f'{bsurf.biotsavart.coils[i].current.get_value():+.4e}' for bsurf in boozer_surfaces)
+                       + f' A (per configuration); {extra_coils.describe(c)}')
 
     # Zip the FULL dof names against the FULL dof vector: local_dof_names lists only
     # the FREE dofs, so if any dof is fixed (e.g. n0z for the SN welded-pipe vessel,
@@ -1999,8 +2098,9 @@ for j in range(N_POLISH_STAGES):
     callback(dofs, full=True)
 
     # MODULAR coil currents (A): bounded by CURRENT_THRESHOLD; weight CURRENT_WEIGHT.
+    # (the extra coils of boozer_all.py --extra-coils have the same bound)
     modular_currents = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value())
-                        for boozer_surface in boozer_surfaces for idx in base_curve_idx]
+                        for boozer_surface in boozer_surfaces for idx in base_curve_idx + extra_base_idx]
     curr_err = max([max(c - CURRENT_THRESHOLD, 0.) / CURRENT_THRESHOLD for c in modular_currents])
     # AUX currents (A): BOTH dependent and independent are bounded by AUX_CURRENT_EPS
     # and share ONE weight (AUX_CURRENT_WEIGHT) via J_aux_current. dm.J() is the mu
@@ -2077,6 +2177,12 @@ for j in range(N_POLISH_STAGES):
         max(COIL_CLEARANCE_THRESHOLD - min_coil_clearance_distance, 0)
         / np.abs(COIL_CLEARANCE_THRESHOLD)
     )
+    # keep-out cylinder: depth of the deepest coil point inside it, relative to its radius
+    min_coil_cylinder_distance = float(J_cylinder.shortest_distance()[0])
+    cylinder_err = max(CYLINDER_CLEARANCE - min_coil_cylinder_distance, 0) / CYLINDER_RADIUS
+    # extra circular coils: relative excess of the largest circumference over CIRC_MAX
+    circ_max_length = max(L.J() for L in circ_lengths) if circ_lengths else None
+    circ_err = max(circ_max_length - extra_coils.CIRC_MAX, 0) / extra_coils.CIRC_MAX if circ_lengths else 0.0
 
     msc = [J.J() for J in Jmscs]
     msc_err = max(np.max(msc) - MEAN_SQUARED_CURVATURE_THRESHOLD, 0)/np.abs(MEAN_SQUARED_CURVATURE_THRESHOLD)
@@ -2128,6 +2234,12 @@ for j in range(N_POLISH_STAGES):
     if coil_clearance_err > 0.001 and COIL_CLEARANCE_WEIGHT.value != 0.:
         COIL_CLEARANCE_WEIGHT *= 10
         print("COIL-CLEARANCE ERROR", coil_clearance_err)
+    if cylinder_err > 0.001 and CYLINDER_WEIGHT.value != 0.:
+        CYLINDER_WEIGHT *= 10
+        print("COIL-CYLINDER ERROR", cylinder_err)
+    if circ_err > 0.001 and CIRC_WEIGHT.value != 0.:
+        CIRC_WEIGHT *= 10
+        print("EXTRA CIRCUMFERENCE ERROR", circ_err)
     if iota_err > 0.001 and IOTAS_WEIGHT.value != 0.:
         IOTAS_WEIGHT*=10
         print("IOTA ERROR", iota_err)
@@ -2255,6 +2367,12 @@ for j in range(N_POLISH_STAGES):
     config['ARCLENGTH_WEIGHT'] = ARCLENGTH_WEIGHT.value
     config['COIL_ON_VESSEL_WEIGHT'] = COIL_ON_VESSEL_WEIGHT.value
     config['COIL_CLEARANCE_WEIGHT'] = COIL_CLEARANCE_WEIGHT.value
+    # keep-out cylinder: escalated weight and current position of its axis
+    config['CYLINDER_WEIGHT'] = CYLINDER_WEIGHT.value
+    config['CYLINDER_X0'], config['CYLINDER_Y0'] = cylinder.center()
+    # extra coils: their kind (kept) and the escalated circumference weight
+    config['EXTRA_COILS'] = EXTRA_KIND
+    config['CIRC_WEIGHT'] = CIRC_WEIGHT.value
     config['WELL_WEIGHT'] = WELL_WEIGHT.value
     config['FIELDLINE_MEANZ_WEIGHT'] = FIELDLINE_MEANZ_WEIGHT.value
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
@@ -2315,6 +2433,10 @@ final_metrics = {
                                                                                    PLASMA_VESSEL_MARGIN_THRESHOLD, plasma_vessel_margin_err if PLASMA_VESSEL_MARGIN_WEIGHT.value != 0. else 0.0),
     'coil_on_vessel':             (min_coil_on_vessel_distance,                    COIL_ON_VESSEL_THRESHOLD,      coil_on_vessel_err if COIL_ON_VESSEL_WEIGHT.value != 0. else 0.0),
     'coil_clearance':             (min_coil_clearance_distance,                    COIL_CLEARANCE_THRESHOLD,      coil_clearance_err if COIL_CLEARANCE_WEIGHT.value != 0. else 0.0),
+    # keep-out cylinder: smallest signed distance of the modular coils to it, position of its axis
+    'coil_cylinder_distance':     (min_coil_cylinder_distance,                     CYLINDER_CLEARANCE,            cylinder_err if CYLINDER_WEIGHT.value != 0. else 0.0),
+    'cylinder_x0':                (cylinder.center()[0],                           None,                          None),
+    'cylinder_y0':                (cylinder.center()[1],                           None,                          None),
     'msc':                        (max(msc),                                       MEAN_SQUARED_CURVATURE_THRESHOLD, msc_err if MEAN_SQUARED_CURVATURE_WEIGHT.value != 0. else 0.0),
     'curvature':                  (max(np.max(c.kappa()) for c in base_curves),    CURVATURE_THRESHOLD,           curv_err if CURVATURE_WEIGHT.value != 0. else 0.0),
     'arclength':                  (alen_err,                                       0.0,                           alen_err if ARCLENGTH_WEIGHT.value != 0. else 0.0),
@@ -2396,6 +2518,13 @@ if isinstance(sdf, (PillPipeSDF, RennaissanceSDF, TorusSDF)):
 # reported; gated on its relative shortfall below DISCRIMINANT_THRESHOLD only when the
 # constraint is enabled (--discriminant 1, identity polish).
 _disc_min = min(d.value() for d in discriminants)
+# extra coils: the signed current of each base coil in each configuration (the current bound
+# covers them), and for circular coils the largest circumference against its bound (gate)
+for k, i in enumerate(extra_base_idx):
+    for ci, bsurf in zip(([2] if SNOW_ONLY else [1, 2]), boozer_surfaces):
+        final_metrics[f'extra_current_{k}_config{ci}'] = (float(bsurf.biotsavart.coils[i].current.get_value()), None, None)
+if circ_lengths:
+    final_metrics['extra_circumference'] = (circ_max_length, extra_coils.CIRC_MAX, circ_err if CIRC_WEIGHT.value != 0. else 0.0)
 if discriminant_enabled:
     final_metrics['snowflake_discriminant_Delta'] = (
         _disc_min, DISCRIMINANT_THRESHOLD,
@@ -2524,3 +2653,41 @@ for _k, _name in enumerate(('config2',) if SNOW_ONLY else ('config1', 'config2')
     save([[out_boozer_surfaces[_k]], [out_iota_Gs[_k]], [out_axes[_k]], [xpoints[_k]], sdf],
          OUT_DIR + f'{_name}/design_double_final_{DEVICE_TAG}.json')
     print(f"wrote {OUT_DIR}{_name}/design_double_final_{DEVICE_TAG}.json")
+
+# ---- continuation of the bound on E[C] (--ec-continuation) -------------------------------------
+# This level is finished and written. If it is in spec (the 0.1% gate of prefix.sh) and bounds
+# remain, the script restarts itself in the same process (exec: no memory kept by this level) on
+# the design it has just written, with the next bound, in the sibling directory named with
+# _ec=<next>_from=<this>; the first level out of spec ends the continuation.
+_next = [b.strip() for b in str(args.ec_continuation).split(',') if b.strip()]
+if _next and EC_ENABLED:
+    import re
+    import sys
+    _cur_dir = OUT_DIR.rstrip('/')
+    _cur_name = os.path.basename(_cur_dir)
+    _m = re.search(r'_ec=([^_]+)(_from=[^_]+)?_', _cur_name)
+    _cur_bound = _m.group(1) if _m else f'{EC_MAX:g}'
+    if max_rel_err > 0.001:
+        print(f"E[C] continuation stopped: level E[C] <= {_cur_bound} ended out of spec "
+              f"(max rel err {max_rel_err:.3e}); the next bounds {_next} are not run", flush=True)
+    else:
+        _b1, _rest = _next[0], _next[1:]
+        _new_name = (_cur_name[:_m.start()] + f'_ec={_b1}_from={_cur_bound}_' + _cur_name[_m.end():] if _m
+                     else _cur_name + f'_ec={_b1}_from={_cur_bound}')
+        _new_dir = os.path.join(os.path.dirname(_cur_dir), _new_name)
+        os.makedirs(_new_dir, exist_ok=True)
+        _argv = [sys.executable, os.path.abspath(__file__), OUT_DIR + f'design_double_final_{DEVICE_TAG}.json',
+                 '--ec-max', _b1, '--ec-section', str(config['EC_SECTION']), '--trace-min', str(TRACE_MIN),
+                 '--target', args.target, '--risk-length-scale', str(args.risk_length_scale),
+                 '--stages', str(args.stages), '--maxiter', str(args.maxiter), '--out-dir', _new_dir]
+        if args.aux_current_max is not None:
+            _argv += ['--aux-current-max', str(args.aux_current_max)]
+        if args.discriminant is not None:
+            _argv += ['--discriminant', str(args.discriminant)]
+        if _rest:
+            _argv += ['--ec-continuation', ','.join(_rest)]
+        print(f"E[C] continuation: level E[C] <= {_cur_bound} in spec; next level E[C] <= {_b1} "
+              f"(then {_rest if _rest else 'none'}) in {_new_dir}", flush=True)
+        print("CONTINUATION_EXEC " + ' '.join(_argv), flush=True)
+        sys.stdout.flush(); sys.stderr.flush()
+        os.execv(sys.executable, _argv)

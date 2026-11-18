@@ -40,10 +40,12 @@ from star_lite_design.utils.displacement import FieldLineMeanZ
 from star_lite_design.utils.magneticwell import MagneticWell
 from star_lite_design.utils.modb_on_fieldline import ModBOnFieldLine, ModBRippleOnFieldLine
 from star_lite_design.utils.pillpipevessel import RennaissanceSDF, PillPipeSDF, TorusSDF, VesselDistance
+from star_lite_design.utils.vertical_cylinder import VerticalCylinderSDF
 from star_lite_design.utils.helicalvessel import HelicalVesselSDF, FOOT_TOL
 from star_lite_design.utils.helicalcylindervessel import HelicalCylinderVesselSDF
 
 from star_lite_design.utils import sn_setup
+from star_lite_design.utils import extra_coils
 from star_lite_design.utils.xpoint_surface_distance import XpointSurfaceDistance
 from star_lite_design.utils.curve_periodicfieldline_distance import CurvesPeriodicFieldlineDistance
 
@@ -99,6 +101,15 @@ parser.add_argument("--mono-thr", type=str, default="0.1")
 # angles, or OFF for no bound. It is the last field of the folder name (TASK_NAME) but NOT part
 # of the perturbation seed, so a given attempt starts from the same coils for every bound.
 parser.add_argument("--elongation", type=str, default="OFF")
+# --extra-coils: extra coils added to designB (utils/extra_coils.py), currents starting at 0 (one
+# per base coil), each base with its copy rotated by pi about z: 'circ' 4 vertical circular coils
+# (dofs: current, radius, centre, orientation; circumference <= 4.0 m), 'T' design A's 2 T coils
+# (frozen shape; dofs: current, translation, rotation), 'L' design A's 4 L coils (likewise), or
+# 'none'. Single-null only. The coil-coil distance, the vessel clearance, the keep-out cylinder,
+# the current bound and the force bound apply to them as to the modular coils. Last field of the
+# folder name (_extra=<kind>, absent for none) but NOT part of the perturbation seed: attempt k
+# starts from the same perturbed modular coils for every kind.
+parser.add_argument("--extra-coils", type=str, default="none", choices=list(extra_coils.EXTRA_KINDS))
 
 args = parser.parse_args()
 
@@ -144,7 +155,7 @@ SEED_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_ves
              f"_distance={distance_weight}_configID={config_id}_vesselID={vessel_id}"
              f"_mono={mono}_null={null_type}_num_aux={num_aux}_AR={args.AR}"
              f"_attempt={attempt}_force={args.force}_monothr={args.mono_thr}")
-TASK_NAME = SEED_NAME + f"_elong={args.elongation}"
+TASK_NAME = SEED_NAME + f"_elong={args.elongation}" + ("" if args.extra_coils == 'none' else f"_extra={args.extra_coils}")
 DEVICE_ID = zlib.crc32(SEED_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
 print(f"Task: {TASK_NAME}")
@@ -178,10 +189,20 @@ xpoints = data[3][config_id:config_id+1] # X-point CurveRZFouriers
 # dofs let the optimizer build the single-null asymmetry. bottom_xpoints stays
 # None for DN.
 bottom_xpoints = None
+# extra coils (--extra-coils): built here at their initial placement, currents 0, on the
+# quadrature points and with the current scale of the designB coils, and appended to the
+# rebuilt modular coils by setup_single_null (bases at 4, 5, ..., then their copies)
+extra_coil_list, extra_base_curves, extra_base_currents = [], [], []
+if args.extra_coils != 'none':
+    if null_type != 'SN':
+        raise SystemExit("--extra-coils needs --null SN")
+    _c0 = boozer_surfaces[0].biotsavart.coils
+    extra_coil_list, extra_base_curves, extra_base_currents = extra_coils.make_extra_coils(
+        args.extra_coils, len(_c0[0].curve.quadpoints), sn_setup._design_current_scale(_c0))
 if null_type == 'SN':
     (boozer_surfaces, axes, xpoints, bottom_xpoints,
      _sn_coils, _sn_base_curves, _sn_base_currents) = sn_setup.setup_single_null(
-        boozer_surfaces, iota_Gs, axes, xpoints, base_idx=[0, 2])
+        boozer_surfaces, iota_Gs, axes, xpoints, base_idx=[0, 2], extra_coils=extra_coil_list)
 
 #boozer_surfaces = [boozer_surfaces[1]]
 #axes = [axes[1]]
@@ -205,6 +226,12 @@ curves = [c.curve for c in coils]
 # base coils at indices [0,1] (rotated copies at 2,3).
 base_curve_idx = [0, 1] if null_type == 'SN' else [0, 2]
 base_curves = [curves[i] for i in base_curve_idx]
+# extra coils: their base coils come after the 4 modular coils. They are not in base_curves (no
+# length, curvature or arclength penalty: frozen shapes or circles) but they are in `curves` (coil-
+# coil distance, keep-out cylinder, bottom X-point-to-coil distance), and in the current bound,
+# the forces and the vessel clearance below (extra_base_idx).
+extra_base_idx = list(range(4, 4 + len(extra_base_curves)))
+assert all(coils[i].curve is c for i, c in zip(extra_base_idx, extra_base_curves))
 
 if vessel_id == 0:
     bx = 0.5
@@ -280,6 +307,25 @@ config['COIL_CLEARANCE_WEIGHT'] = 0.0 if on_vessel else config['COIL_TO_VESSEL_W
 
 COIL_ON_VESSEL_WEIGHT = Weight(config['COIL_ON_VESSEL_WEIGHT'])
 COIL_CLEARANCE_WEIGHT = Weight(config['COIL_CLEARANCE_WEIGHT'])
+
+# Keep-out cylinder: an infinite vertical cylinder of radius CYLINDER_RADIUS (diameter 25 cm)
+# that the modular coils may not enter (the aux coils are not concerned). Its axis (x0, y0) is
+# free, started at the origin, and recorded in the yaml so that the next steps continue from it.
+# Penalty: VesselDistance on all the modular coils, mean max(CYLINDER_CLEARANCE - sdf, 0)^2,
+# with its own weight, escalated x10 after each outer BFGS iteration while violated.
+config.setdefault('CYLINDER_RADIUS', 0.125)
+config.setdefault('CYLINDER_CLEARANCE', 0.0)
+config.setdefault('CYLINDER_X0', 0.0)
+config.setdefault('CYLINDER_Y0', 0.0)
+config.setdefault('CYLINDER_WEIGHT', config['COIL_TO_VESSEL_WEIGHT'])
+CYLINDER_RADIUS = float(config['CYLINDER_RADIUS'])
+CYLINDER_CLEARANCE = float(config['CYLINDER_CLEARANCE'])
+CYLINDER_WEIGHT = Weight(config['CYLINDER_WEIGHT'])
+
+# Extra circular coils (--extra-coils circ): circumference 2 pi r <= CIRC_MAX (4.0 m), quadratic
+# penalty max(L - CIRC_MAX, 0)^2 per circle, own weight escalated x10 while violated.
+config.setdefault('CIRC_WEIGHT', config['COIL_TO_VESSEL_WEIGHT'])
+CIRC_WEIGHT = Weight(config['CIRC_WEIGHT'])
 
 
 PLASMA_VESSEL_MARGIN_THRESHOLD = margin_target
@@ -426,7 +472,7 @@ J_modB_ripple = sum(modB_ripples)
 
 J_curr = None
 for boozer_surface in boozer_surfaces:
-    for idx in base_curve_idx:
+    for idx in base_curve_idx + extra_base_idx:      # the extra coils have the same current bound
         curr = boozer_surface.biotsavart.coils[idx].current
         if J_curr is None:
             J_curr = CurrentBound(curr.current_to_scale, CURRENT_THRESHOLD/curr.scale)
@@ -453,16 +499,18 @@ else:
 FORCE_THRESHOLD = config['FORCE_THRESHOLD']
 FORCE_WEIGHT = Weight(config['FORCE_WEIGHT'])
 _force_reg = regularization_circ(COIL_MINOR_RADIUS)
-force_targets = [RegularizedCoil(coils[i].curve, coils[i].current, _force_reg) for i in base_curve_idx]
-force_sources = [c for j, c in enumerate(coils) if j not in base_curve_idx]
+# the extra base coils are force targets too (same bound; their copies carry the same force)
+force_idx = base_curve_idx + extra_base_idx
+force_targets = [RegularizedCoil(coils[i].curve, coils[i].current, _force_reg) for i in force_idx]
+force_sources = [c for j, c in enumerate(coils) if j not in force_idx]
 J_force = LpCurveForce(force_targets, force_sources, p=2, threshold=FORCE_THRESHOLD / 1e6)
 
 
 def max_coil_force():
-    """Largest Lorentz force per unit length |dF/dl| (N/m) over the base coils."""
+    """Largest Lorentz force per unit length |dF/dl| (N/m) over the base coils (modular and extra)."""
     return max(float(np.max(np.linalg.norm(
         t.force([c for j, c in enumerate(coils) if j != i]), axis=1)))
-        for t, i in zip(force_targets, base_curve_idx))
+        for t, i in zip(force_targets, force_idx))
 
 plasma_boundary_entities = xpoints + boozer_surfaces
 plasma_boundary_signs = np.array([-1.0 for _ in xpoints] + [-1.0 for _ in boozer_surfaces])
@@ -479,8 +527,9 @@ J_coil_on_vessel = VesselDistance(
     COIL_ON_VESSEL_THRESHOLD,
 )
 
-coil_clearance_entities = base_curves
-coil_clearance_signs = np.array([1.0 for _ in base_curves])
+# the extra base coils keep the same clearance from the vessel as the modular coils
+coil_clearance_entities = base_curves + extra_base_curves
+coil_clearance_signs = np.array([1.0 for _ in coil_clearance_entities])
 J_coil_clearance = VesselDistance(
     sdf,
     coil_clearance_entities,
@@ -488,7 +537,21 @@ J_coil_clearance = VesselDistance(
     COIL_CLEARANCE_THRESHOLD,
 )
 
-magnetic_wells = [MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes, boozer_surfaces)]
+# keep-out cylinder: ALL the modular coils (not only the base curves: once the axis of the
+# cylinder leaves the origin, the symmetric copies of a coil are no longer equivalent)
+cylinder = VerticalCylinderSDF(CYLINDER_RADIUS, config['CYLINDER_X0'], config['CYLINDER_Y0'])
+J_cylinder = VesselDistance(
+    cylinder,
+    list(curves),
+    np.array([1.0 for _ in curves]),
+    CYLINDER_CLEARANCE,
+)
+
+# circumference of the extra circular coils (--extra-coils circ): <= CIRC_MAX
+circ_lengths = [CurveLength(c) for c in extra_base_curves] if args.extra_coils == 'circ' else []
+J_circ = sum(QuadraticPenalty(L, extra_coils.CIRC_MAX, 'max') for L in circ_lengths) if circ_lengths else None
+
+magnetic_wells =[MagneticWell(axis, boozer_surface, WELL_THRESHOLD) for axis, boozer_surface in zip(axes, boozer_surfaces)]
 J_wells = sum(magnetic_wells)
 
 meanzs = [FieldLineMeanZ(xpoint, FIELDLINE_MEANZ_THRESHOLD) for xpoint in xpoints]
@@ -567,6 +630,7 @@ JF = (J_nonQSRatio
     + PLASMA_VESSEL_MARGIN_WEIGHT * J_plasma_to_vessel_margin
     + COIL_ON_VESSEL_WEIGHT * J_coil_on_vessel
     + COIL_CLEARANCE_WEIGHT * J_coil_clearance
+    + CYLINDER_WEIGHT * J_cylinder
     + CURRENT_WEIGHT * J_curr
     + WELL_WEIGHT * J_wells
     + FIELDLINE_MEANZ_WEIGHT * J_meanz
@@ -581,6 +645,9 @@ if axis_iota_enabled:
 # Near-axis elongation bound (only with --elongation <bound>), likewise in both objectives.
 if elongation_enabled:
     JF = JF + ELONGATION_WEIGHT * J_elongation
+# Circumference bound of the extra circular coils (only with --extra-coils circ), likewise.
+if J_circ is not None:
+    JF = JF + CIRC_WEIGHT * J_circ
 
 # JF_base excludes the SN bottom-X-point penalties. For SN the ACTIVE objective
 # JF adds the bottom X-point-to-surface and X-point-to-coil penalties, and BFGS
@@ -606,6 +673,7 @@ penalties = {'nonQS': J_nonQSRatio,
         'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT * J_plasma_to_vessel_margin,
         'coil-on-vessel': COIL_ON_VESSEL_WEIGHT * J_coil_on_vessel,
         'coil-clearance': COIL_CLEARANCE_WEIGHT * J_coil_clearance,
+        'coil-cylinder': CYLINDER_WEIGHT * J_cylinder,
         'current':CURRENT_WEIGHT * J_curr,
         'well':WELL_WEIGHT * J_wells,
         'fieldline meanz': FIELDLINE_MEANZ_WEIGHT * J_meanz,
@@ -637,6 +705,7 @@ penalty_weights = {
         'plasma-boundary-to-vessel': PLASMA_VESSEL_MARGIN_WEIGHT,
         'coil-on-vessel': COIL_ON_VESSEL_WEIGHT,
         'coil-clearance': COIL_CLEARANCE_WEIGHT,
+        'coil-cylinder': CYLINDER_WEIGHT,
         'current': CURRENT_WEIGHT,
         'well': WELL_WEIGHT,
         'fieldline meanz': FIELDLINE_MEANZ_WEIGHT,
@@ -666,6 +735,9 @@ if axis_iota_enabled:
 if elongation_enabled:
     penalties['elongation'] = ELONGATION_WEIGHT * J_elongation
     penalty_weights['elongation'] = ELONGATION_WEIGHT
+if J_circ is not None:
+    penalties['extra circumference'] = CIRC_WEIGHT * J_circ
+    penalty_weights['extra circumference'] = CIRC_WEIGHT
 
 # fix some currents
 for bbsurf in boozer_surfaces:
@@ -787,10 +859,38 @@ def _resolve_perturbed():
             and not any(bs.surface.is_self_intersecting() for bs in boozer_surfaces))
 
 
+def _prescale_weights(reason):
+    """The yaml weights were tuned for the unperturbed device; a perturbation can
+    push a penalty's weighted contribution weight*penalty.J() above 1, letting
+    it dominate the objective. Mirror boozer_singular_opt.py: shrink any weight
+    whose CURRENT product exceeds 1 -- by repeated factors of 10 -- so each
+    weighted term starts below 1. The in-loop x10 escalation can raise it back as
+    the constraints demand. Modifying each Weight in place is seen by JF/JF_base
+    (same objects)."""
+    print(f"Pre-scaling penalty weights so each weighted term starts below 1 {reason}:")
+    for _name, _scaled in penalties.items():
+        _w = penalty_weights.get(_name)
+        if _w is None or _w.value == 0.:
+            continue
+        _prod = _scaled.J()
+        if not np.isfinite(_prod) or _prod <= 1.0:
+            continue
+        _bare = _prod / _w.value          # the unweighted penalty value (dofs fixed here)
+        while _w.value * _bare > 1.0:
+            _w *= 0.1
+        print(f"  {_name}: weight -> {_w.value:.3e}  (penalty={_bare:.3e}, product {_prod:.3e} -> {_w.value * _bare:.3e})")
+
+
 if attempt == 0:
     # attempt 0 is the UNPERTURBED reference device: keep the base coils exactly
     # as loaded (already solved above) and skip the perturbation entirely.
     print("attempt 0: no base-coil perturbation (unperturbed reference device)")
+    # With extra coils (--extra-coils), the initial placement already violates the coil-coil
+    # distance (they are 2 to 9 cm from the modular coils, for a minimum of 15 cm): without the
+    # pre-scaling the attempts >= 1 get, that penalty dominates the objective and BFGS stalls
+    # (test of 2026-11-18, L coils: J = 2.3e4, 23 iterations in 15 outer iterations).
+    if extra_base_idx:
+        _prescale_weights("(attempt 0 with extra coils)")
 else:
     # SIMSOPT Gauss linking number over the full modular-coil set: 0 if no pair
     # is interlocked, >=1 otherwise. The unperturbed coils are unlinked; a
@@ -830,25 +930,7 @@ else:
             f"could not find a converged base-coil perturbation in {MAX_PERTURB_TRIES} tries "
             f"(device {DEVICE_ID}, task {TASK_NAME})")
 
-    # The yaml weights were tuned for the unperturbed device; a perturbation can
-    # push a penalty's weighted contribution weight*penalty.J() above 1, letting
-    # it dominate the objective. Mirror boozer_singular_opt.py: after the
-    # perturbation, shrink any weight whose CURRENT product exceeds 1 -- by
-    # repeated factors of 10 -- so each weighted term starts below 1. The in-loop
-    # x10 escalation can raise it back as the constraints demand. Modifying each
-    # Weight in place is seen by JF/JF_base (same objects).
-    print("Pre-scaling penalty weights so each weighted term starts below 1 after the perturbation:")
-    for _name, _scaled in penalties.items():
-        _w = penalty_weights.get(_name)
-        if _w is None or _w.value == 0.:
-            continue
-        _prod = _scaled.J()
-        if not np.isfinite(_prod) or _prod <= 1.0:
-            continue
-        _bare = _prod / _w.value          # the unweighted penalty value (dofs fixed here)
-        while _w.value * _bare > 1.0:
-            _w *= 0.1
-        print(f"  {_name}: weight -> {_w.value:.3e}  (penalty={_bare:.3e}, product {_prod:.3e} -> {_w.value * _bare:.3e})")
+    _prescale_weights("after the perturbation")
 
 print(JF.dof_names, JF.x.size)
 #import ipdb;ipdb.set_trace()
@@ -904,7 +986,7 @@ def callback(dofs, full=False):
     else:
         dat_dict['dJ'] = JF.dJ().copy()
 
-    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
+    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx + extra_base_idx]
     kappas = [np.max(c.kappa()) for c in base_curves]
     
     console = Console(width=250)
@@ -912,6 +994,10 @@ def callback(dofs, full=False):
     table1.add_row(*['iter', 'J', 'dJ', 'dist'])
     table1.add_row(*[f'{dat_dict["iter"]}', f'{dat_dict["J"]:.2e}', f'{np.max(np.abs(dat_dict["dJ"])):.2e}', f'{dist:.2e}'])
     console.print(table1)
+    # extra coils (--extra-coils): the signed current of each base coil, at every iteration
+    if extra_base_idx:
+        print(f'extra coil currents ({args.extra_coils}) [A]: ' + '  '.join(
+            f'{coils[i].current.get_value():+.4e}' for i in extra_base_idx), flush=True)
 
     # The two full tables (every penalty, every state) are printed every 10 iterations, with
     # the saves of _callback_end(), and when asked (full=True). In between, only the line above.
@@ -965,6 +1051,12 @@ def _full_tables(currents_list, kappas):
     min_coil_clearance_distance, _, _ = J_coil_clearance.shortest_distance()
     table2.add_row('minimum coil-on-vessel distance', f'{min_coil_on_vessel_distance:.3e}')
     table2.add_row('minimum coil-clearance distance', f'{min_coil_clearance_distance:.3e}')
+    _cx, _cy = cylinder.center()
+    table2.add_row('coil to keep-out cylinder', f'{J_cylinder.shortest_distance()[0]:.3e} m  (bound: >= {CYLINDER_CLEARANCE}; '
+                   f'r = {CYLINDER_RADIUS}, axis at x0 = {_cx:+.4f}, y0 = {_cy:+.4f})')
+    for k, (i, c) in enumerate(zip(extra_base_idx, extra_base_curves)):
+        table2.add_row(f'extra coil {k} ({args.extra_coils})',
+                       f'I = {coils[i].current.get_value():+.4e} A; {extra_coils.describe(c)}')
 
     # Zip the FULL dof names against the FULL dof vector: local_dof_names lists only
     # the FREE dofs, so if any dof is fixed (e.g. n0z for the SN welded-pipe vessel,
@@ -1354,7 +1446,7 @@ for j in range(15):
         print('XpointSurfaceDistance reached 0 at post-minimize callback: dropped '
               'bottom X-point penalties, switched to base objective')
     
-    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx]
+    currents_list = [np.abs(boozer_surface.biotsavart.coils[idx].current.get_value()) for boozer_surface in boozer_surfaces for idx in base_curve_idx + extra_base_idx]
     curr_err = max([max([c-CURRENT_THRESHOLD, 0.])/CURRENT_THRESHOLD for c in currents_list])
     iota_err = max([np.abs(IOTAS.J() - IOT_TARGET)/np.abs(IOT_TARGET) for IOTAS, IOT_TARGET in zip(IOTAS_LIST, IOTAS_TARGET)])
     axis_iota_err = max([np.abs(aio.J() - tgt)/np.abs(tgt) for aio, tgt in zip(AXIS_IOTA_LIST, AXIS_IOTA_TARGET)]) if axis_iota_enabled else 0.0
@@ -1379,6 +1471,14 @@ for j in range(15):
         max(COIL_CLEARANCE_THRESHOLD - min_coil_clearance_distance, 0)
         / np.abs(COIL_CLEARANCE_THRESHOLD)
     )
+
+    # keep-out cylinder: how deep the deepest coil point is inside it (sdf below the clearance),
+    # relative to the radius of the cylinder (the clearance itself is 0 by default)
+    min_coil_cylinder_distance = float(J_cylinder.shortest_distance()[0])
+    cylinder_err = max(CYLINDER_CLEARANCE - min_coil_cylinder_distance, 0) / CYLINDER_RADIUS
+    # extra circular coils: relative excess of the largest circumference over CIRC_MAX
+    circ_max_length = max(L.J() for L in circ_lengths) if circ_lengths else None
+    circ_err = max(circ_max_length - extra_coils.CIRC_MAX, 0) / extra_coils.CIRC_MAX if circ_lengths else 0.0
 
     vessel_shape_err = 0.
     if vessel_id == 0:
@@ -1464,6 +1564,12 @@ for j in range(15):
     if ((not on_vessel) and coil_clearance_err > 0.001) and COIL_CLEARANCE_WEIGHT.value != 0.:
         COIL_CLEARANCE_WEIGHT *= 10
         print("COIL-CLEARANCE ERROR", coil_clearance_err)
+    if cylinder_err > 0.001 and CYLINDER_WEIGHT.value != 0.:
+        CYLINDER_WEIGHT *= 10
+        print("COIL-CYLINDER ERROR", cylinder_err)
+    if circ_err > 0.001 and CIRC_WEIGHT.value != 0.:
+        CIRC_WEIGHT *= 10
+        print("EXTRA CIRCUMFERENCE ERROR", circ_err)
     if iota_err > 0.001 and IOTAS_WEIGHT.value != 0.:
         IOTAS_WEIGHT*=10
         print("IOTA ERROR", iota_err)
@@ -1579,6 +1685,12 @@ for j in range(15):
     config['ARCLENGTH_WEIGHT'] = ARCLENGTH_WEIGHT.value
     config['COIL_ON_VESSEL_WEIGHT'] = COIL_ON_VESSEL_WEIGHT.value
     config['COIL_CLEARANCE_WEIGHT'] = COIL_CLEARANCE_WEIGHT.value
+    # keep-out cylinder: escalated weight and current position of its axis (read by the next step)
+    config['CYLINDER_WEIGHT'] = CYLINDER_WEIGHT.value
+    config['CYLINDER_X0'], config['CYLINDER_Y0'] = cylinder.center()
+    # extra coils (read by the next step): their kind, and the escalated circumference weight
+    config['EXTRA_COILS'] = args.extra_coils
+    config['CIRC_WEIGHT'] = CIRC_WEIGHT.value
     config['WELL_WEIGHT'] = WELL_WEIGHT.value
     config['FIELDLINE_MEANZ_WEIGHT'] = FIELDLINE_MEANZ_WEIGHT.value
     config['FIELDLINE_MEANDIST_WEIGHT'] = FIELDLINE_MEANDIST_WEIGHT.value
@@ -1594,7 +1706,10 @@ for j in range(15):
         yaml.dump(config, f, default_flow_style=False)
 
 sdf.to_vtk(OUT_DIR + f'vessel_opt_final', nx=40, ny=40, nz=40)
-curves_to_vtk(curves, OUT_DIR + f"curves_opt_final")
+# the extra coils go to their own file (aux_coils_extra.vtu: mk_paraview.py draws them in orange)
+curves_to_vtk(curves[:4] if extra_base_idx else curves, OUT_DIR + f"curves_opt_final")
+if extra_base_idx:
+    curves_to_vtk(curves[4:], OUT_DIR + "aux_coils_extra")
 curves_to_vtk([xpoint.curve for xpoint in xpoints] + [bx.curve for bx in (bottom_xpoints or [])], OUT_DIR + f"xpoint_curves_opt_final")
 curves_to_vtk([axis.curve for axis in axes], OUT_DIR + f"ma_opt_final")
 for idx, boozer_surface in enumerate(boozer_surfaces):
@@ -1632,6 +1747,11 @@ final_metrics = {
                                                                                    PLASMA_VESSEL_MARGIN_THRESHOLD, plasma_vessel_margin_err if PLASMA_VESSEL_MARGIN_WEIGHT.value != 0. else 0.0),
     'coil_on_vessel':             (min_coil_on_vessel_distance,                    COIL_ON_VESSEL_THRESHOLD,      coil_on_vessel_err if COIL_ON_VESSEL_WEIGHT.value != 0. else 0.0),
     'coil_clearance':             (min_coil_clearance_distance,                    COIL_CLEARANCE_THRESHOLD,      coil_clearance_err if COIL_CLEARANCE_WEIGHT.value != 0. else 0.0),
+    # keep-out cylinder: smallest signed distance of the modular coils to it (relative excess
+    # over its radius in the gate), and the position of its axis
+    'coil_cylinder_distance':     (min_coil_cylinder_distance,                     CYLINDER_CLEARANCE,            cylinder_err if CYLINDER_WEIGHT.value != 0. else 0.0),
+    'cylinder_x0':                (cylinder.center()[0],                           None,                          None),
+    'cylinder_y0':                (cylinder.center()[1],                           None,                          None),
     'msc':                        (max(msc),                                       MEAN_SQUARED_CURVATURE_THRESHOLD, msc_err if MEAN_SQUARED_CURVATURE_WEIGHT.value != 0. else 0.0),
     'curvature':                  (max(np.max(c.kappa()) for c in base_curves),    CURVATURE_THRESHOLD,           curv_err if CURVATURE_WEIGHT.value != 0. else 0.0),
     'arclength':                  (alen_err,                                       0.0,                           alen_err if ARCLENGTH_WEIGHT.value != 0. else 0.0),
@@ -1649,6 +1769,12 @@ final_metrics = {
 # N_ELONGATION elongations against the bound; its relative excess feeds the 0.1% gate.
 if elongation_enabled:
     final_metrics['elongation_bound'] = (elongation_max, ELONGATION_MAX, elongation_err if ELONGATION_WEIGHT.value != 0. else 0.0)
+# extra coils: the signed current of each base coil (the current bound above covers them), and for
+# circular coils the largest circumference against its bound (part of the gate)
+for k, i in enumerate(extra_base_idx):
+    final_metrics[f'extra_current_{k}'] = (float(coils[i].current.get_value()), None, None)
+if circ_lengths:
+    final_metrics['extra_circumference'] = (circ_max_length, extra_coils.CIRC_MAX, circ_err if CIRC_WEIGHT.value != 0. else 0.0)
 
 # Helical vessel geometry: report the regime metrics (both must stay < 1) and the
 # centerline arclength variation in summary.txt. The two regime constraints carry a

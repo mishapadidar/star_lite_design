@@ -5,7 +5,7 @@
 # Does NOT touch ceph -- the master decides what to copy back.
 #
 #   run_boozer_all.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                     <vessel_id> <mono> <attempt> <null> [AR] [force] [mono_thr] [elongation]
+#                     <vessel_id> <mono> <attempt> <null> [AR] [force] [mono_thr] [elongation] [extra]
 #
 # force: maximum coil force per unit length in N/m, or OFF (default) for none.
 # mono_thr: monodromy threshold of the boozer_all constraint (default 0.1).
@@ -18,6 +18,8 @@ config="$6"; vessel_id="$7"; mono="$8"; attempt="$9"; null="${10}"; AR="${11:-0}
 force="${12:-OFF}"
 mono_thr="${13:-0.1}"
 elongation="${14:-OFF}"
+# extra coils (boozer_all.py --extra-coils): none (default), circ, T or L
+extra="${15:-none}"
 
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -62,4 +64,5 @@ fi
   --AR "$AR" \
   --force "$force" \
   --mono-thr "$mono_thr" \
-  --elongation "$elongation"
+  --elongation "$elongation" \
+  --extra-coils "$extra"

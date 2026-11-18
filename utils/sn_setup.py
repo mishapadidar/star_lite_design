@@ -114,7 +114,7 @@ def to_nonstellsym_fieldline(fieldline, new_coils, options=None):
     return pfl
 
 
-def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints, base_idx=SN_BASE_COIL_IDX):
+def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints, base_idx=SN_BASE_COIL_IDX, extra_coils=()):
     """Convert a loaded double-null (stellsym) design into a single-null
     (nfp=2, stellsym=False) one.
 
@@ -126,10 +126,16 @@ def setup_single_null(boozer_surfaces, iota_Gs, axes, xpoints, base_idx=SN_BASE_
     the stellsym mirror). At initialization everything reproduces the original
     device; the freed dofs let the optimizer build the single-null asymmetry.
 
+    extra_coils (utils/extra_coils.py, --extra-coils of boozer_all.py) are appended after the
+    rebuilt modular coils (designB: modular bases 0, 1, copies 2, 3, extra base 4, extra copy 5)
+    BEFORE the surfaces, axes and X-points are wrapped on the field; with their currents at 0
+    every solve reproduces the device without them. They are not in base_curves/base_currents.
+
     Returns: (new_boozer_surfaces, new_axes, new_xpoints, bottom_xpoints,
               new_coils, base_curves, base_currents)."""
     coils = boozer_surfaces[0].biotsavart.coils
     new_coils, base_curves, base_currents = rebuild_coils_single_null(coils, base_idx)
+    new_coils = list(new_coils) + list(extra_coils)
 
     new_bs, new_ax, new_xp, bot_xp = [], [], [], []
     for bsurf, (iota, G), axis, xp in zip(boozer_surfaces, iota_Gs, axes, xpoints):
