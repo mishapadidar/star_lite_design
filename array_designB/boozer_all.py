@@ -104,12 +104,22 @@ parser.add_argument("--elongation", type=str, default="OFF")
 # --extra-coils: extra coils added to designB (utils/extra_coils.py), currents starting at 0 (one
 # per base coil), each base with its copy rotated by pi about z: 'circ' 4 vertical circular coils
 # (dofs: current, radius, centre, orientation; circumference <= 4.0 m), 'T' design A's 2 T coils
-# (frozen shape; dofs: current, translation, rotation), 'L' design A's 4 L coils (likewise), or
-# 'none'. Single-null only. The coil-coil distance, the vessel clearance, the keep-out cylinder,
+# (frozen shape; dofs: current, translation, rotation), 'LL' design A's 4 L coils (likewise),
+# 'LT' / 'TL' one L and one T per half period (2 L + 2 T coils), or 'none'. Single-null only. The coil-coil distance, the vessel clearance, the keep-out cylinder,
 # the current bound and the force bound apply to them as to the modular coils. Last field of the
 # folder name (_extra=<kind>, absent for none) but NOT part of the perturbation seed: attempt k
 # starts from the same perturbed modular coils for every kind.
 parser.add_argument("--extra-coils", type=str, default="none", choices=list(extra_coils.EXTRA_KINDS))
+# --length-max / --curvature-max / --msc-max / --clearance: override the yaml's coil length bound
+# (m), maximum curvature bound (1/m) and mean squared curvature bound (1/m^2), and the coil-to-vessel
+# clearance (m, 0.12 when not given). They are written into the config, hence into
+# design_opt_final_*.yaml, which boozer_risk_opt.py reads: the double step inherits them. Each one
+# given is a field of the folder name (_len=, _kap=, _msc=, _clr=, absent when not given) but NOT
+# part of the perturbation seed: attempt k starts from the same perturbed coils for every value.
+parser.add_argument("--length-max", type=float, default=None)
+parser.add_argument("--curvature-max", type=float, default=None)
+parser.add_argument("--msc-max", type=float, default=None)
+parser.add_argument("--clearance", type=float, default=None)
 
 args = parser.parse_args()
 
@@ -156,6 +166,11 @@ SEED_NAME = (f"margin={margin_str}_well={well_str}_Z={Z_weight}_onvessel={on_ves
              f"_mono={mono}_null={null_type}_num_aux={num_aux}_AR={args.AR}"
              f"_attempt={attempt}_force={args.force}_monothr={args.mono_thr}")
 TASK_NAME = SEED_NAME + f"_elong={args.elongation}" + ("" if args.extra_coils == 'none' else f"_extra={args.extra_coils}")
+# overridden coil-geometry / clearance bounds, only those given (see --length-max ...)
+for _key, _val in (("len", args.length_max), ("kap", args.curvature_max), ("msc", args.msc_max),
+                   ("clr", args.clearance)):
+    if _val is not None:
+        TASK_NAME += f"_{_key}={_val:g}"
 DEVICE_ID = zlib.crc32(SEED_NAME.encode())
 OUT_DIR = f"./output/{TASK_NAME}/"
 print(f"Task: {TASK_NAME}")
@@ -298,8 +313,8 @@ else:
 config['COIL_ON_VESSEL_THRESHOLD'] = -0.001
 COIL_ON_VESSEL_THRESHOLD = config['COIL_ON_VESSEL_THRESHOLD']
 
-# leave enough space for trims
-config['COIL_CLEARANCE_THRESHOLD'] = 0.12
+# leave enough space for trims (0.12 m unless --clearance is given)
+config['COIL_CLEARANCE_THRESHOLD'] = 0.12 if args.clearance is None else args.clearance
 COIL_CLEARANCE_THRESHOLD = config['COIL_CLEARANCE_THRESHOLD']
 
 config['COIL_ON_VESSEL_WEIGHT'] = 1e-1 if on_vessel else 0.0
@@ -359,6 +374,12 @@ FIELDLINE_MEANDIST_THRESHOLD = config['FIELDLINE_MEANDIST_THRESHOLD']
 MODB_TARGET = config['MODB_TARGET']
 MR_TARGET = config['MAJOR_RADIUS_TARGET']
 COIL_TO_COIL_THRESHOLD = config['COIL_TO_COIL_THRESHOLD']
+# --length-max / --curvature-max / --msc-max override the yaml's bounds (and are saved with the
+# config, so the double step uses the same ones)
+for _key, _val in (('LENGTH_THRESHOLD', args.length_max), ('CURVATURE_THRESHOLD', args.curvature_max),
+                   ('MEAN_SQUARED_CURVATURE_THRESHOLD', args.msc_max)):
+    if _val is not None:
+        config[_key] = _val
 CURVATURE_THRESHOLD = config['CURVATURE_THRESHOLD']
 MEAN_SQUARED_CURVATURE_THRESHOLD = config['MEAN_SQUARED_CURVATURE_THRESHOLD']
 LENGTH_THRESHOLD = config['LENGTH_THRESHOLD']

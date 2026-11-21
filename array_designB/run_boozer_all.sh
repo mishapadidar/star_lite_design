@@ -5,11 +5,14 @@
 # Does NOT touch ceph -- the master decides what to copy back.
 #
 #   run_boozer_all.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
-#                     <vessel_id> <mono> <attempt> <null> [AR] [force] [mono_thr] [elongation] [extra]
+#                     <vessel_id> <mono> <attempt> <null> [AR] [force] [mono_thr] [elongation] [extra] \
+#                     [geom]
 #
 # force: maximum coil force per unit length in N/m, or OFF (default) for none.
 # mono_thr: monodromy threshold of the boozer_all constraint (default 0.1).
 # elongation: upper bound on the near-axis elongation, or OFF (default) for none.
+# geom: overridden coil-geometry / clearance bounds, comma-separated key=value pairs among
+#   len (--length-max), kap (--curvature-max), msc (--msc-max), clr (--clearance), or - (default).
 # Exit status is boozer_all.py's; the master gates on the produced design json.
 set -uo pipefail
 
@@ -20,6 +23,21 @@ mono_thr="${13:-0.1}"
 elongation="${14:-OFF}"
 # extra coils (boozer_all.py --extra-coils): none (default), circ, T or L
 extra="${15:-none}"
+# overridden coil-geometry / clearance bounds (see the header), - for none
+geom="${16:--}"
+GEOM_OPTS=()
+if [ "$geom" != "-" ]; then
+  IFS=',' read -ra _pairs <<< "$geom"
+  for kv in "${_pairs[@]}"; do
+    case "${kv%%=*}" in
+      len) GEOM_OPTS+=(--length-max "${kv#*=}") ;;
+      kap) GEOM_OPTS+=(--curvature-max "${kv#*=}") ;;
+      msc) GEOM_OPTS+=(--msc-max "${kv#*=}") ;;
+      clr) GEOM_OPTS+=(--clearance "${kv#*=}") ;;
+      *) echo "ERROR: unknown geometry bound '$kv' in geom='$geom'"; exit 1 ;;
+    esac
+  done
+fi
 
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -65,4 +83,5 @@ fi
   --force "$force" \
   --mono-thr "$mono_thr" \
   --elongation "$elongation" \
-  --extra-coils "$extra"
+  --extra-coils "$extra" \
+  "${GEOM_OPTS[@]}"

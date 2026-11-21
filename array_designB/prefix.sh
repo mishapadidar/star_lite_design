@@ -12,12 +12,16 @@ set -uo pipefail
 #
 #   bash ./prefix.sh <margin> <well> <Z> <distance> <on_vessel> <config> \
 #                    <vessel_id> <mono> <null(DN|SN)> [num_aux] [AR] [attempt] [force] [mono_thr] [step] \
-#                    [elongation] [extra] [trace_min] [ec_max] [target] [pf_max]
+#                    [elongation] [extra] [geom] [trace_min] [ec_max] [target] [pf_max]
 #
 # elongation (16th): upper bound on the near-axis elongation, or OFF (default); a field of the
 # device name. extra (17th): extra coils of boozer_all.py --extra-coils, none (default), circ,
-# T or L; the field _extra=<kind> at the end of the device name (none: no field).
-# trace_min (18th, step=double only): lower bound on tr M of the config 1 X-point;
+# T, LL, LT or TL; the field _extra=<kind> at the end of the device name (none: no field).
+# geom (18th): overridden coil-geometry / clearance bounds of boozer_all.py, as comma-separated
+# key=value pairs among len (--length-max, m), kap (--curvature-max, 1/m), msc (--msc-max, 1/m^2)
+# and clr (--clearance, m), e.g. len=4.5,kap=10,msc=20,clr=0.07; - (default) for none. The fields
+# _len=.._kap=.._msc=.._clr=.. follow _extra in the device name.
+# trace_min (19th, step=double only): lower bound on tr M of the config 1 X-point;
 # when given, the double is named <num_aux=N name>_trmin=<bound>_double.
 #
 # Flow: boozer_all -> gate. If it passes, render the num_aux=0 device and copy it to
@@ -87,31 +91,49 @@ esac
 # for none. It is the last field of the folder name (task_name) but not part of the
 # perturbation seed: an attempt starts from the same coils for every bound.
 elong="${16:-OFF}"
-# Extra coils forwarded to boozer_all.py (--extra-coils): none (default), circ, T or L. The
+# Extra coils forwarded to boozer_all.py (--extra-coils): none (default), circ, T, LL, LT or TL. The
 # field _extra=<kind> ends the folder name (task_name; none: no field); not part of the seed.
 extra="${17:-none}"
 case "$extra" in
-  none|circ|T|L) ;;
-  *) echo "ERROR: extra must be none, circ, T or L (got '$extra')"; exit 1 ;;
+  none|circ|T|LL|LT|TL) ;;
+  *) echo "ERROR: extra must be none, circ, T, LL, LT or TL (got '$extra')"; exit 1 ;;
 esac
 EXTRA_FIELD=""; [ "$extra" != "none" ] && EXTRA_FIELD="_extra=${extra}"
+# Overridden coil-geometry / clearance bounds forwarded to boozer_all.py (see the header), or -
+# for none. GEOM_FIELD (_len=.._kap=.._msc=.._clr=.., in that order, values formatted with %g as
+# boozer_all.py does) follows _extra in the device name; not part of the perturbation seed.
+geom="${18:--}"
+GEOM_FIELD=""
+if [ "$geom" != "-" ]; then
+  GEOM_FIELD=$(python3 -c '
+import sys
+d = dict(kv.split("=", 1) for kv in sys.argv[1].split(","))
+bad = set(d) - {"len", "kap", "msc", "clr"}
+if bad:
+    sys.exit("unknown key(s) %s" % sorted(bad))
+print("".join("_%s=%g" % (k, float(d[k])) for k in ("len", "kap", "msc", "clr") if k in d))' "$geom")
+  if [ -z "$GEOM_FIELD" ]; then
+    echo "ERROR: geom must be - or key=value pairs among len, kap, msc, clr (got '$geom')"
+    exit 1
+  fi
+fi
 
 # step=double only: lower bound on tr M of the config 1 X-point (boozer_double_opt.py
 # --trace-min). Empty (default): the script's own 2 + mono_thr, and the task keeps the plain
 # <num_aux=N name>_double name. Otherwise the task is named <num_aux=N name>_trmin=<bound>_double,
 # so that the doubles of one device at several bounds run side by side.
-trace_min="${18:-}"
+trace_min="${19:-}"
 # step=double only: upper bound on E[C], the mean unfolding constant of the snowflake
 # (boozer_risk_opt.py --ec-max), or OFF for no bound. Empty (default): no bound and no field
 # in the name. Otherwise the field _ec=<bound> follows the trace field of the name:
 # <num_aux=N name>_trmin=<bound>_ec=<bound>_double. The bound applies to the E[C] chosen by
 # EC_SECTION (environment; default mean: the mean of E[C] over the toroidal sections).
-ec_max="${19:-}"
+ec_max="${20:-}"
 # step=double only: what is optimized (boozer_risk_opt.py --target): double (default: config 1
 # X-point with the aux coils off + config 2 snowflake) or snowflake (the snowflake
 # configuration alone; the trace bound then has no effect). A snowflake task gets the field
 # _target=snowflake before _double; the name of a double is unchanged.
-target="${20:-double}"
+target="${21:-double}"
 case "$target" in
   double|snowflake) ;;
   *) echo "ERROR: target must be double or snowflake (got '$target')"; exit 1 ;;
@@ -120,8 +142,11 @@ TARGET_FIELD=""; [ "$target" = "snowflake" ] && TARGET_FIELD="_target=snowflake"
 # step=double only: bound on the current of each auxiliary (PF) coil, in amperes
 # (boozer_risk_opt.py --aux-current-max). Empty (default): the script's own 5000 A and no
 # field in the name. Otherwise the field _pf=<amperes> follows the E[C] field.
-pf_max="${21:-}"
-DOUBLE_SUFFIX="${trace_min:+_trmin=${trace_min}}${ec_max:+_ec=${ec_max}}${pf_max:+_pf=${pf_max}}${TARGET_FIELD}_double"
+pf_max="${22:-}"
+# the relative E[C] mode (ec_max = f<factor>) names its first level _ec=f<factor>_level=0 (the next
+# ones, named by boozer_risk_opt.py, _level=1, 2, ...)
+EC_FIELD="${ec_max:+_ec=${ec_max}}"; case "$ec_max" in f*) EC_FIELD="${EC_FIELD}_level=0" ;; esac
+DOUBLE_SUFFIX="${trace_min:+_trmin=${trace_min}}${EC_FIELD}${pf_max:+_pf=${pf_max}}${TARGET_FIELD}_double"
 
 # polish and double start from a device already on ceph instead of running boozer_all
 FROM_CEPH=0
@@ -145,7 +170,7 @@ HOME_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 # Folder-name builder; must match boozer_all.py's TASK_NAME exactly so the device
 # IDs (and thus the perturbation seed) line up. Argument: num_aux.
 task_name() {
-  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}_force=${force}_monothr=${mono_thr}_elong=${elong}${EXTRA_FIELD}"
+  echo "margin=${margin_str}_well=${well_str}_Z=${Z}_onvessel=${on_vessel}_distance=${distance}_configID=${config}_vesselID=${vessel_id}_mono=${mono}_null=${null}_num_aux=${1}_AR=${AR}_attempt=${attempt}_force=${force}_monothr=${mono_thr}_elong=${elong}${EXTRA_FIELD}${GEOM_FIELD}"
 }
 
 # Shard folder name -> a <=256-bucket subdir (md5 prefix) so that no directory on
@@ -337,7 +362,7 @@ if [ "$FROM_CEPH" -eq 0 ]; then
 # ───────────────────── (1) initial optimization -> num_aux=0 ──────────────────
 bash run_boozer_all.sh \
   "$margin" "$well" "$Z" "$distance" "$on_vessel" \
-  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR" "$force" "$mono_thr" "$elong" "$extra"
+  "$config" "$vessel_id" "$mono" "$attempt" "$null" "$AR" "$force" "$mono_thr" "$elong" "$extra" "$geom"
 
 # boozer_all.py writes design_opt_final_<DEVICE_ID>.json (the device ID is in the
 # name); locate it by glob (one per device dir).
@@ -469,11 +494,20 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
   cp "$INIT_YAML" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
 
   DISC=0; [ "$MONO_CONSTRAINT" = "identity" ] && DISC=1
-  # trace_min (17th argument), when given, becomes boozer_risk_opt.py's --trace-min, and
-  # ec_max (18th), when given and not OFF, its --ec-max on the E[C] of EC_SECTION; both are
+  # trace_min (19th argument), when given, becomes boozer_risk_opt.py's --trace-min, and
+  # ec_max (20th), when given and not OFF, its --ec-max on the E[C] of EC_SECTION; both are
   # added to whatever DOUBLE_OPT_ARGS the environment already carries.
   EC_ARGS=""
-  if [ -n "$ec_max" ] && [ "$ec_max" != "OFF" ]; then
+  case "$ec_max" in
+    f*)  # RELATIVE continuation (ec_max = f<factor>, e.g. f0.9): bound = factor x the E[C] of the
+         # starting design, then factor x the E[C] reached by each level, down to EC_FLOOR
+         # (environment, default 0.5; boozer_risk_opt.py --ec-factor / --ec-floor)
+      EC_ARGS=" --ec-factor ${ec_max#f} --ec-floor ${EC_FLOOR:-0.5} --ec-section ${EC_SECTION:-mean}"
+      # initial E[C] weight 0.1 unless EC_WEIGHT0 says otherwise (10, the yaml's, left levels stuck)
+      EC_WEIGHT0="${EC_WEIGHT0:-0.1}"
+      REL_LEVELS=1 ;;  # each level is post-processed as soon as it ends, then the next one is run (below)
+  esac
+  if [ -z "$EC_ARGS" ] && [ -n "$ec_max" ] && [ "$ec_max" != "OFF" ]; then
     EC_ARGS=" --ec-max $ec_max --ec-section ${EC_SECTION:-mean}"
     # continuation of the bound on E[C]: after the level ec_max, the next bounds of
     # EC_CONTINUATION (environment; default 0.9 down to 0.5), each level restarting from the
@@ -482,11 +516,14 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
     EC_CONTINUATION="${EC_CONTINUATION-0.9,0.8,0.7,0.6,0.5}"
     [ -n "$EC_CONTINUATION" ] && EC_ARGS="${EC_ARGS} --ec-continuation $EC_CONTINUATION"
   fi
-  # target (19th argument): snowflake = the snowflake configuration alone
+  # initial weight of the E[C] penalty, passed on to every level (EC_WEIGHT0, environment;
+  # default: the yaml's, else 10)
+  [ -n "$EC_ARGS" ] && [ -n "${EC_WEIGHT0:-}" ] && EC_ARGS="${EC_ARGS} --ec-weight $EC_WEIGHT0"
+  # target (21st argument): snowflake = the snowflake configuration alone
   [ "$target" = "snowflake" ] && EC_ARGS="${EC_ARGS} --target snowflake"
-  # pf_max (20th argument): bound on the aux (PF) coil currents, in amperes
+  # pf_max (22nd argument): bound on the aux (PF) coil currents, in amperes
   [ -n "$pf_max" ] && EC_ARGS="${EC_ARGS} --aux-current-max $pf_max"
-  DOUBLE_OPT_ARGS="${DOUBLE_OPT_ARGS:-}${trace_min:+ --trace-min $trace_min}${EC_ARGS}" \
+  EC_CONT_NO_EXEC="${REL_LEVELS:-0}" DOUBLE_OPT_ARGS="${DOUBLE_OPT_ARGS:-}${trace_min:+ --trace-min $trace_min}${EC_ARGS}" \
     bash run_double.sh "$DOUBLE_DIR/$INIT_JSON_BASE" "$num_aux" "$DISC" || true
   rm -f "$DOUBLE_DIR/$INIT_JSON_BASE" "$DOUBLE_DIR/$(basename "$INIT_YAML")"
 
@@ -501,7 +538,13 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
     CONT_DIRS="$(ls -d ./output/${CONT_BASE}_ec=*_from=*${CONT_SUFFIX} 2>/dev/null)"
     [ -n "$CONT_DIRS" ] && echo "E[C] continuation levels: $(echo $CONT_DIRS | wc -w) after ec=$ec_max"
   fi
-  for DOUBLE_DIR in "$DOUBLE_DIR" $CONT_DIRS; do
+  # Levels to post-process, in order: the first one, the fixed-continuation levels the script has
+  # already run (CONT_DIRS) and, in the relative mode (REL_LEVELS=1), each next level, which the
+  # end of this loop runs once the previous level is post-processed (the script left its command
+  # in continue_argv.txt instead of restarting itself).
+  LEVEL_QUEUE=("$DOUBLE_DIR" $CONT_DIRS)
+  while [ ${#LEVEL_QUEUE[@]} -gt 0 ]; do
+  DOUBLE_DIR="${LEVEL_QUEUE[0]}"; LEVEL_QUEUE=("${LEVEL_QUEUE[@]:1}")
   echo "=== level: $(basename "$DOUBLE_DIR") ==="
   DOUBLE_JSON="$(ls "$DOUBLE_DIR"/design_double_final_*.json 2>/dev/null | head -1)"
   if [ -z "$DOUBLE_JSON" ]; then
@@ -547,6 +590,15 @@ if [ -n "$MONO_CONSTRAINT" ] && [ "$STEP" = "double" ]; then
         || echo "WARNING: $? analysis step(s) of the double failed"
       sync_dir "$DOUBLE_DIR"
     fi
+  fi
+  # relative continuation: this level is post-processed (and on ceph if in spec); run the next one,
+  # whose command the script left here (only after an in-spec level above the floor)
+  NEXT_ARGV="$DOUBLE_DIR/continue_argv.txt"
+  if [ -f "$NEXT_ARGV" ]; then
+    NEXT_DIR="$(grep -x -A1 -- '--out-dir' "$NEXT_ARGV" | tail -1)"
+    echo "=== relative E[C] continuation: running the next level $(basename "$NEXT_DIR") ==="
+    EC_CONT_NO_EXEC=1 bash run_double.sh --argv-file "$NEXT_ARGV" || true
+    LEVEL_QUEUE+=("$NEXT_DIR")
   fi
   done   # levels of the E[C] continuation
 fi

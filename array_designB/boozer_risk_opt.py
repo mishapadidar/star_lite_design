@@ -539,6 +539,25 @@ parser.add_argument("--ec-continuation", default="", metavar="B1,B2,...",
                          "just written, with --ec-max B1 and the rest of the list, in the sibling directory "
                          "whose name has _ec=<B1>_from=<this bound> in place of _ec=<this bound>; it stops at "
                          "the first level that ends out of spec. Each level is a full device directory.")
+parser.add_argument("--ec-weight", type=float, default=None,
+                    help="initial weight of the E[C] bound penalty, in place of the yaml's EC_WEIGHT (default: "
+                         "the yaml's, else 10). The continuation passes the weight its first level started "
+                         "with, so that each level restarts from that weight and not from the weight escalated "
+                         "by the previous level (with the escalated weight and the new, lower bound, the first "
+                         "BFGS steps of the level failed and it never moved)")
+parser.add_argument("--ec-factor", type=float, default=None,
+                    help="RELATIVE continuation of the bound on E[C]: without --ec-max, this level's bound is "
+                         "ec_factor x the E[C] of the starting design (at least --ec-floor); when the level ends "
+                         "in spec, the script restarts itself (exec) with the bound ec_factor x the E[C] it "
+                         "reached, and so on, until a level ends out of spec or the next bound is below "
+                         "--ec-floor. Replaces the fixed list of --ec-continuation (e.g. 0.9: 10%% lower per level)")
+parser.add_argument("--ec-floor", type=float, default=0.5,
+                    help="with --ec-factor: smallest bound on E[C] (default 0.5)")
+parser.add_argument("--ec-level", type=int, default=0,
+                    help="with --ec-factor: rank of this level in the relative continuation (0 = first, named "
+                         "_ec=f<factor>_level=0 by prefix.sh; the continuation passes it on, +1, and names the "
+                         "next levels _ec=f<factor>_level=<rank>). Recorded with the factor in the yaml (EC_FACTOR, "
+                         "EC_FLOOR, EC_LEVEL) and in summary.txt (unfolding_EC_factor, unfolding_EC_level)")
 args = parser.parse_args()
 SNOW_ONLY = args.target == "snowflake"
 
@@ -577,11 +596,12 @@ else:
 config['NUM_AUX'] = num_aux            # record it in the (output) yaml
 config['DISCRIMINANT'] = discriminant  # record it in the (output) yaml
 # bound on E[C]: --ec-max, or none (E[C] is then reported but not part of the objective)
-EC_ENABLED = args.ec_max is not None
-EC_MAX = float(args.ec_max) if EC_ENABLED else None
-if EC_ENABLED:
+EC_ENABLED = args.ec_max is not None or args.ec_factor is not None
+# with --ec-factor and no --ec-max, the bound is set below from the E[C] of the starting design
+EC_MAX = float(args.ec_max) if args.ec_max is not None else None
+if EC_MAX is not None:
     config['EC_MAX'] = EC_MAX
-else:
+elif not EC_ENABLED:
     config.pop('EC_MAX', None)
 config['RISK_LENGTH_SCALE'] = float(args.risk_length_scale)
 # N_DEP_CURRENTS (number of dependent aux currents = number of monodromy constraints
@@ -1229,7 +1249,12 @@ else:
 # quadratic penalty with its own escalating weight, like the other inequality constraints.
 # Without --ec-max there is no bound: E[C] is only reported (tables, summary), the penalty is
 # not built and nothing of it enters the objective.
+if EC_ENABLED and args.ec_weight is not None:
+    config['EC_WEIGHT'] = args.ec_weight      # --ec-weight: start from this weight, not the yaml's
 EC_WEIGHT = Weight(config.setdefault('EC_WEIGHT', 10.0)) if EC_ENABLED else Weight(0.0)
+# the weight this run starts with (before the pre-scaling and the x10 escalations): the E[C]
+# continuation passes it on to the next level (--ec-weight)
+EC_WEIGHT_START = EC_WEIGHT.value
 # --ec-section: the bound applies to E[C] in ONE section (the fraction T of the full turn of the
 # snowflake field line, default 0: phi = 0) or to its MEAN over the sections. Recorded in the
 # yaml, so that a restart keeps the choice.
@@ -1246,6 +1271,18 @@ EC = ExactMeanUnfoldingC(sing_fls[0], sing_fls[0].biotsavart,
                          length_scale=float(args.risk_length_scale), frame='RZ', phi0=EC_T)
 EC_PHI = PhiMeanUnfoldingC(EC)
 EC_OBJ = EC_PHI if EC_USE_MEAN else EC
+if EC_ENABLED and EC_MAX is None:   # --ec-factor without --ec-max: bound relative to the starting E[C]
+    _ec0 = float(EC_OBJ.J())
+    EC_MAX = round(max(args.ec_floor, args.ec_factor * _ec0), 3)
+    config['EC_MAX'] = EC_MAX
+    print(f"relative bound on E[C]: {args.ec_factor:g} x {_ec0:.6f} (starting design) -> E[C] <= {EC_MAX}")
+# the mode of the bound and the rank of this level, in the yaml (and summary.txt, at the end): each
+# level says by itself how it was obtained, with no need to rebuild its continuation chain
+if args.ec_factor is not None:
+    config['EC_FACTOR'], config['EC_FLOOR'], config['EC_LEVEL'] = args.ec_factor, args.ec_floor, args.ec_level
+else:
+    for _k in ('EC_FACTOR', 'EC_FLOOR', 'EC_LEVEL'):
+        config.pop(_k, None)
 J_EC = QuadraticPenalty(EC_OBJ, EC_MAX, 'max') if EC_ENABLED else None
 _C0 = EC.values()
 print(f"E[C], exact expectation over the GP perturbations (L = {args.risk_length_scale}), in the section "
@@ -2464,6 +2501,9 @@ if EC_ENABLED:
     final_metrics['unfolding_EC'] = (ec_value, EC_MAX, ec_err if EC_WEIGHT.value != 0. else 0.0)
 else:
     final_metrics['unfolding_EC'] = (ec_value, None, None)   # no bound: reported only
+if args.ec_factor is not None:   # relative continuation: its factor and the rank of this level (reported only)
+    final_metrics['unfolding_EC_factor'] = (args.ec_factor, None, None)
+    final_metrics['unfolding_EC_level'] = (args.ec_level, None, None)
 # what the bound applied to: 1 = the mean over the sections, 0 = the section at unfolding_EC_section_t
 final_metrics['unfolding_EC_bound_on_mean'] = (1.0 if EC_USE_MEAN else 0.0, None, None)
 final_metrics['unfolding_EC_section_t'] = (EC_T, None, None)
@@ -2660,34 +2700,57 @@ for _k, _name in enumerate(('config2',) if SNOW_ONLY else ('config1', 'config2')
 # the design it has just written, with the next bound, in the sibling directory named with
 # _ec=<next>_from=<this>; the first level out of spec ends the continuation.
 _next = [b.strip() for b in str(args.ec_continuation).split(',') if b.strip()]
+if args.ec_factor is not None and EC_ENABLED:
+    # relative continuation (--ec-factor): the only next bound is ec_factor x the E[C] this level reached
+    _nb = round(args.ec_factor * ec_value, 3) if np.isfinite(ec_value) else float('nan')
+    _next = [f'{_nb:g}'] if np.isfinite(_nb) and _nb >= args.ec_floor else []
+    if not _next:
+        print(f"E[C] continuation: the next relative bound {_nb:g} is below the floor {args.ec_floor:g} "
+              f"(or undefined): stopping", flush=True)
 if _next and EC_ENABLED:
     import re
     import sys
     _cur_dir = OUT_DIR.rstrip('/')
     _cur_name = os.path.basename(_cur_dir)
-    _m = re.search(r'_ec=([^_]+)(_from=[^_]+)?_', _cur_name)
-    _cur_bound = _m.group(1) if _m else f'{EC_MAX:g}'
+    _m = re.search(r'_ec=([^_]+)(_from=[^_]+)?(_level=\d+)?_', _cur_name)
+    _cur_bound = f'{EC_MAX:g}' if (args.ec_factor is not None or not _m) else _m.group(1)
     if max_rel_err > 0.001:
         print(f"E[C] continuation stopped: level E[C] <= {_cur_bound} ended out of spec "
               f"(max rel err {max_rel_err:.3e}); the next bounds {_next} are not run", flush=True)
     else:
         _b1, _rest = _next[0], _next[1:]
-        _new_name = (_cur_name[:_m.start()] + f'_ec={_b1}_from={_cur_bound}_' + _cur_name[_m.end():] if _m
-                     else _cur_name + f'_ec={_b1}_from={_cur_bound}')
+        # relative continuation: the levels are named _ec=f<factor>_level=<rank> (their bound is in the yaml
+        # and summary.txt); fixed continuation: _ec=<next bound>_from=<this bound>
+        _tag = (f'_ec=f{args.ec_factor:g}_level={args.ec_level + 1}' if args.ec_factor is not None
+                else f'_ec={_b1}_from={_cur_bound}')
+        _new_name = (_cur_name[:_m.start()] + _tag + '_' + _cur_name[_m.end():] if _m else _cur_name + _tag)
         _new_dir = os.path.join(os.path.dirname(_cur_dir), _new_name)
         os.makedirs(_new_dir, exist_ok=True)
         _argv = [sys.executable, os.path.abspath(__file__), OUT_DIR + f'design_double_final_{DEVICE_TAG}.json',
                  '--ec-max', _b1, '--ec-section', str(config['EC_SECTION']), '--trace-min', str(TRACE_MIN),
                  '--target', args.target, '--risk-length-scale', str(args.risk_length_scale),
                  '--stages', str(args.stages), '--maxiter', str(args.maxiter), '--out-dir', _new_dir]
+        if args.ec_weight is not None:   # restart from the starting weight, not the escalated one
+            _argv += ['--ec-weight', repr(EC_WEIGHT_START)]
         if args.aux_current_max is not None:
             _argv += ['--aux-current-max', str(args.aux_current_max)]
         if args.discriminant is not None:
             _argv += ['--discriminant', str(args.discriminant)]
         if _rest:
             _argv += ['--ec-continuation', ','.join(_rest)]
+        if args.ec_factor is not None:   # relative continuation: the next level goes on the same way
+            _argv += ['--ec-factor', repr(args.ec_factor), '--ec-floor', repr(args.ec_floor),
+                      '--ec-level', str(args.ec_level + 1)]
         print(f"E[C] continuation: level E[C] <= {_cur_bound} in spec; next level E[C] <= {_b1} "
               f"(then {_rest if _rest else 'none'}) in {_new_dir}", flush=True)
-        print("CONTINUATION_EXEC " + ' '.join(_argv), flush=True)
-        sys.stdout.flush(); sys.stderr.flush()
-        os.execv(sys.executable, _argv)
+        if os.environ.get('EC_CONT_NO_EXEC') == '1':
+            # the caller (prefix.sh, relative continuation) post-processes this level first, then runs
+            # the next one itself: leave it the command (one argument per line, without the
+            # interpreter) in this level's directory, and stop here
+            with open(OUT_DIR + 'continue_argv.txt', 'w') as f:
+                f.write('\n'.join(_argv[1:]) + '\n')
+            print(f"E[C] continuation: next level left to the caller ({OUT_DIR}continue_argv.txt)", flush=True)
+        else:
+            print("CONTINUATION_EXEC " + ' '.join(_argv), flush=True)
+            sys.stdout.flush(); sys.stderr.flush()
+            os.execv(sys.executable, _argv)

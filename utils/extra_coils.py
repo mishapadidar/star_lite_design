@@ -9,9 +9,14 @@
   T     design A's 2 T coils (coil 4 of designs/designA/designA_after_scaled.json, in the YZ
         plane, and its copy): SHAPE frozen, only a rigid motion is free (RigidCurve), dofs
         [tx, ty, tz, wx, wy, wz] (translation, rotation vector about the coil centroid).
-  L     design A's 4 L coils (its modular coils 0-3): shape frozen, rigid motion (RigidCurve).
+  LL    design A's 4 L coils (its modular coils 0-3): shape frozen, rigid motion (RigidCurve).
+  LT    per half period, one L coil (design A's coil 0, phi = 34 deg) then one T coil (phi = 135
+        deg, as in T): 2 L + 2 T coils on the torus.
+  TL    per half period, one T coil (phi = 45 deg: design A's T turned by -45 deg) then one L
+        coil (design A's coil 3, phi = 146 deg): the mirror image of LT (the single-null device
+        is not stellarator symmetric, so LT and TL differ).
 
-The base coils (circ: 2, T: 1, L: 2) are expanded by coils_via_symmetries(nfp=2, stellsym=False),
+The base coils (circ: 2, T: 1, LL, LT, TL: 2) are expanded by coils_via_symmetries(nfp=2, stellsym=False),
 each with its copy rotated by pi about z, so the set keeps the nfp=2 symmetry of the single-null
 Boozer surfaces; each base has its own current, starting at ~0 (EXTRA_I0 = 1 nA), so the initial field (and the
 initial designB surface) is unchanged. The set is added to the device by
@@ -26,9 +31,10 @@ plasma is 15 cm from the designB coils: they cover every toroidal angle.
   T     design A's position rotated by 45 deg about z (phi = 135, 315 deg): 2.2 cm from the
         modular coils, 5.5 cm from the surface, 5.0 cm inside the vessel (at design A's own
         position, phi = 90 deg: 3.8 cm, 13 cm, 2.3 cm inside); the penalties push them out;
-  L     design A's own position (phi = +-34, +-146 deg): 3.7 cm from the modular coils, 18.9 cm
+  LL    design A's own position (phi = +-34, +-146 deg): 3.7 cm from the modular coils, 18.9 cm
         from the surface, 10.7 cm outside the vessel (rotated by 45 or 90 deg they would be
-        interlocked with designB's coils).
+        interlocked with designB's coils);
+  LT,TL each coil where it is in LL or T (the T of TL at phi = 45 deg instead of 135).
 """
 import functools
 import os
@@ -39,7 +45,7 @@ from simsopt.field import Current, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo.curve import JaxCurve
 
-EXTRA_KINDS = ('none', 'circ', 'T', 'L')
+EXTRA_KINDS = ('none', 'circ', 'T', 'LL', 'LT', 'TL')
 CIRC_MAX = 4.0                      # bound on the circumference of a circular coil (m)
 CIRC_PHIS = (45.0, 135.0)           # base circles: vertical, in these planes phi (deg); copies at +180
 CIRC_R0 = 0.60                      # their centre: major radius (m), at z = 0
@@ -51,6 +57,10 @@ T_PHI_SHIFT = 45.0                  # initial rotation of the T coils about z (d
 L_COIL_INDICES = (0, 1)             # design A: L coil 0 (phi = 34 deg), its stellarator image 1
                                     # (phi = -34 deg); 2 and 3 are their pi-rotated copies
 L_PHI_SHIFT = 0.0                   # initial rotation of the L coils about z (deg)
+# LT: L coil 0 (phi = 34 deg) + the T turned by +45 deg (phi = 135 deg); TL: the T turned by
+# -45 deg (phi = 45 deg) + L coil 3 (phi = 146 deg, the pi-rotated copy of coil 1)
+LT_BASES = (('L', 0, 0.0), ('T', T_COIL_INDEX, 45.0))
+TL_BASES = (('T', T_COIL_INDEX, -45.0), ('L', 3, 0.0))
 # Initial current of every extra base coil (A): 1 nA rather than exactly 0, because the gradient
 # of simsopt's LpCurveForce is NaN for a target coil whose current is exactly 0 (the norm of a zero
 # force; checked on 2026-11-18: finite for any current from 1 mA down to 1 pA), and the term is in
@@ -217,8 +227,10 @@ def make_extra_curves(kind, quadpoints):
         return curves
     if kind == 'T':
         return [_design_a_rigid(T_COIL_INDEX, quadpoints, T_PHI_SHIFT)]
-    if kind == 'L':
+    if kind == 'LL':
         return [_design_a_rigid(i, quadpoints, L_PHI_SHIFT) for i in L_COIL_INDICES]
+    if kind in ('LT', 'TL'):
+        return [_design_a_rigid(i, quadpoints, shift) for _, i, shift in (LT_BASES if kind == 'LT' else TL_BASES)]
     raise ValueError(f"unknown extra coil kind {kind!r} (expected one of {EXTRA_KINDS[1:]})")
 
 

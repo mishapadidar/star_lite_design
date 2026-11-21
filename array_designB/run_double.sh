@@ -46,4 +46,11 @@ fi
 # DOUBLE_OPT_ARGS (optional, environment): extra options, e.g. "--stages 1 --maxiter 3" for
 # a quick end-to-end test, or the bounds that prefix.sh adds (--trace-min, --ec-max with
 # --ec-section). Without --ec-max, E[C] is only reported.
+# run_double.sh --argv-file FILE: the next level of a relative E[C] continuation, whose command (the
+# script and its arguments, one per line) the previous level left in FILE (prefix.sh runs it)
+if [ "$design_json" = "--argv-file" ]; then
+  mapfile -t LEVEL_ARGS < "$num_aux"
+  "${RUN_PY[@]}" "${LEVEL_ARGS[@]}"
+  exit $?
+fi
 "${RUN_PY[@]}" ./boozer_risk_opt.py "$design_json" --num-aux "$num_aux" --discriminant "${3:-0}" ${DOUBLE_OPT_ARGS:-}

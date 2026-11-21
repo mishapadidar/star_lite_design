@@ -40,10 +40,11 @@ import time
 # prefix.sh positional arguments, 0-based here:
 #   0 margin  1 well  2 Z  3 distance  4 on_vessel  5 config  6 vessel_id  7 mono  8 null
 #   9 num_aux  10 AR  11 attempt  12 force  13 mono_thr  14 step  15 elongation  16 extra coils
-# (an 18th, trace_min, then ec_max, target and pf_max, are appended by make_cmd() to the
+#   17 geom (overridden coil-geometry / clearance bounds, e.g. len=4.5,kap=10,msc=20,clr=0.07, or -)
+# (a 19th, trace_min, then ec_max, target and pf_max, are appended by make_cmd() to the
 # double tasks)
-NUM_AUX, ATTEMPT, STEP, ELONG, EXTRA = 9, 11, 14, 15, 16
-N_ARGS = 17
+NUM_AUX, ATTEMPT, STEP, ELONG, EXTRA, GEOM = 9, 11, 14, 15, 16, 17
+N_ARGS = 18
 
 # Messages that prefix.sh prints when a step ends (any outcome), searched in the tail of
 # the task log. A task killed mid-way (job cancelled) has none of them.
@@ -63,19 +64,19 @@ TAIL_BYTES = 1 << 16
 
 # A double task run with its own bound on tr M of the config 1 X-point (--trace-min) is the
 # step "double@<bound>", e.g. "double@2.2": prefix.sh gets step=double and the bound as its
-# 18th argument, and names the task <num_aux=N name>_trmin=<bound>_double.
+# 19th argument, and names the task <num_aux=N name>_trmin=<bound>_double.
 # With a bound on E[C] as well (--ec-max, a number or OFF) the step is "double@<bound>@<ec>",
-# e.g. "double@2.05@0.8": the E[C] bound is prefix.sh's 19th argument and the task is named
+# e.g. "double@2.05@0.8": the E[C] bound is prefix.sh's 20th argument and the task is named
 # <num_aux=N name>_trmin=<bound>_ec=<ec>_double.
 def step_base(step):
     return step.partition("@")[0]
 
 
 # With a target as well (--target double | snowflake) the step is "double@<bound>@<ec>@<target>":
-# the target is prefix.sh's 20th argument, and a snowflake task (the snowflake configuration
+# the target is prefix.sh's 21st argument, and a snowflake task (the snowflake configuration
 # alone) gets the field _target=snowflake before _double; the name of a double is unchanged.
 # With a bound on the aux (PF) coil currents as well (--pf-max, amperes) the step is
-# "double@<bound>@<ec>@<target>@<pf>": the bound is prefix.sh's 21st argument and the name gets
+# "double@<bound>@<ec>@<target>@<pf>": the bound is prefix.sh's 22nd argument and the name gets
 # the field _pf=<amperes> after the E[C] field.
 def step_parts(step):
     """(base, trace bound or '', E[C] bound or '', target or '', PF current bound or '') of a step."""
@@ -88,7 +89,9 @@ def step_suffix(step):
     base, tmin, ec, target, pf = step_parts(step)
     if not tmin:
         return POST_STEPS[base][0]
-    return "_trmin=%s%s%s%s_double" % (tmin, "_ec=%s" % ec if ec else "", "_pf=%s" % pf if pf else "",
+    # a relative E[C] task (ec = f<factor>) is named ..._ec=f<factor>_level=0_... (prefix.sh's EC_FIELD)
+    ec_field = ("_ec=%s" % ec + ("_level=0" if ec.startswith("f") else "")) if ec else ""
+    return "_trmin=%s%s%s%s_double" % (tmin, ec_field, "_pf=%s" % pf if pf else "",
                                        "_target=snowflake" if target == "snowflake" else "")
 
 
@@ -98,16 +101,19 @@ def log(msg):
 
 def split_cmd(cmd):
     """(head, args) of a task line: head = the tokens up to and including prefix.sh,
-    args = its 17 positional arguments (a line without the 16th, the elongation bound, gets
-    OFF; a line without the 17th, the extra coils, gets none)."""
+    args = its 18 positional arguments (a line without the 16th, the elongation bound, gets
+    OFF; a line without the 17th, the extra coils, gets none; a line without the 18th, the
+    geometry bounds, gets -)."""
     toks = cmd.split()
     for k, t in enumerate(toks):
         if t.endswith("prefix.sh"):
             args = toks[k + 1:]
-            if len(args) == N_ARGS - 2:
+            if len(args) == N_ARGS - 3:
                 args.append("OFF")
-            if len(args) == N_ARGS - 1:
+            if len(args) == N_ARGS - 2:
                 args.append("none")
+            if len(args) == N_ARGS - 1:
+                args.append("-")
             if len(args) != N_ARGS:
                 raise SystemExit("expected %d prefix.sh arguments, got %d in: %s" % (N_ARGS, len(args), cmd))
             return toks[:k + 1], args
@@ -126,14 +132,23 @@ def well_str(w):
     return "OFF" if w == "OFF" else str(float(w))
 
 
+def geom_field(g):
+    """prefix.sh's GEOM_FIELD: _len=.._kap=.._msc=.._clr=.. (in that order, %g) of a geom
+    argument, '' for -."""
+    if g == "-":
+        return ""
+    d = dict(kv.split("=", 1) for kv in g.split(","))
+    return "".join("_%s=%g" % (k, float(d[k])) for k in ("len", "kap", "msc", "clr") if k in d)
+
+
 def task_name(args, num_aux):
     """Device folder name, as built by prefix.sh's task_name() (must match it exactly)."""
     a = args
     return ("margin=%s_well=%s_Z=%s_onvessel=%s_distance=%s_configID=%s_vesselID=%s_mono=%s"
-            "_null=%s_num_aux=%s_AR=%s_attempt=%s_force=%s_monothr=%s_elong=%s%s"
+            "_null=%s_num_aux=%s_AR=%s_attempt=%s_force=%s_monothr=%s_elong=%s%s%s"
             % (("%.2f" % float(a[0])).replace(".", "p"), well_str(a[1]), a[2], a[4], a[3], a[5],
                a[6], a[7], a[8], num_aux, a[10], a[11], a[12], a[13], a[ELONG],
-               "" if a[EXTRA] == "none" else "_extra=%s" % a[EXTRA]))
+               "" if a[EXTRA] == "none" else "_extra=%s" % a[EXTRA], geom_field(a[GEOM])))
 
 
 def shard(name):
@@ -215,7 +230,10 @@ def main():
                     help="upper bounds on E[C], the mean unfolding constant of the snowflake, for "
                          "the double step: one double task per trace bound and per E[C] bound "
                          "(boozer_risk_opt.py --ec-max; OFF = no bound), named "
-                         "..._trmin=<bound>_ec=<bound>_double. Needs --trace-min")
+                         "..._trmin=<bound>_ec=<bound>_double; f<factor> (e.g. f0.9) = the RELATIVE "
+                         "continuation (boozer_risk_opt.py --ec-factor: each level bounded by factor x "
+                         "the E[C] reached by the previous one), named ..._ec=f<factor>_level=0_... "
+                         "(its next levels _level=1, 2, ...). Needs --trace-min")
     ap.add_argument("--target", nargs="+", default=[], choices=["double", "snowflake"],
                     help="what the double step optimizes (boozer_risk_opt.py --target): double = both "
                          "configurations, snowflake = the snowflake configuration alone, named "
@@ -250,7 +268,7 @@ def main():
     # with --ec-max as well, one "double@<bound>@<ec>" step per (trace bound, E[C] bound)
     for e in opts.ec_max:
         if e != "OFF":
-            float(e)   # a number or OFF, kept as typed: it goes into the task name
+            float(e[1:] if e.startswith("f") else e)   # a number, f<factor> or OFF, kept as typed: it goes into the task name
     if opts.ec_max and not opts.trace_min:
         raise SystemExit("--ec-max needs --trace-min (the E[C] bound follows the trace bound "
                          "in prefix.sh's arguments)")
